@@ -76,3 +76,24 @@ def test_single_concurrency():
     for jid in ids:
         assert q.get(jid).status == "done"
     assert running["max"] == 1  # 任意时刻至多一个在推理
+
+
+def test_unsubscribe_removes_channel():
+    q = JobQueue(FakeBackend())
+    ch = q.subscribe("job1")
+    assert q._subscribers["job1"] == [ch]
+    q.unsubscribe("job1", ch)
+    assert "job1" not in q._subscribers  # 列表清空后连键一并删除
+
+
+def test_unsubscribe_keeps_other_channels():
+    q = JobQueue(FakeBackend())
+    ch1 = q.subscribe("job1")
+    ch2 = q.subscribe("job1")
+    q.unsubscribe("job1", ch1)
+    assert q._subscribers["job1"] == [ch2]
+
+
+def test_unsubscribe_unknown_job_id_is_noop():
+    q = JobQueue(FakeBackend())
+    q.unsubscribe("no-such-job", object())  # 不应抛异常

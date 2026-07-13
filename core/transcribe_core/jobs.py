@@ -53,6 +53,17 @@ class JobQueue:
             self._subscribers.setdefault(job_id, []).append(ch)
         return ch
 
+    def unsubscribe(self, job_id: str, ch) -> None:
+        """摘除某个订阅通道（job 达终态或 WS 连接结束时调用），避免 _subscribers 无界增长。"""
+        with self._lock:
+            chans = self._subscribers.get(job_id)
+            if not chans:
+                return
+            if ch in chans:
+                chans.remove(ch)
+            if not chans:
+                del self._subscribers[job_id]
+
     def submit_async(self, audio_path: str) -> str:
         """提交任务并立即返回 job_id，实际转写在后台线程执行，可通过 subscribe 拿进度。"""
         jid = f"job{next(_ids)}"

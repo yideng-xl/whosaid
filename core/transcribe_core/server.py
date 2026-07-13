@@ -86,15 +86,17 @@ def create_app(queue: JobQueue, registry: ModelRegistry) -> FastAPI:
     @app.websocket("/ws/jobs/{job_id}")
     async def ws_job(websocket: WebSocket, job_id: str):
         await websocket.accept()
-        ch = queue.subscribe(job_id)
-        # 先推一次当前状态（可能已完成）
         job = queue.get(job_id)
-        if job is not None:
+        if job is None:
+            # job 不存在：直接关闭，不订阅、不进入 run_in_threadpool(ch.get) 死等
+            await websocket.close()
+            return
+        ch = queue.subscribe(job_id)
+        try:
+            # 先推一次当前状态（可能已完成）
             await websocket.send_json({"status": job.status, "progress": job.progress, "error": job.error})
             if job.status in ("done", "failed"):
-                await websocket.close()
                 return
-        try:
             while True:
                 msg = await run_in_threadpool(ch.get)
                 await websocket.send_json(msg)
@@ -103,6 +105,8 @@ def create_app(queue: JobQueue, registry: ModelRegistry) -> FastAPI:
         except WebSocketDisconnect:
             pass
         finally:
+            # job 达终态或连接结束（含客户端主动断开）都要摘除订阅通道，避免 _subscribers 无界增长
+            queue.unsubscribe(job_id, ch)
             await websocket.close()
 
     return app
