@@ -28,9 +28,17 @@ class Job:
 
 
 class JobQueue:
-    def __init__(self, backend: InferenceBackend, language: str | None = "zh",
+    def __init__(self, backend: InferenceBackend | None = None, *,
+                 backend_factory: Callable[[str, str], InferenceBackend] | None = None,
+                 registry=None,
+                 language: str | None = "zh",
                  prompt: str | None = None, num_speakers: int | None = None):
+        # backend：固定后端（向后兼容原有调用方式）
+        # backend_factory + registry：按“当前启用模型”动态构造后端，
+        #   优先于固定 backend——用于让模型切换在下一个任务生效
         self.backend = backend
+        self._backend_factory = backend_factory
+        self._registry = registry
         self.language = language
         self.prompt = prompt
         self.num_speakers = num_speakers
@@ -82,12 +90,20 @@ class JobQueue:
     def run_job(self, job: Job, on_progress: Callable[[Job], None]) -> None:
         with _infer_gate:  # 串行化推理段，任意时刻至多一个任务在跑
             try:
+                # 解析本次实际使用的 backend：有 factory+registry 时按当前启用模型现构，
+                # 确保切换模型后下一个任务立即生效；否则退回构造时传入的固定 backend
+                backend = self.backend
+                if self._backend_factory is not None and self._registry is not None:
+                    backend = self._backend_factory(
+                        self._registry.active_repo("transcribe"),
+                        self._registry.active_repo("diarize"),
+                    )
                 job.status = "running"
                 on_progress(job)
-                segs = self.backend.transcribe(job.audio_path, self.language, self.prompt)
+                segs = backend.transcribe(job.audio_path, self.language, self.prompt)
                 job.progress = 0.5
                 on_progress(job)
-                turns = self.backend.diarize(job.audio_path, self.num_speakers)
+                turns = backend.diarize(job.audio_path, self.num_speakers)
                 job.progress = 0.9
                 on_progress(job)
                 labeled = align(segs, turns)

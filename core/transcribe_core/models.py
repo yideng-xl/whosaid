@@ -54,6 +54,10 @@ class ModelRegistry:
     def active(self, kind: str) -> str:
         return self._state["active"][kind]
 
+    def active_repo(self, kind: str) -> str:
+        """返回当前启用模型的 HF repo 路径。"""
+        return self._by_id[self.active(kind)].repo
+
     def list_models(self) -> list[dict]:
         out = []
         for m in AVAILABLE:

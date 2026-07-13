@@ -45,3 +45,12 @@ def test_available_has_five_whisper_and_one_pyannote():
     kinds = [m.kind for m in AVAILABLE]
     assert kinds.count("transcribe") == 5
     assert kinds.count("diarize") == 1
+
+
+def test_active_repo_returns_current_active_models_repo(tmp_path):
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: True,
+                        download_fn=lambda repo: None)
+    assert reg.active_repo("transcribe") == "mlx-community/whisper-large-v3-mlx"
+    reg.set_active("whisper-small")
+    assert reg.active_repo("transcribe") == "mlx-community/whisper-small-mlx"

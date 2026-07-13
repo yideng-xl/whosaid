@@ -3,6 +3,7 @@ import time
 
 import pytest
 from transcribe_core.jobs import JobQueue, Job
+from transcribe_core.models import ModelRegistry
 from transcribe_core.transcript import Segment
 from transcribe_core.backend import InferenceBackend
 
@@ -97,3 +98,24 @@ def test_unsubscribe_keeps_other_channels():
 def test_unsubscribe_unknown_job_id_is_noop():
     q = JobQueue(FakeBackend())
     q.unsubscribe("no-such-job", object())  # 不应抛异常
+
+
+def test_switch_active_model_changes_backend_used_by_next_job(tmp_path):
+    """核心回归：切换当前启用模型后，下一个任务应实际使用新模型的 repo 构造后端。"""
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: True,
+                        download_fn=lambda repo: None)
+    received = []
+
+    def factory(whisper_repo, diarize_repo):
+        received.append((whisper_repo, diarize_repo))
+        return FakeBackend()
+
+    q = JobQueue(backend_factory=factory, registry=reg)
+
+    q.submit("/x/a.m4a")
+    assert received[-1][0] == "mlx-community/whisper-large-v3-mlx"
+
+    reg.set_active("whisper-small")
+    q.submit("/x/b.m4a")
+    assert received[-1][0] == "mlx-community/whisper-small-mlx"
