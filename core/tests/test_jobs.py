@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 from transcribe_core.jobs import JobQueue, Job
 from transcribe_core.transcript import Segment
@@ -47,3 +50,29 @@ def test_progress_callback_called_monotonic():
     q.run_job(job, on_progress=lambda j: seen.append(j.progress))
     assert seen == sorted(seen)
     assert seen[-1] == 1.0
+
+
+def test_single_concurrency():
+    """三个任务并发提交，任意时刻推理段（transcribe/diarize）至多一个在跑。"""
+    running = {"now": 0, "max": 0}
+    lock = threading.Lock()
+
+    class SlowBackend(InferenceBackend):
+        id = "slow"
+        def transcribe(self, audio_path, language, initial_prompt):
+            with lock:
+                running["now"] += 1
+                running["max"] = max(running["max"], running["now"])
+            time.sleep(0.1)
+            with lock:
+                running["now"] -= 1
+            return [Segment(0, 1, "x")]
+        def diarize(self, audio_path, num_speakers):
+            return [(0.0, 1.0, "SPEAKER_00")]
+
+    q = JobQueue(SlowBackend())
+    ids = [q.submit_async("/x/a.m4a") for _ in range(3)]
+    time.sleep(0.6)
+    for jid in ids:
+        assert q.get(jid).status == "done"
+    assert running["max"] == 1  # 任意时刻至多一个在推理

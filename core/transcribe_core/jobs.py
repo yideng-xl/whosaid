@@ -12,6 +12,10 @@ from .transcript import Transcript
 
 _ids = itertools.count(1)
 
+# 全局单并发闸门：本机算力/显存有限，任意时刻至多一个 run_job 处于推理段
+# （transcribe + diarize），避免多任务并发同时抢占本地模型资源。
+_infer_gate = threading.Semaphore(1)
+
 
 @dataclass
 class Job:
@@ -65,26 +69,25 @@ class JobQueue:
         return jid
 
     def run_job(self, job: Job, on_progress: Callable[[Job], None]) -> None:
-        try:
-            job.status = "running"
-            on_progress(job)
-            # TODO 单并发信号量：Task 9 在此包一个全局 threading.Semaphore(1)，
-            # 串行化推理段（transcribe + diarize），避免多任务并发抢占本地算力。
-            segs = self.backend.transcribe(job.audio_path, self.language, self.prompt)
-            job.progress = 0.5
-            on_progress(job)
-            turns = self.backend.diarize(job.audio_path, self.num_speakers)
-            job.progress = 0.9
-            on_progress(job)
-            labeled = align(segs, turns)
-            job.transcript = Transcript(segments=labeled)
-            job.progress = 1.0
-            job.status = "done"
-            on_progress(job)
-        except Exception as e:  # 异常不外泄，写入 job
-            job.status = "failed"
-            job.error = str(e)
-            on_progress(job)
+        with _infer_gate:  # 串行化推理段，任意时刻至多一个任务在跑
+            try:
+                job.status = "running"
+                on_progress(job)
+                segs = self.backend.transcribe(job.audio_path, self.language, self.prompt)
+                job.progress = 0.5
+                on_progress(job)
+                turns = self.backend.diarize(job.audio_path, self.num_speakers)
+                job.progress = 0.9
+                on_progress(job)
+                labeled = align(segs, turns)
+                job.transcript = Transcript(segments=labeled)
+                job.progress = 1.0
+                job.status = "done"
+                on_progress(job)
+            except Exception as e:  # 异常不外泄，写入 job
+                job.status = "failed"
+                job.error = str(e)
+                on_progress(job)
 
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
