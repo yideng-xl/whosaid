@@ -1,0 +1,9 @@
+[project]
+name = "transcribe-core"
+version = "0.1.0"
+requires-python = ">=3.13"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = ["slow: 需要真实模型/音频的集成测试"]
