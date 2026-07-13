@@ -1,9 +1,10 @@
 """本地转写服务：REST + WebSocket，把内核各组件装成可被 Tauri 外壳调用的服务。"""
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from .jobs import JobQueue
 from .models import ModelRegistry
@@ -33,7 +34,8 @@ def create_app(queue: JobQueue, registry: ModelRegistry) -> FastAPI:
 
     @app.post("/jobs")
     def submit(req: SubmitReq):
-        return {"job_id": queue.submit(req.audio_path)}
+        # 用 submit_async 而非 submit：后台线程执行，接口立即返回，配合 WS 拿流式进度
+        return {"job_id": queue.submit_async(req.audio_path)}
 
     @app.get("/jobs")
     def list_jobs():
@@ -80,6 +82,28 @@ def create_app(queue: JobQueue, registry: ModelRegistry) -> FastAPI:
     def set_active(req: ActiveReq):
         registry.set_active(req.model_id)
         return {"ok": True}
+
+    @app.websocket("/ws/jobs/{job_id}")
+    async def ws_job(websocket: WebSocket, job_id: str):
+        await websocket.accept()
+        ch = queue.subscribe(job_id)
+        # 先推一次当前状态（可能已完成）
+        job = queue.get(job_id)
+        if job is not None:
+            await websocket.send_json({"status": job.status, "progress": job.progress, "error": job.error})
+            if job.status in ("done", "failed"):
+                await websocket.close()
+                return
+        try:
+            while True:
+                msg = await run_in_threadpool(ch.get)
+                await websocket.send_json(msg)
+                if msg["status"] in ("done", "failed"):
+                    break
+        except WebSocketDisconnect:
+            pass
+        finally:
+            await websocket.close()
 
     return app
 

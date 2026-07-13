@@ -1,9 +1,21 @@
+import time
+
 from fastapi.testclient import TestClient
 from transcribe_core.server import create_app
 from transcribe_core.jobs import JobQueue
 from transcribe_core.models import ModelRegistry
 from transcribe_core.transcript import Segment
 from transcribe_core.backend import InferenceBackend
+
+
+def _wait_done(c, jid):
+    """POST /jobs 改为后台线程异步执行后，需轮询到终态再断言（避免读到 running/queued 中间态）。"""
+    for _ in range(50):
+        j = c.get(f"/jobs/{jid}").json()
+        if j["status"] in ("done", "failed"):
+            return j
+        time.sleep(0.02)
+    raise AssertionError("job 未在预期时间内完成")
 
 
 class FakeBackend(InferenceBackend):
@@ -37,7 +49,7 @@ def make_client(tmp_path, backend=None):
 def test_submit_and_fetch_job(tmp_path):
     c = make_client(tmp_path)
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
-    job = c.get(f"/jobs/{jid}").json()
+    job = _wait_done(c, jid)
     assert job["status"] == "done"
     assert "说话人A：你好" in job["txt"]
 
@@ -45,6 +57,7 @@ def test_submit_and_fetch_job(tmp_path):
 def test_rename_then_export(tmp_path):
     c = make_client(tmp_path)
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
     c.post(f"/jobs/{jid}/rename", json={"orig": "说话人A", "name": "张三"})
     txt = c.get(f"/jobs/{jid}/export", params={"fmt": "txt"}).text
     assert txt.startswith("张三：你好")
@@ -65,8 +78,8 @@ def test_rename_export_409_when_transcript_none(tmp_path):
     c = make_client(tmp_path, backend=FailingBackend())
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
 
-    # 验证任务已同步执行完，状态为 failed
-    job = c.get(f"/jobs/{jid}").json()
+    # 后台线程执行完（轮询到终态），状态为 failed
+    job = _wait_done(c, jid)
     assert job["status"] == "failed"
     assert job["error"] == "模型未下载"
 
