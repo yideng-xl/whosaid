@@ -5,3 +5,4 @@ __pycache__/
 *.transcript.json
 *.diarization.json
 config.json
+.superpowers/
