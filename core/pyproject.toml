@@ -8,5 +8,7 @@ pythonpath = ["."]
 testpaths = ["tests"]
 markers = ["slow: 需要真实模型/音频的集成测试"]
 filterwarnings = [
-    "ignore:Using `httpx` with `starlette.testclient` is deprecated.*:",
+    # 第三方告警：starlette TestClient 提示 httpx 已弃用（非本代码问题）。
+    # 按类路径精确过滤，避免一刀切掩盖其他弃用告警。
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
 ]
