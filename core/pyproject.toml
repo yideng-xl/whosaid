@@ -7,3 +7,6 @@ requires-python = ">=3.13"
 pythonpath = ["."]
 testpaths = ["tests"]
 markers = ["slow: 需要真实模型/音频的集成测试"]
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated.*:",
+]

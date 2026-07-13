@@ -49,13 +49,18 @@ class MlxBackend(InferenceBackend):
             pipeline.to(torch.device("mps"))
 
         # 先 ffmpeg 转 16k 单声道 wav 整体读入，规避 pyannote 分块解码 m4a 的样本数 bug
-        tmp_wav = tempfile.mktemp(suffix=".wav")
-        subprocess.run(
-            ["ffmpeg", "-i", audio_path, "-ar", "16000", "-ac", "1", tmp_wav, "-y", "-loglevel", "error"],
-            check=True,
-        )
-        waveform, sample_rate = torchaudio.load(tmp_wav)
-        os.remove(tmp_wav)
+        # 使用 mkstemp 替代已弃用的 mktemp，确保即使异常也会清理临时文件
+        fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)  # 关闭文件描述符，让 ffmpeg 可写
+        try:
+            subprocess.run(
+                ["ffmpeg", "-i", audio_path, "-ar", "16000", "-ac", "1", tmp_wav, "-y", "-loglevel", "error"],
+                check=True,
+            )
+            waveform, sample_rate = torchaudio.load(tmp_wav)
+        finally:
+            # 确保任何路径都清理临时文件（即使 ffmpeg 或 torchaudio.load 抛异常）
+            os.remove(tmp_wav)
 
         kw = {"num_speakers": num_speakers} if num_speakers else {}
         output = pipeline({"waveform": waveform, "sample_rate": sample_rate}, **kw)
