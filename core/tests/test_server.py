@@ -92,3 +92,28 @@ def test_rename_export_409_when_transcript_none(tmp_path):
     resp_export = c.get(f"/jobs/{jid}/export", params={"fmt": "txt"})
     assert resp_export.status_code == 409
     assert "转写未完成" in resp_export.json()["detail"]
+
+
+def test_list_jobs_includes_audio_path(tmp_path):
+    """GET /jobs 返回列表项中含 audio_path 字段"""
+    c = make_client(tmp_path)
+    jid = c.post("/jobs", json={"audio_path": "/x/会议.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+    jobs = c.get("/jobs").json()
+    assert any(j["id"] == jid and j["audio_path"] == "/x/会议.m4a" for j in jobs)
+
+
+def test_rename_persists_via_store(tmp_path):
+    """rename 后通过 store 持久化，重启后能读回修改后的 speaker"""
+    from transcribe_core.store import JobStore
+    store = JobStore(str(tmp_path / "data"))
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda r: True, download_fn=lambda r: None)
+    q = JobQueue(FakeBackend(), on_change=store.save)
+    c = TestClient(create_app(q, reg, store))
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+    c.post(f"/jobs/{jid}/rename", json={"orig": "说话人A", "name": "李四"})
+    # 重新加载存储中的 job，验证修改已持久化
+    reloaded = {j.id: j for j in JobStore(str(tmp_path / "data")).load_all()}
+    assert "李四" in reloaded[jid].transcript.to_txt()
