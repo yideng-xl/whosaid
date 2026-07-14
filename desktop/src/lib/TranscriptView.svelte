@@ -8,12 +8,16 @@
     jobId,
     audioPath = "",
     status = "",
+    onPause,
+    onResume,
   }: {
     api: ReturnType<typeof createApi>;
     jobId: string;
     audioPath: string;
     // 由父组件透传的侧栏状态；变化（如转写完成）时触发重新取稿
     status: string;
+    onPause?: () => void;
+    onResume?: () => void;
   } = $props();
 
   let detail = $state<JobDetail | null>(null);
@@ -98,6 +102,25 @@
     <div class="notice">加载中…</div>
   {:else if detail.status === "failed"}
     <div class="notice error">转写失败：{detail.error ?? "未知错误"}</div>
+  {:else if detail.status === "running" && detail.phase === "diarizing"}
+    <div class="panel">
+      <div class="fname">{basename(audioPath)}</div>
+      <p class="phase">说话人分离中…（{Math.round(detail.progress * 100)}%）</p>
+    </div>
+  {:else if detail.status === "running" || detail.status === "paused"}
+    <div class="panel">
+      <div class="fname">{basename(audioPath)}</div>
+      <div class="prog">
+        <span>{detail.status === "paused" ? "已暂停" : "转写中"} {detail.chunks_done}/{detail.total_chunks} 块</span>
+        <div class="bar"><div class="fill" style="width:{Math.round(detail.progress * 100)}%"></div></div>
+      </div>
+      {#if detail.status === "paused"}
+        <button class="ctl" onclick={() => onResume?.()}>继续</button>
+      {:else}
+        <button class="ctl" onclick={() => onPause?.()}>暂停</button>
+      {/if}
+      {#if detail.txt}<div class="preview">{detail.txt}</div>{/if}
+    </div>
   {:else if detail.status !== "done"}
     <div class="notice">转写中…（{Math.round(detail.progress * 100)}%）稿子完成后显示</div>
   {:else}
@@ -109,7 +132,11 @@
       </div>
     </div>
 
-    <SpeakerRename speakers={detail.speakers} {onRename} />
+    <SpeakerRename
+      speakers={detail.speakers}
+      {onRename}
+      sampleUrl={(orig) => api.speakerSampleUrl(jobId, orig)}
+    />
 
     <div class="transcript">
       {#each blocks as b}
@@ -169,6 +196,57 @@
     color: var(--fg, #222);
     font-size: 14px;
     white-space: pre-wrap;
+  }
+
+  .panel {
+    border: 1px solid var(--line, #e8e8ec);
+    border-radius: 10px;
+    padding: 16px 18px;
+    background: var(--card, #fafafa);
+  }
+  .phase {
+    color: var(--muted, #8a8a90);
+    font-size: 14px;
+    margin: 10px 0 0;
+  }
+  .prog {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 10px 0;
+    font-size: 13px;
+    color: var(--muted, #6a6a70);
+  }
+  .bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--line, #e0e0e4);
+    overflow: hidden;
+  }
+  .fill {
+    height: 100%;
+    background: var(--accent, #3b7ddd);
+    transition: width 0.3s ease;
+  }
+  .ctl {
+    padding: 6px 14px;
+    border: 1px solid var(--accent, #3b7ddd);
+    background: var(--accent, #3b7ddd);
+    color: #fff;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .ctl:hover { opacity: 0.9; }
+  .preview {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--line, #e0e0e4);
+    color: var(--fg, #444);
+    font-size: 13px;
+    white-space: pre-wrap;
+    line-height: 1.6;
   }
 
   @media (prefers-color-scheme: dark) {

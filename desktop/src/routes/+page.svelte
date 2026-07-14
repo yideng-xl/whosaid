@@ -161,6 +161,20 @@
           jobId={selectedJobId}
           audioPath={selectedJob?.audio_path ?? ""}
           status={selectedJob?.status ?? ""}
+          onPause={async () => {
+            try {
+              await api!.pauseJob(selectedJobId!);
+            } catch (e) {
+              errorBanner = `暂停失败：${e}`;
+            }
+          }}
+          onResume={async () => {
+            try {
+              await api!.resumeJob(selectedJobId!);
+            } catch (e) {
+              errorBanner = `继续失败：${e}`;
+            }
+          }}
         />
       {:else}
         <div class="placeholder">从左侧选择一个任务，或把音频拖进窗口</div>

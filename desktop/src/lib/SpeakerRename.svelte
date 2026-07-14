@@ -4,10 +4,13 @@
   let {
     speakers = [],
     onRename,
+    sampleUrl,
   }: {
     speakers: Speaker[];
     // 保存单个说话人的新名字：把原始标签 orig 与新名字回传给父组件调 api.rename
     onRename: (orig: string, name: string) => Promise<void>;
+    // 给定原始标签，返回该说话人试听片段的 URL
+    sampleUrl: (orig: string) => string;
   } = $props();
 
   // 每个原始标签对应的输入值，随 speakers 变化重置
@@ -39,6 +42,7 @@
       {#each speakers as s (s.orig)}
         <div class="row">
           <span class="orig">{s.orig}</span>
+          <button class="play" title="试听这段发言" onclick={() => new Audio(sampleUrl(s.orig)).play()}>▶</button>
           <input
             bind:value={draft[s.orig]}
             placeholder={s.orig}
@@ -101,6 +105,22 @@
     opacity: 0.45;
     cursor: default;
   }
+  .play {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--line, #d8d8dc);
+    background: var(--input-bg, #fff);
+    color: var(--fg, #333);
+    border-radius: 50%;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .play:hover { border-color: var(--accent, #3b7ddd); color: var(--accent, #3b7ddd); }
 
   @media (prefers-color-scheme: dark) {
     .rename { --line: #2a2a2e; --card: #202024; --fg: #eaeaea; --input-bg: #17171a; }
