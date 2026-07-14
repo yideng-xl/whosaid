@@ -48,10 +48,15 @@
       <div class="empty">还没有任务</div>
     {/if}
     {#each jobs as job (job.id)}
-      <button
+      <!-- 用 div+role 而非 button：删除键是嵌套 button，button 内不可嵌 button（非法 HTML，
+           Chromium 会重排导致 ✕ 错位/点击失效）。role+tabindex+键盘处理保留可访问性。 -->
+      <div
         class="job"
+        role="button"
+        tabindex="0"
         class:selected={job.id === selectedJobId}
         onclick={() => onSelect(job.id)}
+        onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(job.id); } }}
       >
         <div class="job-top">
           <span class="name" title={job.audio_path}>{basename(job.audio_path)}</span>
@@ -66,7 +71,7 @@
         {#if job.status === "failed" && job.error}
           <div class="err">{job.error}</div>
         {/if}
-      </button>
+      </div>
     {/each}
   </div>
 
