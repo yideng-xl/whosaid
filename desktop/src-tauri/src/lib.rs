@@ -96,20 +96,25 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 窗口关闭时 kill 子进程，避免残留孤儿 python
+            // 窗口关闭时 kill 子进程（正常关窗的快路径）
             if let tauri::WindowEvent::Destroyed = event {
-                if let Some(mut child) = window
-                    .app_handle()
-                    .state::<ServiceProcess>()
-                    .0
-                    .lock()
-                    .unwrap()
-                    .take()
-                {
-                    child.kill().ok();
-                }
+                kill_service(window.app_handle());
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // 应用退出（含 Cmd+Q / 进程正常结束）时兜底再 kill 一次；
+            // 强杀/崩溃场景由 Python 端父进程看门狗自我了断（server.py）
+            if let tauri::RunEvent::Exit = event {
+                kill_service(app_handle);
+            }
+        });
+}
+
+/// kill 掉持有的 Python 子进程（take 出来，幂等；重复调用无害）。
+fn kill_service(app: &tauri::AppHandle) {
+    if let Some(mut child) = app.state::<ServiceProcess>().0.lock().unwrap().take() {
+        child.kill().ok();
+    }
 }
