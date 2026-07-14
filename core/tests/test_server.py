@@ -72,6 +72,20 @@ def test_models_list_and_switch(tmp_path):
     assert any(m["id"] == "whisper-small" and m["active"] for m in models)
 
 
+def test_get_job_returns_speakers_with_orig_and_display(tmp_path):
+    c = make_client(tmp_path)
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+    # 改名前：speakers 用原始标签，name 等于原始标签
+    spk = c.get(f"/jobs/{jid}").json()["speakers"]
+    assert {s["orig"] for s in spk} == {"说话人A", "说话人B"}
+    assert all(s["orig"] == s["name"] for s in spk)
+    # 改名后：orig 不变（仍是原始标签），name 变为真名，保证可反复改名
+    c.post(f"/jobs/{jid}/rename", json={"orig": "说话人A", "name": "张三"})
+    spk2 = {s["orig"]: s["name"] for s in c.get(f"/jobs/{jid}").json()["speakers"]}
+    assert spk2["说话人A"] == "张三"
+
+
 def test_rename_export_409_when_transcript_none(tmp_path):
     """测试当转写失败导致 transcript 为 None 时，rename 和 export 返回 409"""
     # 用转写失败的后端提交任务，job 会进入 failed 状态，transcript 保持 None

@@ -47,13 +47,35 @@ fn get_service_port(state: tauri::State<'_, ServicePort>) -> Option<u16> {
     *state.0.lock().unwrap()
 }
 
+/// 导出用：弹系统保存对话框，返回用户选择的路径（取消则 None）。
+#[tauri::command]
+async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    app.dialog()
+        .file()
+        .set_file_name(&default_name)
+        .blocking_save_file()
+        .map(|p| p.to_string())
+}
+
+/// 把内容写到指定路径（导出稿子落盘）。
+#[tauri::command]
+fn write_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(ServiceProcess(Mutex::new(None)))
         .manage(ServicePort(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![get_service_port])
+        .invoke_handler(tauri::generate_handler![
+            get_service_port,
+            pick_save_path,
+            write_file
+        ])
         .setup(|app| {
             let python = dev_python();
             let cwd = data_dir();

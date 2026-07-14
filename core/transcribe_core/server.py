@@ -58,9 +58,21 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
     @app.get("/jobs/{job_id}")
     def get_job(job_id: str):
         j = _job_or_404(job_id)
+        speakers = []
+        if j.transcript is not None:
+            # 去重保序地列出原始说话人标签及其当前显示名，供前端改名 UI 使用。
+            # 用原始标签(seg.speaker)作为 rename 的 orig，才能反复改名（映射恒以原始标签为键）。
+            seen = set()
+            for seg in j.transcript.segments:
+                orig = seg.speaker
+                if orig is None or orig in seen:
+                    continue
+                seen.add(orig)
+                speakers.append({"orig": orig, "name": j.transcript.display_speaker(seg)})
         return {
             "id": j.id, "status": j.status, "progress": j.progress, "error": j.error,
             "txt": j.transcript.to_txt() if j.transcript else "",
+            "speakers": speakers,
         }
 
     @app.post("/jobs/{job_id}/rename")

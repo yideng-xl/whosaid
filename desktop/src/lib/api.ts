@@ -17,6 +17,20 @@ export interface ModelInfo {
   size_mb: number;
 }
 
+export interface Speaker {
+  orig: string; // 原始标签，如 "说话人A"，rename 时作为 orig 传回
+  name: string; // 当前显示名（改名后为真名）
+}
+
+export interface JobDetail {
+  id: string;
+  status: string;
+  progress: number;
+  error: string | null;
+  txt: string;
+  speakers: Speaker[];
+}
+
 interface ProgressMessage {
   status: string;
   progress: number;
@@ -50,7 +64,7 @@ export function createApi(port: number) {
       return (await j(r)).job_id;
     },
 
-    async getJob(id: string) {
+    async getJob(id: string): Promise<JobDetail> {
       return j(await fetch(`${base}/jobs/${id}`));
     },
 

@@ -3,6 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import Sidebar from "$lib/Sidebar.svelte";
+  import TranscriptView from "$lib/TranscriptView.svelte";
   import { createApi, type JobSummary } from "$lib/api";
 
   type Api = ReturnType<typeof createApi>;
@@ -15,6 +16,9 @@
   let view = $state<"transcript" | "models">("transcript");
   let dragging = $state(false);
   let errorBanner = $state<string | null>(null);
+
+  // 选中任务对象（供主区取文件名/状态）
+  const selectedJob = $derived(jobs.find((j) => j.id === selectedJobId) ?? null);
 
   // 已订阅进度的 job，避免重复开 WS
   const watching = new Set<string>();
@@ -150,8 +154,13 @@
     <main class="content">
       {#if view === "models"}
         <div class="placeholder">模型管理（Task 8 实现）</div>
-      {:else if selectedJobId}
-        <div class="placeholder">稿子视图（Task 7 实现）— 已选中 {selectedJobId}</div>
+      {:else if api && selectedJobId}
+        <TranscriptView
+          {api}
+          jobId={selectedJobId}
+          audioPath={selectedJob?.audio_path ?? ""}
+          status={selectedJob?.status ?? ""}
+        />
       {:else}
         <div class="placeholder">从左侧选择一个任务，或把音频拖进窗口</div>
       {/if}
