@@ -51,11 +51,18 @@
       });
   });
 
-  // 按显示名稳定分色
+  // 显示名 → 原始标签映射：按原始标签分色，改名不改颜色（同一人恒定一色）
+  const nameToOrig = $derived.by(() => {
+    const m: Record<string, string> = {};
+    for (const s of detail?.speakers ?? []) m[s.name] = s.orig;
+    return m;
+  });
+
   const PALETTE = ["#3b7ddd", "#2c8a4b", "#c0562b", "#7a4fd0", "#0e8a8a", "#b03060"];
-  function colorOf(name: string): string {
+  function colorOf(displayName: string): string {
+    const key = nameToOrig[displayName] ?? displayName; // 用原始标签算色，稳定
     let h = 0;
-    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
     return PALETTE[h % PALETTE.length];
   }
 
