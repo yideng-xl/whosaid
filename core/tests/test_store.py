@@ -31,3 +31,14 @@ def test_running_job_marked_failed_on_load(tmp_path):
 
 def test_load_all_empty_dir(tmp_path):
     assert JobStore(str(tmp_path)).load_all() == []
+
+
+def test_paused_job_roundtrip_keeps_paused_and_chunks(tmp_path):
+    store = JobStore(str(tmp_path))
+    store.save(Job(id="jp", audio_path="/x/a.m4a", status="paused", progress=0.42,
+                   transcript=Transcript(segments=[Segment(0, 1, "半句")]),
+                   error=None, total_chunks=5, chunks_done=2))
+    j = JobStore(str(tmp_path)).load_all()[0]
+    assert j.status == "paused"  # 暂停跨重启保留
+    assert j.total_chunks == 5 and j.chunks_done == 2
+    assert j.transcript.plain_text() == "半句"

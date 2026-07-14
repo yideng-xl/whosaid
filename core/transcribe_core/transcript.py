@@ -55,6 +55,10 @@ class Transcript:
             )
         return "".join(out)
 
+    def plain_text(self) -> str:
+        """无说话人的纯文本预览（转写进行中用）。"""
+        return "\n".join(s.text for s in self.segments)
+
     def to_dict(self) -> dict:
         return {
             "segments": [asdict(s) for s in self.segments],

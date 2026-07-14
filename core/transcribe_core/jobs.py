@@ -21,10 +21,12 @@ _infer_gate = threading.Semaphore(1)
 class Job:
     id: str
     audio_path: str
-    status: str          # queued | running | done | failed
+    status: str          # queued | running | paused | done | failed
     progress: float
     transcript: Transcript | None
     error: str | None
+    total_chunks: int = 0
+    chunks_done: int = 0
 
 
 class JobQueue:

@@ -32,3 +32,8 @@ def test_roundtrip_dict():
     t.rename_speaker("说话人A", "李四")
     t2 = Transcript.from_dict(t.to_dict())
     assert t2.to_txt() == t.to_txt()
+
+
+def test_plain_text_joins_without_speaker():
+    t = Transcript(segments=[Segment(0, 1, "你好"), Segment(1, 2, "在吗")])
+    assert t.plain_text() == "你好\n在吗"
