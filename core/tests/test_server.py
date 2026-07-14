@@ -42,7 +42,8 @@ def make_client(tmp_path, backend=None):
     reg = ModelRegistry(str(tmp_path / "config.json"),
                         is_downloaded_fn=lambda repo: True,
                         download_fn=lambda repo: None)
-    app = create_app(JobQueue(backend), reg)
+    app = create_app(JobQueue(backend, duration_fn=lambda p: 1.0,
+                               extract_fn=lambda src, start, dur: src), reg)
     return TestClient(app)
 
 
@@ -123,7 +124,8 @@ def test_rename_persists_via_store(tmp_path):
     store = JobStore(str(tmp_path / "data"))
     reg = ModelRegistry(str(tmp_path / "config.json"),
                         is_downloaded_fn=lambda r: True, download_fn=lambda r: None)
-    q = JobQueue(FakeBackend(), on_change=store.save)
+    q = JobQueue(FakeBackend(), on_change=store.save, duration_fn=lambda p: 1.0,
+                 extract_fn=lambda src, start, dur: src)
     c = TestClient(create_app(q, reg, store))
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
     _wait_done(c, jid)

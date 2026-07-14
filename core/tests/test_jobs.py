@@ -25,7 +25,8 @@ class BoomBackend(InferenceBackend):
 
 
 def test_run_job_success_produces_labeled_transcript():
-    q = JobQueue(FakeBackend())
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda src, start, dur: src)
     jid = q.submit("/x/a.m4a")
     job = q.get(jid)
     assert job.status == "done"
@@ -35,7 +36,8 @@ def test_run_job_success_produces_labeled_transcript():
 
 
 def test_run_job_failure_sets_error():
-    q = JobQueue(BoomBackend())
+    q = JobQueue(BoomBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda src, start, dur: src)
     jid = q.submit("/x/a.m4a")
     job = q.get(jid)
     assert job.status == "failed"
@@ -43,7 +45,8 @@ def test_run_job_failure_sets_error():
 
 
 def test_progress_callback_called_monotonic():
-    q = JobQueue(FakeBackend())
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda src, start, dur: src)
     seen = []
     job = Job(id="j1", audio_path="/x/a.m4a", status="queued", progress=0.0,
               transcript=None, error=None)
@@ -71,7 +74,8 @@ def test_single_concurrency():
         def diarize(self, audio_path, num_speakers):
             return [(0.0, 1.0, "SPEAKER_00")]
 
-    q = JobQueue(SlowBackend())
+    q = JobQueue(SlowBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda src, start, dur: src)
     ids = [q.submit_async("/x/a.m4a") for _ in range(3)]
     time.sleep(0.6)
     for jid in ids:
@@ -111,7 +115,8 @@ def test_switch_active_model_changes_backend_used_by_next_job(tmp_path):
         received.append((whisper_repo, diarize_repo))
         return FakeBackend()
 
-    q = JobQueue(backend_factory=factory, registry=reg)
+    q = JobQueue(backend_factory=factory, registry=reg,
+                 duration_fn=lambda p: 1.0, extract_fn=lambda src, start, dur: src)
 
     q.submit("/x/a.m4a")
     assert received[-1][0] == "mlx-community/whisper-large-v3-mlx"
@@ -122,7 +127,8 @@ def test_switch_active_model_changes_backend_used_by_next_job(tmp_path):
 
 
 def test_preload_and_no_id_collision():
-    q = JobQueue(FakeBackend())
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda src, start, dur: src)
     # 预载一个历史 job（占用 job1 名）
     q.preload([Job(id="job1", audio_path="/x/a.m4a", status="done",
                    progress=1.0, transcript=None, error=None)])
@@ -133,7 +139,8 @@ def test_preload_and_no_id_collision():
 
 def test_on_change_called_on_terminal_and_submit():
     seen = []
-    q = JobQueue(FakeBackend(), on_change=lambda j: seen.append((j.id, j.status)))
+    q = JobQueue(FakeBackend(), on_change=lambda j: seen.append((j.id, j.status)),
+                 duration_fn=lambda p: 1.0, extract_fn=lambda src, start, dur: src)
     jid = q.submit_async("/x/a.m4a")
     for _ in range(50):
         if q.get(jid).status in ("done", "failed"):
@@ -141,3 +148,102 @@ def test_on_change_called_on_terminal_and_submit():
         time.sleep(0.02)
     statuses = [s for _, s in seen]
     assert "queued" in statuses and "done" in statuses
+
+
+def test_chunked_run_covers_full_duration_with_offsets():
+    """假后端记录每块的输入，验证块循环覆盖全时长且时间戳偏移正确。"""
+    from transcribe_core.jobs import JobQueue, Job
+    from transcribe_core.transcript import Segment
+
+    calls = []
+
+    class ChunkBackend(InferenceBackend):
+        id = "chunk"
+        def transcribe(self, audio_path, language, initial_prompt):
+            calls.append(audio_path)
+            return [Segment(0.0, 1.0, "x")]  # 每块相对 0 的一段
+        def diarize(self, audio_path, num_speakers):
+            return [(0.0, 1000.0, "SPEAKER_00")]
+
+    # 注入假 duration/extract：250 秒 → 3 块(120,120,10)；extract 返回块标记路径
+    q = JobQueue(ChunkBackend(),
+                 duration_fn=lambda p: 250.0,
+                 extract_fn=lambda src, start, dur: f"/tmp/chunk_{start}.wav",
+                 chunk_sec=120.0)
+    jid = q.submit("/x/a.m4a")
+    job = q.get(jid)
+    assert job.status == "done"
+    assert job.total_chunks == 3 and job.chunks_done == 3
+    assert len(calls) == 3  # 转了 3 块
+    # 第 i 块的片段被偏移 i*120：起点应是 0,120,240
+    starts = sorted(s.start for s in job.transcript.segments)
+    assert starts == [0.0, 120.0, 240.0]
+
+
+def test_pause_stops_at_chunk_boundary_and_persists():
+    from transcribe_core.jobs import JobQueue
+    from transcribe_core.transcript import Segment
+    import threading
+
+    gate = threading.Event()   # 让第 1 块 transcribe 阻塞，好在块边界触发暂停
+    resumed = []
+
+    class SlowChunk(InferenceBackend):
+        id = "slow"
+        def transcribe(self, audio_path, language, initial_prompt):
+            resumed.append(audio_path)
+            gate.wait(timeout=2)   # 第一块等待，期间主线程 pause
+            return [Segment(0.0, 1.0, "x")]
+        def diarize(self, audio_path, num_speakers):
+            return [(0.0, 1000.0, "S0")]
+
+    q = JobQueue(SlowChunk(),
+                 duration_fn=lambda p: 360.0,   # 3 块
+                 extract_fn=lambda src, start, dur: f"/tmp/c_{start}.wav",
+                 chunk_sec=120.0)
+    jid = q.submit_async("/x/a.m4a")
+    import time
+    time.sleep(0.2)                 # 第 1 块进入 transcribe
+    assert q.pause(jid) is True     # 转写阶段可暂停
+    gate.set()                      # 放第 1 块过
+    for _ in range(50):
+        if q.get(jid).status == "paused":
+            break
+        time.sleep(0.02)
+    job = q.get(jid)
+    assert job.status == "paused"
+    assert job.chunks_done == 1 and job.total_chunks == 3   # 停在块边界
+
+
+def test_resume_continues_from_chunks_done():
+    from transcribe_core.jobs import JobQueue, Job
+    from transcribe_core.transcript import Segment, Transcript
+
+    calls = []
+
+    class ChunkBackend(InferenceBackend):
+        id = "chunk"
+        def transcribe(self, audio_path, language, initial_prompt):
+            calls.append(audio_path)
+            return [Segment(0.0, 1.0, "x")]
+        def diarize(self, audio_path, num_speakers):
+            return [(0.0, 1000.0, "S0")]
+
+    q = JobQueue(ChunkBackend(),
+                 duration_fn=lambda p: 360.0,
+                 extract_fn=lambda src, start, dur: f"/tmp/c_{start}.wav",
+                 chunk_sec=120.0)
+    # 预置一个已暂停、转了 2 块的 job
+    q.preload([Job(id="jr", audio_path="/x/a.m4a", status="paused", progress=0.56,
+                   transcript=Transcript(segments=[Segment(0, 1, "a"), Segment(120, 121, "b")]),
+                   error=None, total_chunks=3, chunks_done=2)])
+    assert q.resume("jr") is True
+    import time
+    for _ in range(50):
+        if q.get("jr").status == "done":
+            break
+        time.sleep(0.02)
+    job = q.get("jr")
+    assert job.status == "done"
+    assert len(calls) == 1          # 只补转了第 3 块，不重跑前 2 块
+    assert job.chunks_done == 3

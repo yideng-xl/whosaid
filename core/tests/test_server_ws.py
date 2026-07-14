@@ -31,7 +31,7 @@ class FakeBackend(InferenceBackend):
 def test_ws_streams_until_done(tmp_path):
     reg = ModelRegistry(str(tmp_path / "config.json"),
                         is_downloaded_fn=lambda r: True, download_fn=lambda r: None)
-    c = TestClient(create_app(JobQueue(FakeBackend()), reg))
+    c = TestClient(create_app(JobQueue(FakeBackend(), duration_fn=lambda p: 1.0, extract_fn=lambda src, start, dur: src), reg))
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
     with c.websocket_connect(f"/ws/jobs/{jid}") as ws:
         last = None
@@ -48,7 +48,7 @@ def test_ws_unsubscribes_on_disconnect(tmp_path):
     """job 达终态、连接结束后，_subscribers 里不应残留该 job_id 的订阅通道。"""
     reg = ModelRegistry(str(tmp_path / "config.json"),
                         is_downloaded_fn=lambda r: True, download_fn=lambda r: None)
-    queue = JobQueue(FakeBackend())
+    queue = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0, extract_fn=lambda src, start, dur: src)
     c = TestClient(create_app(queue, reg))
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
     with c.websocket_connect(f"/ws/jobs/{jid}") as ws:
@@ -63,7 +63,7 @@ def test_ws_invalid_job_id_closes_immediately(tmp_path):
     """job_id 不存在时，服务端应直接关闭连接，不应挂起等待永远不会到来的进度。"""
     reg = ModelRegistry(str(tmp_path / "config.json"),
                         is_downloaded_fn=lambda r: True, download_fn=lambda r: None)
-    c = TestClient(create_app(JobQueue(FakeBackend()), reg))
+    c = TestClient(create_app(JobQueue(FakeBackend(), duration_fn=lambda p: 1.0, extract_fn=lambda src, start, dur: src), reg))
     with pytest.raises(WebSocketDisconnect):
         with c.websocket_connect("/ws/jobs/no-such-job") as ws:
             ws.receive_json()

@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import itertools
+import os
 import queue as _q
 import threading
 from dataclasses import dataclass
 from typing import Callable
 
 from .backend import InferenceBackend, align
+from .chunking import plan_chunks, offset_segments
 from .transcript import Transcript
 
 _ids = itertools.count(1)
@@ -35,7 +37,10 @@ class JobQueue:
                  registry=None,
                  language: str | None = "zh",
                  prompt: str | None = None, num_speakers: int | None = None,
-                 on_change: Callable[[Job], None] | None = None):
+                 on_change: Callable[[Job], None] | None = None,
+                 duration_fn: Callable[[str], float] | None = None,
+                 extract_fn: Callable[[str, float, float], str] | None = None,
+                 chunk_sec: float = 120.0):
         # backend：固定后端（向后兼容原有调用方式）
         # backend_factory + registry：按"当前启用模型"动态构造后端，
         #   优先于固定 backend——用于让模型切换在下一个任务生效
@@ -46,9 +51,15 @@ class JobQueue:
         self.prompt = prompt
         self.num_speakers = num_speakers
         self._on_change = on_change
+        # duration_fn/extract_fn：可注入的音频 IO 钩子（便于测试；默认惰性 import 真实实现）
+        self._duration_fn = duration_fn
+        self._extract_fn = extract_fn
+        self._chunk_sec = chunk_sec
         self._jobs: dict[str, Job] = {}
         self._subscribers: dict[str, list] = {}
         self._lock = threading.Lock()
+        # 每个 job 一个暂停标志位；pause() 置位，run_job 在块边界检查
+        self._pause: dict[str, threading.Event] = {}
 
     def _new_id(self) -> str:
         """跳过已存在 id（preload 历史 job 后，避免全局计数器从头产生碰撞）"""
@@ -61,6 +72,26 @@ class JobQueue:
         """状态变化时调用 on_change 钩子（如已设置）"""
         if self._on_change is not None:
             self._on_change(job)
+
+    def _emit(self, j: Job) -> None:
+        """把进度推给该 job 的所有订阅通道（WS 等）。submit_async 与 resume 共用。"""
+        with self._lock:
+            for ch in self._subscribers.get(j.id, []):
+                ch.put({"status": j.status, "progress": j.progress, "error": j.error})
+
+    def _duration(self, path: str) -> float:
+        """拿音频总时长；未注入时惰性 import 真实实现（避免测试环境无 ffmpeg 时 import 失败）。"""
+        if self._duration_fn is not None:
+            return self._duration_fn(path)
+        from .audio import probe_duration
+        return probe_duration(path)
+
+    def _extract(self, src: str, start: float, dur: float) -> str:
+        """切一块临时 wav；未注入时惰性 import 真实实现。"""
+        if self._extract_fn is not None:
+            return self._extract_fn(src, start, dur)
+        from .audio import extract_wav
+        return extract_wav(src, start, dur)
 
     def preload(self, jobs: list[Job]) -> None:
         """预载历史 job 到队列（用于恢复持久化状态）。加锁避免与后台 submit_async 竞态。"""
@@ -102,19 +133,12 @@ class JobQueue:
         self._jobs[jid] = job
         self._notify(job)
 
-        def _emit(j: Job) -> None:
-            with self._lock:
-                for ch in self._subscribers.get(j.id, []):
-                    ch.put({"status": j.status, "progress": j.progress, "error": j.error})
-
-        threading.Thread(target=self.run_job, args=(job, _emit), daemon=True).start()
+        threading.Thread(target=self.run_job, args=(job, self._emit), daemon=True).start()
         return jid
 
     def run_job(self, job: Job, on_progress: Callable[[Job], None]) -> None:
-        with _infer_gate:  # 串行化推理段，任意时刻至多一个任务在跑
+        with _infer_gate:  # 串行化推理段；暂停 return 即释放，CPU 真正空下来
             try:
-                # 解析本次实际使用的 backend：有 factory+registry 时按当前启用模型现构，
-                # 确保切换模型后下一个任务立即生效；否则退回构造时传入的固定 backend
                 backend = self.backend
                 if self._backend_factory is not None and self._registry is not None:
                     backend = self._backend_factory(
@@ -122,24 +146,77 @@ class JobQueue:
                         self._registry.active_repo("diarize"),
                     )
                 job.status = "running"
-                on_progress(job)
-                segs = backend.transcribe(job.audio_path, self.language, self.prompt)
-                job.progress = 0.5
+                on_progress(job); self._notify(job)
+
+                # 首次进入：算总块数（累加 transcript 惰性初始化，见循环内注释）
+                if job.total_chunks == 0:
+                    duration = self._duration(job.audio_path)
+                    job.total_chunks = len(plan_chunks(duration, self._chunk_sec)) or 1
+
+                chunks = plan_chunks(self._duration(job.audio_path), self._chunk_sec)
+                # 从断点续：只跑 chunks_done 及之后的块
+                for index, start, dur in chunks[job.chunks_done:]:
+                    # 每次迭代都重新取暂停标志（不能在循环外缓存一次）：
+                    # pause() 可能在本次 run_job 启动之后才创建/置位该 Event，
+                    # 若在循环外只取一次，续跑线程里拿到的会是旧引用（甚至是 None），
+                    # 导致后续块检测不到暂停请求而把整个任务跑完。
+                    pause_ev = self._pause.get(job.id)
+                    if pause_ev is not None and pause_ev.is_set():
+                        job.status = "paused"
+                        on_progress(job); self._notify(job)   # 存盘（on_change=store.save）
+                        return
+                    wav = self._extract(job.audio_path, start, dur)
+                    try:
+                        segs = backend.transcribe(wav, self.language, self.prompt)
+                    finally:
+                        if self._extract_fn is None:
+                            os.remove(wav)  # 真实临时文件才删；注入的假路径不删
+                    # 惰性初始化：只在第一块真正转成功后才创建 transcript。
+                    # 若在循环外提前初始化，第一块转写就失败时 transcript 会变成"非
+                    # None 的空对象"，破坏 server.py "transcript is None ⇒ 未完成/
+                    # 不可用" 的 409 判断契约；而失败前已转完的块要保留（支持从
+                    # failed 状态 resume 续跑，不丢已转部分）。
+                    if job.transcript is None:
+                        job.transcript = Transcript(segments=[])
+                    job.transcript.segments.extend(offset_segments(segs, start))
+                    job.chunks_done = index + 1
+                    job.progress = 0.85 * job.chunks_done / job.total_chunks
+                    on_progress(job); self._notify(job)
+
+                # 全部转完 → 整段分离（不可暂停）→ 对齐
+                job.progress = 0.85
                 on_progress(job)
                 turns = backend.diarize(job.audio_path, self.num_speakers)
-                job.progress = 0.9
+                job.progress = 0.95
                 on_progress(job)
-                labeled = align(segs, turns)
+                labeled = align(job.transcript.segments, turns)
                 job.transcript = Transcript(segments=labeled)
                 job.progress = 1.0
                 job.status = "done"
-                on_progress(job)
-                self._notify(job)
+                on_progress(job); self._notify(job)
             except Exception as e:  # 异常不外泄，写入 job
                 job.status = "failed"
                 job.error = str(e)
-                on_progress(job)
-                self._notify(job)
+                on_progress(job); self._notify(job)
+
+    def pause(self, job_id: str) -> bool:
+        """请求暂停：仅对运行中且处于转写阶段(progress<0.85)有效。返回是否被接受。"""
+        job = self._jobs.get(job_id)
+        if job is None or job.status != "running" or job.progress >= 0.85:
+            return False
+        self._pause.setdefault(job_id, threading.Event()).set()
+        return True
+
+    def resume(self, job_id: str) -> bool:
+        """从断点续跑：仅 paused/failed 可续。"""
+        job = self._jobs.get(job_id)
+        if job is None or job.status not in ("paused", "failed"):
+            return False
+        ev = self._pause.get(job_id)
+        if ev is not None:
+            ev.clear()
+        threading.Thread(target=self.run_job, args=(job, self._emit), daemon=True).start()
+        return True
 
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
