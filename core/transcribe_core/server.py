@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -141,6 +141,20 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
             return j.transcript.to_srt()
         return j.transcript.to_txt()
 
+    @app.get("/jobs/{job_id}/speaker_sample")
+    def speaker_sample(job_id: str, spk: str):
+        j = _job_or_404(job_id)
+        if j.transcript is None:
+            raise HTTPException(409, "转写未完成")
+        from .backend import sample_range
+        from .audio import extract_sample
+        rng = sample_range(j.transcript.segments, spk)
+        if rng is None:
+            raise HTTPException(404, "该说话人不存在")
+        start, dur = rng
+        data = extract_sample(j.audio_path, start, dur)
+        return Response(content=data, media_type="audio/mpeg")
+
     @app.get("/models")
     def list_models():
         return registry.list_models()
@@ -194,7 +208,11 @@ def main() -> None:  # 生产入口：注入真实 MlxBackend，随机端口，�
     from huggingface_hub import try_to_load_from_cache  # 判断模型是否已在本地缓存
 
     def is_downloaded(repo: str) -> bool:
-        return try_to_load_from_cache(repo, "config.json") is not None
+        # pyannote 类模型无 config.json（用 config.yaml），任一 marker 命中即视为已下载
+        for marker in ("config.json", "config.yaml"):
+            if try_to_load_from_cache(repo, marker) is not None:
+                return True
+        return False
 
     def download(repo: str) -> None:
         from huggingface_hub import snapshot_download

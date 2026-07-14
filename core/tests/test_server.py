@@ -152,6 +152,23 @@ def test_get_job_includes_chunk_and_phase(tmp_path):
     assert d["phase"] == "done"
 
 
+def test_speaker_sample_returns_audio(tmp_path):
+    import os, pytest
+    clip = os.path.expanduser("~/Workspace/develop/oneworkspace/local-ai/radio/测试短音频-8秒.m4a")
+    if not os.path.exists(clip):
+        pytest.skip("缺测试音频")
+    c = make_client(tmp_path)
+    jid = c.post("/jobs", json={"audio_path": clip}).json()["job_id"]
+    _wait_done(c, jid)
+    spk = c.get(f"/jobs/{jid}").json()["speakers"][0]["orig"]
+    r = c.get(f"/jobs/{jid}/speaker_sample", params={"spk": spk})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("audio/")
+    assert len(r.content) > 0
+
+test_speaker_sample_returns_audio = __import__("pytest").mark.slow(test_speaker_sample_returns_audio)
+
+
 def test_rename_persists_via_store(tmp_path):
     """rename 后通过 store 持久化，重启后能读回修改后的 speaker"""
     from transcribe_core.store import JobStore
