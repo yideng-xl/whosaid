@@ -29,6 +29,9 @@ export interface JobDetail {
   error: string | null;
   txt: string;
   speakers: Speaker[];
+  total_chunks: number;
+  chunks_done: number;
+  phase: string;
 }
 
 interface ProgressMessage {
@@ -79,6 +82,22 @@ export function createApi(port: number) {
 
     exportUrl(id: string, fmt: "txt" | "srt"): string {
       return `${base}/jobs/${id}/export?fmt=${fmt}`;
+    },
+
+    async pauseJob(id: string): Promise<void> {
+      await j(await fetch(`${base}/jobs/${id}/pause`, { method: "POST" }));
+    },
+
+    async resumeJob(id: string): Promise<void> {
+      await j(await fetch(`${base}/jobs/${id}/resume`, { method: "POST" }));
+    },
+
+    async deleteJob(id: string): Promise<void> {
+      await j(await fetch(`${base}/jobs/${id}`, { method: "DELETE" }));
+    },
+
+    speakerSampleUrl(id: string, spk: string): string {
+      return `${base}/jobs/${id}/speaker_sample?spk=${encodeURIComponent(spk)}`;
     },
 
     // 模型 API

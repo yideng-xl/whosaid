@@ -22,4 +22,43 @@ describe("api", () => {
     expect(api.exportUrl("job2", "srt")).toBe(
       "http://127.0.0.1:999/jobs/job2/export?fmt=srt");
   });
+
+  it("pauseJob POSTs to pause endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(2222);
+    await api.pauseJob("job7");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:2222/jobs/job7/pause",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("resumeJob POSTs to resume endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(2222);
+    await api.resumeJob("job7");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:2222/jobs/job7/resume",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("deleteJob DELETEs job endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(2222);
+    await api.deleteJob("job7");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:2222/jobs/job7",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("speakerSampleUrl encodes spk", () => {
+    const api = createApi(3333);
+    expect(api.speakerSampleUrl("j1", "说话人A")).toBe(
+      "http://127.0.0.1:3333/jobs/j1/speaker_sample?spk=" + encodeURIComponent("说话人A"));
+  });
 });
