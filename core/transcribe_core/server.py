@@ -193,7 +193,11 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
         finally:
             # job 达终态或连接结束（含客户端主动断开）都要摘除订阅通道，避免 _subscribers 无界增长
             queue.unsubscribe(job_id, ch)
-            await websocket.close()
+            # 客户端可能已先行发起关闭（例如收到终态帧后主动断开），此时再次 close 会触发
+            # "Cannot call send once a close message has been sent"，故先判连接态。
+            from starlette.websockets import WebSocketState
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.close()
 
     return app
 

@@ -169,6 +169,16 @@ def test_speaker_sample_returns_audio(tmp_path):
 test_speaker_sample_returns_audio = __import__("pytest").mark.slow(test_speaker_sample_returns_audio)
 
 
+def test_ws_job_closes_cleanly_after_done(tmp_path):
+    """已完成的 job：连上应收到一帧终态后正常关闭，不抛出连接态竞态异常。"""
+    c = make_client(tmp_path)
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+    with c.websocket_connect(f"/ws/jobs/{jid}") as ws:
+        msg = ws.receive_json()
+        assert msg["status"] == "done"
+
+
 def test_rename_persists_via_store(tmp_path):
     """rename 后通过 store 持久化，重启后能读回修改后的 speaker"""
     from transcribe_core.store import JobStore
