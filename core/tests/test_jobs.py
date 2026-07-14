@@ -247,3 +247,114 @@ def test_resume_continues_from_chunks_done():
     assert job.status == "done"
     assert len(calls) == 1          # 只补转了第 3 块，不重跑前 2 块
     assert job.chunks_done == 3
+
+
+def test_pause_during_single_last_chunk_is_honored():
+    """BUG-1 回归：单块(<2min)音频在(唯一/末)块转写途中点暂停，转完后应停在 paused 而非 done。
+    循环无下一次迭代观察标志，须靠循环后补检查捕获。"""
+    from transcribe_core.jobs import JobQueue
+    from transcribe_core.transcript import Segment
+
+    gate = threading.Event()
+    diarized = []
+
+    class SlowSingle(InferenceBackend):
+        id = "slowsingle"
+        def transcribe(self, audio_path, language, initial_prompt):
+            gate.wait(timeout=2)   # 唯一一块，阻塞期间主线程 pause
+            return [Segment(0.0, 1.0, "x")]
+        def diarize(self, audio_path, num_speakers):
+            diarized.append(audio_path)
+            return [(0.0, 1000.0, "S0")]
+
+    q = JobQueue(SlowSingle(), duration_fn=lambda p: 60.0,   # 单块
+                 extract_fn=lambda src, start, dur: f"/tmp/s_{start}.wav",
+                 chunk_sec=120.0)
+    jid = q.submit_async("/x/a.m4a")
+    time.sleep(0.2)                 # 进入(唯一块的)transcribe
+    assert q.pause(jid) is True     # 转写阶段可暂停
+    gate.set()                      # 放该块过；转完后循环结束
+    for _ in range(100):
+        if q.get(jid).status in ("paused", "done", "failed"):
+            break
+        time.sleep(0.02)
+    job = q.get(jid)
+    assert job.status == "paused"   # 修复前会是 done
+    assert job.total_chunks == 1 and job.chunks_done == 1
+    assert diarized == []           # 暂停后不应进入 diarize
+
+
+def test_resume_rejects_second_call_while_inflight():
+    """BUG-2 回归：已有线程在跑/排队(in-flight)时，二次 resume 幂等拒绝。"""
+    from transcribe_core.jobs import JobQueue, Job
+    from transcribe_core.transcript import Segment, Transcript
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda src, start, dur: src)
+    q.preload([Job(id="ji", audio_path="/x/a.m4a", status="paused", progress=0.4,
+                   transcript=Transcript(segments=[Segment(0, 1, "a")]),
+                   error=None, total_chunks=3, chunks_done=1)])
+    q._inflight.add("ji")            # 模拟已有线程在跑/排队
+    assert q.resume("ji") is False   # 幂等：拒绝二次续跑
+
+
+def test_double_resume_under_gate_contention_runs_once():
+    """BUG-2 端到端：闸门被 A 占住时对 failed 的 B 连点两次 resume，B 只应跑一遍
+    （不重复 diarize、不丢改名）。"""
+    from transcribe_core.jobs import JobQueue, Job
+
+    gate = threading.Event()
+    diarize_calls = []
+
+    class GateBackend(InferenceBackend):
+        id = "gate"
+        def transcribe(self, audio_path, language, initial_prompt):
+            gate.wait(timeout=2)     # 占住闸门的 A 任务在此阻塞
+            return [Segment(0.0, 1.0, "x")]
+        def diarize(self, audio_path, num_speakers):
+            diarize_calls.append(audio_path)
+            return [(0.0, 1000.0, "S0")]
+
+    q = JobQueue(GateBackend(), duration_fn=lambda p: 60.0,
+                 extract_fn=lambda src, start, dur: f"/tmp/g_{start}.wav",
+                 chunk_sec=120.0)
+    a = q.submit_async("/x/A.m4a")   # A 占住闸门（阻塞在 transcribe）
+    time.sleep(0.2)
+    q.preload([Job(id="B", audio_path="/x/B.m4a", status="failed", progress=0.0,
+                   transcript=None, error="旧错", total_chunks=0, chunks_done=0)])
+    r1 = q.resume("B")               # 此刻闸门被 A 占，两次都在 B 的 status 变 running 前
+    r2 = q.resume("B")
+    gate.set()                       # 放行 A，随后 B 排队跑
+    for _ in range(200):
+        if q.get("B").status in ("done", "failed") and q.get(a).status == "done":
+            break
+        time.sleep(0.02)
+    assert r1 is True and r2 is False               # 第二次被幂等拒绝
+    assert diarize_calls.count("/x/B.m4a") == 1     # B 只 diarize 一次
+
+
+def test_empty_audio_fails_with_friendly_error():
+    """BUG-3 回归：空/零时长音频不应抛 AttributeError，而是给人话错误。"""
+    from transcribe_core.jobs import JobQueue
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 0.0,
+                 extract_fn=lambda src, start, dur: src)
+    jid = q.submit("/x/empty.m4a")   # 同步跑
+    job = q.get(jid)
+    assert job.status == "failed"
+    assert "音频为空" in job.error
+
+
+def test_resume_clears_stale_error():
+    """BUG-4 回归：failed→resume→done 后，旧 error 应被清空。"""
+    from transcribe_core.jobs import JobQueue, Job
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda src, start, dur: src)
+    q.preload([Job(id="je", audio_path="/x/a.m4a", status="failed", progress=0.0,
+                   transcript=None, error="旧的失败信息", total_chunks=0, chunks_done=0)])
+    assert q.resume("je") is True
+    for _ in range(100):
+        if q.get("je").status == "done":
+            break
+        time.sleep(0.02)
+    job = q.get("je")
+    assert job.status == "done"
+    assert job.error is None         # 续跑成功后旧错误被清
