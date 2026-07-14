@@ -61,9 +61,10 @@ class JobQueue:
             self._on_change(job)
 
     def preload(self, jobs: list[Job]) -> None:
-        """预载历史 job 到队列（用于恢复持久化状态）"""
-        for j in jobs:
-            self._jobs[j.id] = j
+        """预载历史 job 到队列（用于恢复持久化状态）。加锁避免与后台 submit_async 竞态。"""
+        with self._lock:
+            for j in jobs:
+                self._jobs[j.id] = j
 
     def submit(self, audio_path: str) -> str:
         jid = self._new_id()
