@@ -9,12 +9,14 @@ pub fn parse_port(line: &str) -> Option<u16> {
 }
 
 /// 启动 `python -m transcribe_core.server`，逐行读 stdout 直到拿到端口。
-/// cwd 设为数据目录（内核在此落 config.json 与持久化数据），并透传数据目录
-/// 与 HF 镜像环境变量。返回子进程句柄与端口，供外壳持有/退出时 kill。
-pub fn spawn_service(python: &str, cwd: &str) -> std::io::Result<(Child, u16)> {
+/// cwd 设为数据目录（内核在此落 config.json 与持久化数据）；pythonpath 指向 core 根，
+/// 让未 pip 安装的 transcribe_core 可被导入。同时透传数据目录与 HF 镜像环境变量。
+/// 返回子进程句柄与端口，供外壳持有/退出时 kill。
+pub fn spawn_service(python: &str, cwd: &str, pythonpath: &str) -> std::io::Result<(Child, u16)> {
     let mut child = Command::new(python)
         .args(["-m", "transcribe_core.server"])
         .current_dir(cwd)
+        .env("PYTHONPATH", pythonpath)
         .env("WHOSAID_DATA_DIR", cwd)
         .env("HF_ENDPOINT", "https://hf-mirror.com")
         .stdout(Stdio::piped())

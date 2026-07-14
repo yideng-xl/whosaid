@@ -34,7 +34,7 @@
 </script>
 
 <aside class="sidebar">
-  <div class="brand">谁说的 · whosaid</div>
+  <div class="brand">whosaid</div>
 
   <div class="drop-hint" class:active={dragging}>
     把音频文件拖进窗口开始转写

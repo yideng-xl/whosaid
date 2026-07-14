@@ -12,14 +12,25 @@ struct ServiceProcess(Mutex<Option<std::process::Child>>);
 /// 已握手到的服务端口；None 表示尚未就绪，前端应轮询。
 struct ServicePort(Mutex<Option<u16>>);
 
-/// dev 阶段暂用绝对路径指向 core venv 的 python；Task 9 再做 resolve_python 健壮化。
+/// dev 阶段 core 仓库根（含 transcribe_core 包与 venv）：cargo run/tauri dev 的 cwd 为
+/// desktop/src-tauri/，故 core 在 ../../core；可用 WHOSAID_CORE 覆盖。返回绝对路径。
+fn core_root() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("WHOSAID_CORE") {
+        return std::path::PathBuf::from(p);
+    }
+    let mut p = std::env::current_dir().unwrap_or_default();
+    p.push("../../core");
+    // 规整掉 .. 段（失败则退回原路径），保证 PYTHONPATH 是绝对可用路径
+    std::fs::canonicalize(&p).unwrap_or(p)
+}
+
+/// dev 阶段的 python 解释器；Task 9 再做 resolve_python 健壮化。
 fn dev_python() -> String {
     std::env::var("WHOSAID_PYTHON").unwrap_or_else(|_| {
-        // cargo run/tauri dev 的 cwd 为 desktop/src-tauri/，core 在 transcribe-app/core，
-        // 故相对路径为 ../../core（Task 9 会换成基于可执行文件位置的 resolve_python）
-        let mut p = std::env::current_dir().unwrap_or_default();
-        p.push("../../core/venv/bin/python");
-        p.to_string_lossy().into_owned()
+        core_root()
+            .join("venv/bin/python")
+            .to_string_lossy()
+            .into_owned()
     })
 }
 
@@ -46,7 +57,10 @@ pub fn run() {
         .setup(|app| {
             let python = dev_python();
             let cwd = data_dir();
-            match sidecar::spawn_service(&python, &cwd) {
+            // transcribe_core 未 pip 安装进 venv，只能从 core 根目录导入；
+            // 故 cwd 用数据目录（config.json/持久化落此），PYTHONPATH 指向 core 根让 import 生效
+            let pythonpath = core_root().to_string_lossy().into_owned();
+            match sidecar::spawn_service(&python, &cwd, &pythonpath) {
                 Ok((child, port)) => {
                     *app.state::<ServiceProcess>().0.lock().unwrap() = Some(child);
                     *app.state::<ServicePort>().0.lock().unwrap() = Some(port);
