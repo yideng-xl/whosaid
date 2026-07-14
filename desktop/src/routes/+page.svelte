@@ -14,6 +14,7 @@
   let selectedJobId = $state<string | null>(null);
   let view = $state<"transcript" | "models">("transcript");
   let dragging = $state(false);
+  let errorBanner = $state<string | null>(null);
 
   // 已订阅进度的 job，避免重复开 WS
   const watching = new Set<string>();
@@ -63,7 +64,12 @@
           dragging = false;
         } else if (e.payload.type === "drop") {
           dragging = false;
-          for (const path of e.payload.paths) submit(path);
+          // 捕获整体异常，任何一步抛错都只弹横幅、不带崩界面
+          try {
+            for (const path of e.payload.paths) submit(path);
+          } catch (err) {
+            errorBanner = `处理拖入文件出错：${err}`;
+          }
         }
       });
     })();
@@ -89,13 +95,20 @@
   async function submit(path: string) {
     if (!api) return;
     // 只收音频文件，忽略其他误拖入
-    if (!/\.(m4a|mp3|wav|aac|flac|mp4|mov|ogg)$/i.test(path)) return;
-    const id = await api.submitJob(path);
-    const job: JobSummary = { id, status: "queued", progress: 0, error: null, audio_path: path };
-    jobs = [job, ...jobs];
-    selectedJobId = id;
-    view = "transcript";
-    subscribe(job);
+    if (!/\.(m4a|mp3|wav|aac|flac|mp4|mov|ogg)$/i.test(path)) {
+      errorBanner = `不支持的文件类型（只收音频）：${path}`;
+      return;
+    }
+    try {
+      const id = await api.submitJob(path);
+      const job: JobSummary = { id, status: "queued", progress: 0, error: null, audio_path: path };
+      jobs = [job, ...jobs];
+      selectedJobId = id;
+      view = "transcript";
+      subscribe(job);
+    } catch (err) {
+      errorBanner = `提交失败：${err}`;
+    }
   }
 
   function onSelect(id: string) {
@@ -111,6 +124,12 @@
   </div>
 {:else}
   <div class="layout">
+    {#if errorBanner}
+      <div class="err-banner">
+        <span>{errorBanner}</span>
+        <button onclick={() => (errorBanner = null)}>✕</button>
+      </div>
+    {/if}
     <Sidebar
       {jobs}
       {selectedJobId}
@@ -133,6 +152,26 @@
 <style>
   :global(html, body) { margin: 0; height: 100%; }
   .layout { display: flex; height: 100vh; }
+  .err-banner {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 10;
+    background: #cf3b3b;
+    color: #fff;
+    font-size: 13px;
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .err-banner button {
+    background: transparent;
+    border: none;
+    color: #fff;
+    cursor: pointer;
+    font-size: 14px;
+  }
   .content { flex: 1; overflow-y: auto; padding: 24px; box-sizing: border-box; }
   .placeholder { color: #9a9aa0; font-size: 14px; }
 
