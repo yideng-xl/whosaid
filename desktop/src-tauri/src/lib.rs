@@ -1,0 +1,79 @@
+//! Tauri 外壳入口：启动时 spawn Python 转写服务，握手拿端口存入 app 状态，
+//! 前端通过 `get_service_port` 命令拿端口后走 REST/WS 连本地服务；退出时 kill 子进程。
+mod sidecar;
+
+use std::sync::Mutex;
+
+use tauri::Manager;
+
+/// 持有 Python 子进程句柄，退出时 kill；用 Mutex<Option<..>> 便于 setup 后填入。
+struct ServiceProcess(Mutex<Option<std::process::Child>>);
+
+/// 已握手到的服务端口；None 表示尚未就绪，前端应轮询。
+struct ServicePort(Mutex<Option<u16>>);
+
+/// dev 阶段暂用绝对路径指向 core venv 的 python；Task 9 再做 resolve_python 健壮化。
+fn dev_python() -> String {
+    std::env::var("WHOSAID_PYTHON").unwrap_or_else(|_| {
+        // cargo run/tauri dev 的 cwd 为 desktop/src-tauri/，core 在 transcribe-app/core，
+        // 故相对路径为 ../../core（Task 9 会换成基于可执行文件位置的 resolve_python）
+        let mut p = std::env::current_dir().unwrap_or_default();
+        p.push("../../core/venv/bin/python");
+        p.to_string_lossy().into_owned()
+    })
+}
+
+/// 数据目录：~/Library/Application Support/whosaid（内核在此落 config.json 与持久化数据）。
+fn data_dir() -> String {
+    let mut base = std::env::var("HOME").unwrap_or_default();
+    base.push_str("/Library/Application Support/whosaid");
+    std::fs::create_dir_all(&base).ok();
+    base
+}
+
+#[tauri::command]
+fn get_service_port(state: tauri::State<'_, ServicePort>) -> Option<u16> {
+    *state.0.lock().unwrap()
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .manage(ServiceProcess(Mutex::new(None)))
+        .manage(ServicePort(Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![get_service_port])
+        .setup(|app| {
+            let python = dev_python();
+            let cwd = data_dir();
+            match sidecar::spawn_service(&python, &cwd) {
+                Ok((child, port)) => {
+                    *app.state::<ServiceProcess>().0.lock().unwrap() = Some(child);
+                    *app.state::<ServicePort>().0.lock().unwrap() = Some(port);
+                }
+                Err(e) => {
+                    // 启动失败先打日志，前端会因 get_service_port 一直为 None 显示“服务启动中…”；
+                    // Task 9 补 resolve_python 与错误事件推送。
+                    eprintln!("[whosaid] 服务启动失败: {e}（python={python}）");
+                }
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 窗口关闭时 kill 子进程，避免残留孤儿 python
+            if let tauri::WindowEvent::Destroyed = event {
+                if let Some(mut child) = window
+                    .app_handle()
+                    .state::<ServiceProcess>()
+                    .0
+                    .lock()
+                    .unwrap()
+                    .take()
+                {
+                    child.kill().ok();
+                }
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
