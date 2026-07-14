@@ -188,8 +188,10 @@
     <div class="toolbar">
       <div class="fname">{basename(audioPath)}</div>
       <div class="actions">
-        <button disabled={exporting} onclick={() => exportAs("txt")}>导出 TXT</button>
-        <button disabled={exporting} onclick={() => exportAs("srt")}>导出 SRT</button>
+        <button disabled={exporting} title="纯文字：说话人＋内容，适合阅读/存档/复制进文档"
+          onclick={() => exportAs("txt")}>导出文字稿</button>
+        <button disabled={exporting} title="带时间轴字幕(SRT)：适合配录像字幕、按时间定位"
+          onclick={() => exportAs("srt")}>导出字幕稿</button>
       </div>
     </div>
 
