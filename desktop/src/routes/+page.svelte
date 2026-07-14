@@ -17,6 +17,28 @@
   let view = $state<"transcript" | "models">("transcript");
   let dragging = $state(false);
   let errorBanner = $state<string | null>(null);
+  // 待确认删除的任务（点 ✕ 先弹确认，删除会永久丢失文字稿/字幕稿，不可恢复）
+  let deleteTarget = $state<{ id: string; name: string } | null>(null);
+
+  function basename(p: string): string {
+    const parts = p.split(/[\\/]/);
+    return parts[parts.length - 1] || p;
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget || !api) return;
+    const id = deleteTarget.id;
+    try {
+      await api.deleteJob(id);
+    } catch (e) {
+      errorBanner = `删除失败：${e}`;
+      deleteTarget = null;
+      return;
+    }
+    jobs = jobs.filter((j) => j.id !== id);
+    if (selectedJobId === id) selectedJobId = null;
+    deleteTarget = null;
+  }
 
   // 选中任务对象（供主区取文件名/状态）
   const selectedJob = $derived(jobs.find((j) => j.id === selectedJobId) ?? null);
@@ -132,6 +154,12 @@
   }
 </script>
 
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && deleteTarget) deleteTarget = null;
+  }}
+/>
+
 {#if !ready}
   <div class="boot">
     <div class="spinner"></div>
@@ -151,15 +179,10 @@
       {dragging}
       {onSelect}
       onOpenModels={() => (view = "models")}
-      onDelete={async (id) => {
-        try {
-          await api!.deleteJob(id);
-        } catch (e) {
-          errorBanner = `删除失败：${e}`;
-          return;
-        }
-        jobs = jobs.filter((j) => j.id !== id);
-        if (selectedJobId === id) selectedJobId = null;
+      onDelete={(id) => {
+        // 不直接删：先弹二次确认，避免误删丢失稿子
+        const j = jobs.find((x) => x.id === id);
+        deleteTarget = { id, name: j ? basename(j.audio_path) : id };
       }}
     />
     <main class="content">
@@ -192,6 +215,22 @@
         <div class="placeholder">从左侧选择一个任务，或把音频拖进窗口</div>
       {/if}
     </main>
+
+    {#if deleteTarget}
+      <div class="modal-backdrop" role="presentation">
+        <div class="modal" role="dialog" aria-modal="true">
+          <div class="modal-title">删除任务</div>
+          <p class="modal-body">
+            确定删除「{deleteTarget.name}」？<br />
+            删除后<b>文字稿和字幕稿都会永久丢失、无法恢复</b>。
+          </p>
+          <div class="modal-actions">
+            <button class="btn-cancel" onclick={() => (deleteTarget = null)}>取消</button>
+            <button class="btn-danger" onclick={confirmDelete}>删除</button>
+          </div>
+        </div>
+      </div>
+    {/if}
   </div>
 {/if}
 
@@ -252,4 +291,68 @@
     animation: spin 0.8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 删除二次确认 */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal {
+    width: 340px;
+    max-width: 90vw;
+    background: #fff;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  }
+  .modal-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 10px;
+  }
+  .modal-body {
+    font-size: 13px;
+    line-height: 1.7;
+    color: #4a4a4a;
+    margin: 0 0 18px;
+  }
+  .modal-body b { color: #cf3b3b; }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+  .modal-actions button {
+    padding: 7px 16px;
+    border-radius: 7px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .btn-cancel {
+    background: transparent;
+    border-color: #d8d8dc;
+    color: #333;
+  }
+  .btn-cancel:hover { border-color: #b0b0b6; }
+  .btn-danger {
+    background: #cf3b3b;
+    color: #fff;
+  }
+  .btn-danger:hover { background: #b83232; }
+
+  @media (prefers-color-scheme: dark) {
+    .modal { background: #26262a; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
+    .modal-title { color: #eaeaea; }
+    .modal-body { color: #c4c4c8; }
+    .btn-cancel { border-color: #3a3a40; color: #d0d0d4; }
+    .btn-cancel:hover { border-color: #55555c; }
+  }
 </style>
