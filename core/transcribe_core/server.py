@@ -68,7 +68,8 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
     @app.get("/jobs")
     def list_jobs():
         return [
-            {"id": j.id, "audio_path": j.audio_path, "status": j.status, "progress": j.progress, "error": j.error}
+            {"id": j.id, "audio_path": j.audio_path, "status": j.status,
+             "progress": j.progress, "error": j.error, "created_at": j.created_at}
             for j in queue.list()
         ]
 

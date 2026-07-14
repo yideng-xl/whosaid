@@ -21,6 +21,7 @@ class JobStore:
             "id": job.id, "audio_path": job.audio_path, "status": job.status,
             "progress": job.progress, "error": job.error,
             "total_chunks": job.total_chunks, "chunks_done": job.chunks_done,
+            "created_at": job.created_at,
             "transcript": job.transcript.to_dict() if job.transcript else None,
         }
         self._path(job.id).write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
@@ -37,8 +38,11 @@ class JobStore:
             if status in ("queued", "running"):
                 status, err = "failed", "应用中断，请重新提交"
             t = Transcript.from_dict(d["transcript"]) if d.get("transcript") else None
+            # 旧任务无 created_at：回退用 json 文件的修改时间，保证分组时间大致合理
+            created_at = d.get("created_at") or p.stat().st_mtime
             jobs.append(Job(id=d["id"], audio_path=d["audio_path"], status=status,
                             progress=d["progress"], transcript=t, error=err,
                             total_chunks=d.get("total_chunks", 0),
-                            chunks_done=d.get("chunks_done", 0)))
+                            chunks_done=d.get("chunks_done", 0),
+                            created_at=created_at))
         return jobs

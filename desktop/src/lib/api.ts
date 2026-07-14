@@ -6,6 +6,7 @@ export interface JobSummary {
   progress: number;
   error: string | null;
   audio_path: string;
+  created_at: number; // 拖入/提交时刻（epoch 秒），用于按时间分组倒序
 }
 
 export interface ModelInfo {

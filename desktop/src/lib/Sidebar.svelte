@@ -34,6 +34,30 @@
   function statusOf(s: string) {
     return STATUS[s] ?? { label: s, cls: "queued" };
   }
+
+  // 按「拖入时间」把任务分组：今天/昨天/具体日期，组内与组间都倒序（最新在上）
+  function dayLabel(ts: number): string {
+    const d = new Date(ts * 1000);
+    const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diff = Math.round((startOf(new Date()) - startOf(d)) / 86400000);
+    if (diff <= 0) return "今天";
+    if (diff === 1) return "昨天";
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${d.getFullYear()}-${mm}-${dd}`;
+  }
+
+  const grouped = $derived.by(() => {
+    const sorted = [...jobs].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+    const groups: { label: string; items: JobSummary[] }[] = [];
+    for (const j of sorted) {
+      const label = dayLabel(j.created_at ?? 0);
+      const last = groups[groups.length - 1];
+      if (!last || last.label !== label) groups.push({ label, items: [j] });
+      else last.items.push(j);
+    }
+    return groups;
+  });
 </script>
 
 <aside class="sidebar">
@@ -45,31 +69,34 @@
     {#if jobs.length === 0}
       <div class="empty">还没有任务</div>
     {/if}
-    {#each jobs as job (job.id)}
-      <!-- 用 div+role 而非 button：删除键是嵌套 button，button 内不可嵌 button（非法 HTML，
-           Chromium 会重排导致 ✕ 错位/点击失效）。role+tabindex+键盘处理保留可访问性。 -->
-      <div
-        class="job"
-        role="button"
-        tabindex="0"
-        class:selected={job.id === selectedJobId}
-        onclick={() => onSelect(job.id)}
-        onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(job.id); } }}
-      >
-        <div class="job-top">
-          <span class="name" title={job.audio_path}>{basename(job.audio_path)}</span>
-          <span class="badge {statusOf(job.status).cls}">{statusOf(job.status).label}</span>
-          {#if job.status !== "running" && job.status !== "queued"}
-            <button class="del" title="删除任务" onclick={(e) => { e.stopPropagation(); onDelete(job.id); }}>✕</button>
+    {#each grouped as group (group.label)}
+      <div class="group-label">{group.label}</div>
+      {#each group.items as job (job.id)}
+        <!-- 用 div+role 而非 button：删除键是嵌套 button，button 内不可嵌 button（非法 HTML，
+             Chromium 会重排导致 ✕ 错位/点击失效）。role+tabindex+键盘处理保留可访问性。 -->
+        <div
+          class="job"
+          role="button"
+          tabindex="0"
+          class:selected={job.id === selectedJobId}
+          onclick={() => onSelect(job.id)}
+          onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(job.id); } }}
+        >
+          <div class="job-top">
+            <span class="name" title={job.audio_path}>{basename(job.audio_path)}</span>
+            <span class="badge {statusOf(job.status).cls}">{statusOf(job.status).label}</span>
+            {#if job.status !== "running" && job.status !== "queued"}
+              <button class="del" title="删除任务" onclick={(e) => { e.stopPropagation(); onDelete(job.id); }}>✕</button>
+            {/if}
+          </div>
+          {#if job.status === "running" || job.status === "queued"}
+            <div class="bar"><div class="fill" style="width:{Math.round(job.progress * 100)}%"></div></div>
+          {/if}
+          {#if job.status === "failed" && job.error}
+            <div class="err">{job.error}</div>
           {/if}
         </div>
-        {#if job.status === "running" || job.status === "queued"}
-          <div class="bar"><div class="fill" style="width:{Math.round(job.progress * 100)}%"></div></div>
-        {/if}
-        {#if job.status === "failed" && job.error}
-          <div class="err">{job.error}</div>
-        {/if}
-      </div>
+      {/each}
     {/each}
   </div>
 
@@ -116,6 +143,13 @@
     text-align: center;
     padding: 20px 0;
   }
+  .group-label {
+    font-size: 11px;
+    color: var(--muted, #9a9aa0);
+    padding: 8px 2px 2px;
+    font-weight: 600;
+  }
+  .group-label:first-child { padding-top: 0; }
   .job {
     text-align: left;
     background: var(--card, #fff);

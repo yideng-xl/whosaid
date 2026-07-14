@@ -5,6 +5,7 @@ import itertools
 import os
 import queue as _q
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -29,6 +30,7 @@ class Job:
     error: str | None
     total_chunks: int = 0
     chunks_done: int = 0
+    created_at: float = 0.0   # 拖入/提交时刻（epoch 秒），供前端按时间分组倒序
 
 
 class JobQueue:
@@ -107,7 +109,7 @@ class JobQueue:
     def submit(self, audio_path: str) -> str:
         jid = self._new_id()
         job = Job(id=jid, audio_path=audio_path, status="queued",
-                  progress=0.0, transcript=None, error=None)
+                  progress=0.0, transcript=None, error=None, created_at=time.time())
         self._jobs[jid] = job
         self.run_job(job, on_progress=lambda j: None)
         return jid
@@ -134,7 +136,7 @@ class JobQueue:
         """提交任务并立即返回 job_id，实际转写在后台线程执行，可通过 subscribe 拿进度。"""
         jid = self._new_id()
         job = Job(id=jid, audio_path=audio_path, status="queued",
-                  progress=0.0, transcript=None, error=None)
+                  progress=0.0, transcript=None, error=None, created_at=time.time())
         self._jobs[jid] = job
         self._notify(job)
 

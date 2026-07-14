@@ -144,7 +144,10 @@
     }
     try {
       const id = await api.submitJob(path);
-      const job: JobSummary = { id, status: "queued", progress: 0, error: null, audio_path: path };
+      const job: JobSummary = {
+        id, status: "queued", progress: 0, error: null, audio_path: path,
+        created_at: Date.now() / 1000,
+      };
       jobs = [job, ...jobs];
       selectedJobId = id;
       view = "transcript";
