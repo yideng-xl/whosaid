@@ -49,6 +49,7 @@
   onMount(() => {
     let cancelled = false;
     let unlistenDrop: (() => void) | null = null;
+    const mountedAt = Date.now();
 
     // 0) 最先注册拖放监听：不依赖端口/服务，避免任何加载失败导致监听器注册不上。
     //    submit() 内部已 guard（api 未就绪时提示），所以早注册是安全的。
@@ -59,7 +60,12 @@
         } else if (e.payload.type === "leave") {
           dragging = false;
         } else if (e.payload.type === "drop") {
+          const wasHovering = dragging;
           dragging = false;
+          // 忽略启动瞬间的伪拖放事件（webview 重建时会重放上次的 drop，导致每次开
+          // 应用都自动提交上次拖的文件）：真实拖放必先经 enter/over 使 dragging=true，
+          // 且用户不可能在窗口刚出现的 2 秒内完成一次拖拽。二者任一不满足即视为伪事件。
+          if (!wasHovering || Date.now() - mountedAt < 2000) return;
           try {
             for (const path of e.payload.paths) submit(path);
           } catch (err) {

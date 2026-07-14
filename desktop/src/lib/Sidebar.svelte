@@ -37,8 +37,6 @@
 </script>
 
 <aside class="sidebar">
-  <div class="brand">whosaid</div>
-
   <div class="drop-hint" class:active={dragging}>
     把音频文件拖进窗口开始转写
   </div>
@@ -90,12 +88,6 @@
     background: var(--side-bg, #fafafa);
     padding: 12px;
     gap: 10px;
-  }
-  .brand {
-    font-weight: 600;
-    font-size: 14px;
-    color: var(--fg, #1a1a1a);
-    padding: 4px 2px;
   }
   .drop-hint {
     border: 1.5px dashed var(--line, #cfcfd4);
