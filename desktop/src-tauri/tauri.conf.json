@@ -14,7 +14,8 @@
       {
         "title": "whosaid",
         "width": 960,
-        "height": 680
+        "height": 680,
+        "dragDropEnabled": true
       }
     ],
     "security": {

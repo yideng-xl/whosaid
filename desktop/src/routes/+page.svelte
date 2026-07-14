@@ -23,55 +23,65 @@
     let cancelled = false;
     let unlistenDrop: (() => void) | null = null;
 
-    (async () => {
-      // 1) 轮询 Rust 侧拿服务端口（sidecar 起来并握手成功后返回非 null）
-      let port: number | null = null;
-      for (let i = 0; i < 120 && !cancelled; i++) {
-        port = await invoke<number | null>("get_service_port");
-        if (port) break;
-        await new Promise((r) => setTimeout(r, 500));
-      }
-      if (cancelled) return;
-      if (!port) {
-        statusText = "服务未能启动，请检查 core venv 是否就绪";
-        return;
-      }
-      const a = createApi(port);
-
-      // 2) 健康门：GET /models 成功即视为就绪
-      for (let i = 0; i < 20 && !cancelled; i++) {
-        try {
-          await a.listModels();
-          break;
-        } catch {
-          await new Promise((r) => setTimeout(r, 500));
-        }
-      }
-      if (cancelled) return;
-
-      api = a;
-      ready = true;
-
-      // 3) 载入历史任务并对未完成的订阅进度
-      jobs = await a.listJobs();
-      for (const j of jobs) subscribe(j);
-
-      // 4) 监听 Tauri 全局拖放事件
-      unlistenDrop = await getCurrentWebview().onDragDropEvent((e) => {
+    // 0) 最先注册拖放监听：不依赖端口/服务，避免任何加载失败导致监听器注册不上。
+    //    submit() 内部已 guard（api 未就绪时提示），所以早注册是安全的。
+    getCurrentWebview()
+      .onDragDropEvent((e) => {
         if (e.payload.type === "over" || e.payload.type === "enter") {
           dragging = true;
         } else if (e.payload.type === "leave") {
           dragging = false;
         } else if (e.payload.type === "drop") {
           dragging = false;
-          // 捕获整体异常，任何一步抛错都只弹横幅、不带崩界面
           try {
             for (const path of e.payload.paths) submit(path);
           } catch (err) {
             errorBanner = `处理拖入文件出错：${err}`;
           }
         }
-      });
+      })
+      .then((un) => {
+        if (cancelled) un();
+        else unlistenDrop = un;
+      })
+      .catch((err) => (errorBanner = `拖放监听注册失败：${err}`));
+
+    (async () => {
+      try {
+        // 1) 轮询 Rust 侧拿服务端口（sidecar 起来并握手成功后返回非 null）
+        let port: number | null = null;
+        for (let i = 0; i < 120 && !cancelled; i++) {
+          port = await invoke<number | null>("get_service_port");
+          if (port) break;
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        if (cancelled) return;
+        if (!port) {
+          statusText = "服务未能启动，请检查 core venv 是否就绪";
+          return;
+        }
+        const a = createApi(port);
+
+        // 2) 健康门：GET /models 成功即视为就绪
+        for (let i = 0; i < 20 && !cancelled; i++) {
+          try {
+            await a.listModels();
+            break;
+          } catch {
+            await new Promise((r) => setTimeout(r, 500));
+          }
+        }
+        if (cancelled) return;
+
+        api = a;
+        ready = true;
+
+        // 3) 载入历史任务并对未完成的订阅进度（失败不影响拖放/界面）
+        jobs = await a.listJobs();
+        for (const j of jobs) subscribe(j);
+      } catch (err) {
+        errorBanner = `初始化出错：${err}`;
+      }
     })();
 
     return () => {

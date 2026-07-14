@@ -24,7 +24,10 @@ interface ProgressMessage {
 }
 
 export function createApi(port: number) {
-  const base = `http://localhost:${port}`;
+  // 用 127.0.0.1 而非 localhost：服务由 uvicorn 绑在 127.0.0.1(IPv4)，
+  // 而 macOS 上 localhost 常先解析到 IPv6 ::1，导致 webview fetch 报 "Load failed"。
+  const host = `127.0.0.1:${port}`;
+  const base = `http://${host}`;
 
   // 辅助方法：统一错误处理和 JSON 解析
   const j = async (r: Response) => {
@@ -87,7 +90,7 @@ export function createApi(port: number) {
       id: string,
       onMsg: (m: ProgressMessage) => void
     ): () => void {
-      const ws = new WebSocket(`ws://localhost:${port}/ws/jobs/${id}`);
+      const ws = new WebSocket(`ws://${host}/ws/jobs/${id}`);
       ws.onmessage = (e) => onMsg(JSON.parse(e.data));
       // TODO(Task 9)：onerror/onclose 兜底——网络中断或服务重启时通知前端重连/刷新
       ws.onerror = () => console.warn(`[api] WS 进度连接异常 job=${id}`);

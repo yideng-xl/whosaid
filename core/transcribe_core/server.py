@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -25,6 +26,16 @@ class ActiveReq(BaseModel):
 
 def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
     app = FastAPI(title="本地转写服务")
+    # 桌面外壳(Tauri)的前端页面来自 localhost:1420/tauri://，与本服务(127.0.0.1:随机端口)
+    # 跨域。本服务仅监听回环、单机自用，放开所有来源即可，否则 webview 的 fetch 会被 CORS 拦成
+    # "Load failed"。不使用凭据，故 allow_credentials=False（与 allow_origins=* 兼容）。
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     def _job_or_404(job_id: str):
         job = queue.get(job_id)

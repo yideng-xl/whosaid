@@ -12,7 +12,7 @@ describe("api", () => {
     const id = await api.submitJob("/x/a.m4a");
     expect(id).toBe("job1");
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:12345/jobs",
+      "http://127.0.0.1:12345/jobs",
       expect.objectContaining({ method: "POST" }),
     );
   });
@@ -20,6 +20,6 @@ describe("api", () => {
   it("exportUrl builds correct url", () => {
     const api = createApi(999);
     expect(api.exportUrl("job2", "srt")).toBe(
-      "http://localhost:999/jobs/job2/export?fmt=srt");
+      "http://127.0.0.1:999/jobs/job2/export?fmt=srt");
   });
 });
