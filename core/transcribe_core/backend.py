@@ -52,6 +52,21 @@ def align(segments: list[Segment], turns: list[Turn]) -> list[Segment]:
     return result
 
 
+def sample_range(segments: list[Segment], speaker: str, max_sec: float = 6.0):
+    """找某说话人最长的一段，返回 (start, min(时长, max_sec))；无该说话人返回 None。"""
+    best = None  # (dur, start)
+    for s in segments:
+        if s.speaker != speaker:
+            continue
+        dur = s.end - s.start
+        if best is None or dur > best[0]:
+            best = (dur, s.start)
+    if best is None:
+        return None
+    dur, start = best
+    return (start, min(dur, max_sec))
+
+
 class InferenceBackend(ABC):
     """推理后端抽象。一期实现为 MlxBackend；扩展平台时新增实现即可。"""
 
