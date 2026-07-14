@@ -26,6 +26,21 @@ def test_sample_ranges_missing_speaker():
     assert sample_ranges(segs, "说话人Z") == []
 
 
+def test_sample_ranges_skips_hallucinated_segment():
+    segs = [
+        Segment(0, 5, "今天我们开个产品评审会", "说话人A"),      # 正常，5s
+        Segment(10, 30, "D D D D D D D D D D", "说话人A"),      # 噪声幻觉，20s 最长但应跳过
+    ]
+    # 尽管噪声段更长，也应选正常段
+    assert sample_ranges(segs, "说话人A", n=1) == [(0.0, 4.0)]
+
+
+def test_sample_ranges_falls_back_when_all_garbage():
+    segs = [Segment(10, 30, "D D D D D D D D D D", "说话人A")]
+    # 全是噪声段则回退，仍返回内容而非空
+    assert sample_ranges(segs, "说话人A", n=1) == [(10.0, 4.0)]
+
+
 def test_sample_range_picks_longest_and_caps():
     segs = [
         Segment(0, 2, "a", "说话人A"),

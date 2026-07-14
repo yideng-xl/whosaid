@@ -21,7 +21,7 @@ class JobStore:
             "id": job.id, "audio_path": job.audio_path, "status": job.status,
             "progress": job.progress, "error": job.error,
             "total_chunks": job.total_chunks, "chunks_done": job.chunks_done,
-            "created_at": job.created_at,
+            "created_at": job.created_at, "num_speakers": job.num_speakers,
             "transcript": job.transcript.to_dict() if job.transcript else None,
         }
         self._path(job.id).write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
@@ -44,5 +44,6 @@ class JobStore:
                             progress=d["progress"], transcript=t, error=err,
                             total_chunks=d.get("total_chunks", 0),
                             chunks_done=d.get("chunks_done", 0),
-                            created_at=created_at))
+                            created_at=created_at,
+                            num_speakers=d.get("num_speakers")))
         return jobs

@@ -9,6 +9,7 @@
     onSelect,
     onOpenModels,
     onDelete,
+    expectedSpeakers = $bindable(""),
   }: {
     jobs: JobSummary[];
     selectedJobId: string | null;
@@ -16,6 +17,7 @@
     onSelect: (id: string) => void;
     onOpenModels: () => void;
     onDelete: (id: string) => void;
+    expectedSpeakers?: string;
   } = $props();
 
   function basename(p: string): string {
@@ -64,6 +66,18 @@
   <div class="drop-hint" class:active={dragging}>
     把音频文件拖进窗口开始转写
   </div>
+
+  <label class="spk-hint" title="填这场会/录音的大致人数，能明显提升分辨谁在说话的准确率；不确定可留空自动">
+    预计人数
+    <input
+      type="number"
+      min="1"
+      max="20"
+      placeholder="自动"
+      bind:value={expectedSpeakers}
+    />
+    <span class="spk-tip">可选</span>
+  </label>
 
   <div class="job-list">
     {#if jobs.length === 0}
@@ -130,6 +144,25 @@
     background: color-mix(in srgb, var(--accent, #3b7ddd) 10%, transparent);
     color: var(--accent, #3b7ddd);
   }
+  .spk-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted, #8a8a90);
+    padding: 0 2px;
+  }
+  .spk-hint input {
+    width: 54px;
+    padding: 4px 6px;
+    border: 1px solid var(--line, #d8d8dc);
+    border-radius: 6px;
+    font: inherit;
+    font-size: 12px;
+    background: var(--input-bg, #fff);
+    color: var(--fg, #1a1a1a);
+  }
+  .spk-tip { color: var(--muted, #a8a8ae); font-size: 11px; margin-left: auto; }
   .job-list {
     flex: 1;
     overflow-y: auto;
@@ -233,7 +266,7 @@
   .models-entry:hover { color: var(--accent, #3b7ddd); }
 
   @media (prefers-color-scheme: dark) {
-    .sidebar { --line: #2a2a2e; --side-bg: #1b1b1e; --fg: #eaeaea; --muted: #8a8a90; --card: #232327; }
+    .sidebar { --line: #2a2a2e; --side-bg: #1b1b1e; --fg: #eaeaea; --muted: #8a8a90; --card: #232327; --input-bg: #17171a; }
     .badge.queued { background: #333; color: #bbb; }
     .badge.paused { background: #4a3416; color: #e3a44b; }
   }

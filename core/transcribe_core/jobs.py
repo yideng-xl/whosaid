@@ -31,6 +31,7 @@ class Job:
     total_chunks: int = 0
     chunks_done: int = 0
     created_at: float = 0.0   # 拖入/提交时刻（epoch 秒），供前端按时间分组倒序
+    num_speakers: int | None = None  # 用户填的预计说话人数，传给 pyannote 约束分离（None=自动）
 
 
 class JobQueue:
@@ -106,10 +107,11 @@ class JobQueue:
             for j in jobs:
                 self._jobs[j.id] = j
 
-    def submit(self, audio_path: str) -> str:
+    def submit(self, audio_path: str, num_speakers: int | None = None) -> str:
         jid = self._new_id()
         job = Job(id=jid, audio_path=audio_path, status="queued",
-                  progress=0.0, transcript=None, error=None, created_at=time.time())
+                  progress=0.0, transcript=None, error=None, created_at=time.time(),
+                  num_speakers=num_speakers)
         self._jobs[jid] = job
         self.run_job(job, on_progress=lambda j: None)
         return jid
@@ -132,11 +134,12 @@ class JobQueue:
             if not chans:
                 del self._subscribers[job_id]
 
-    def submit_async(self, audio_path: str) -> str:
+    def submit_async(self, audio_path: str, num_speakers: int | None = None) -> str:
         """提交任务并立即返回 job_id，实际转写在后台线程执行，可通过 subscribe 拿进度。"""
         jid = self._new_id()
         job = Job(id=jid, audio_path=audio_path, status="queued",
-                  progress=0.0, transcript=None, error=None, created_at=time.time())
+                  progress=0.0, transcript=None, error=None, created_at=time.time(),
+                  num_speakers=num_speakers)
         self._jobs[jid] = job
         self._notify(job)
 
@@ -210,7 +213,7 @@ class JobQueue:
                     # 全部转完 → 整段分离（不可暂停）→ 对齐
                     job.progress = 0.85
                     on_progress(job)
-                    turns = backend.diarize(job.audio_path, self.num_speakers)
+                    turns = backend.diarize(job.audio_path, job.num_speakers or self.num_speakers)
                     job.progress = 0.95
                     on_progress(job)
                     labeled = align(job.transcript.segments, turns)

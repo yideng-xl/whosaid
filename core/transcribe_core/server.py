@@ -13,6 +13,7 @@ from .models import ModelRegistry
 
 class SubmitReq(BaseModel):
     audio_path: str
+    num_speakers: int | None = None  # 用户预计说话人数，约束 pyannote 分离（缺省=自动）
 
 
 class RenameReq(BaseModel):
@@ -63,7 +64,7 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
     @app.post("/jobs")
     def submit(req: SubmitReq):
         # 用 submit_async 而非 submit：后台线程执行，接口立即返回，配合 WS 拿流式进度
-        return {"job_id": queue.submit_async(req.audio_path)}
+        return {"job_id": queue.submit_async(req.audio_path, req.num_speakers)}
 
     @app.get("/jobs")
     def list_jobs():

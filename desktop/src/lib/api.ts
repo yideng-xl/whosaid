@@ -59,11 +59,11 @@ export function createApi(port: number) {
       return j(await fetch(`${base}/jobs`));
     },
 
-    async submitJob(audioPath: string): Promise<string> {
+    async submitJob(audioPath: string, numSpeakers?: number): Promise<string> {
       const r = await fetch(`${base}/jobs`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ audio_path: audioPath }),
+        body: JSON.stringify({ audio_path: audioPath, num_speakers: numSpeakers ?? null }),
       });
       return (await j(r)).job_id;
     },
