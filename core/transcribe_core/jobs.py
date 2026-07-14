@@ -32,9 +32,10 @@ class JobQueue:
                  backend_factory: Callable[[str, str], InferenceBackend] | None = None,
                  registry=None,
                  language: str | None = "zh",
-                 prompt: str | None = None, num_speakers: int | None = None):
+                 prompt: str | None = None, num_speakers: int | None = None,
+                 on_change: Callable[[Job], None] | None = None):
         # backend：固定后端（向后兼容原有调用方式）
-        # backend_factory + registry：按“当前启用模型”动态构造后端，
+        # backend_factory + registry：按"当前启用模型"动态构造后端，
         #   优先于固定 backend——用于让模型切换在下一个任务生效
         self.backend = backend
         self._backend_factory = backend_factory
@@ -42,12 +43,30 @@ class JobQueue:
         self.language = language
         self.prompt = prompt
         self.num_speakers = num_speakers
+        self._on_change = on_change
         self._jobs: dict[str, Job] = {}
         self._subscribers: dict[str, list] = {}
         self._lock = threading.Lock()
 
+    def _new_id(self) -> str:
+        """跳过已存在 id（preload 历史 job 后，避免全局计数器从头产生碰撞）"""
+        while True:
+            jid = f"job{next(_ids)}"
+            if jid not in self._jobs:
+                return jid
+
+    def _notify(self, job: Job) -> None:
+        """状态变化时调用 on_change 钩子（如已设置）"""
+        if self._on_change is not None:
+            self._on_change(job)
+
+    def preload(self, jobs: list[Job]) -> None:
+        """预载历史 job 到队列（用于恢复持久化状态）"""
+        for j in jobs:
+            self._jobs[j.id] = j
+
     def submit(self, audio_path: str) -> str:
-        jid = f"job{next(_ids)}"
+        jid = self._new_id()
         job = Job(id=jid, audio_path=audio_path, status="queued",
                   progress=0.0, transcript=None, error=None)
         self._jobs[jid] = job
@@ -74,10 +93,11 @@ class JobQueue:
 
     def submit_async(self, audio_path: str) -> str:
         """提交任务并立即返回 job_id，实际转写在后台线程执行，可通过 subscribe 拿进度。"""
-        jid = f"job{next(_ids)}"
+        jid = self._new_id()
         job = Job(id=jid, audio_path=audio_path, status="queued",
                   progress=0.0, transcript=None, error=None)
         self._jobs[jid] = job
+        self._notify(job)
 
         def _emit(j: Job) -> None:
             with self._lock:
@@ -111,10 +131,12 @@ class JobQueue:
                 job.progress = 1.0
                 job.status = "done"
                 on_progress(job)
+                self._notify(job)
             except Exception as e:  # 异常不外泄，写入 job
                 job.status = "failed"
                 job.error = str(e)
                 on_progress(job)
+                self._notify(job)
 
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)

@@ -119,3 +119,25 @@ def test_switch_active_model_changes_backend_used_by_next_job(tmp_path):
     reg.set_active("whisper-small")
     q.submit("/x/b.m4a")
     assert received[-1][0] == "mlx-community/whisper-small-mlx"
+
+
+def test_preload_and_no_id_collision():
+    q = JobQueue(FakeBackend())
+    # 预载一个历史 job（占用 job1 名）
+    q.preload([Job(id="job1", audio_path="/x/a.m4a", status="done",
+                   progress=1.0, transcript=None, error=None)])
+    jid = q.submit("/x/b.m4a")  # 新任务不能覆盖已存在的 job1
+    assert jid != "job1"
+    assert q.get("job1") is not None and q.get(jid) is not None
+
+
+def test_on_change_called_on_terminal_and_submit():
+    seen = []
+    q = JobQueue(FakeBackend(), on_change=lambda j: seen.append((j.id, j.status)))
+    jid = q.submit_async("/x/a.m4a")
+    for _ in range(50):
+        if q.get(jid).status in ("done", "failed"):
+            break
+        time.sleep(0.02)
+    statuses = [s for _, s in seen]
+    assert "queued" in statuses and "done" in statuses
