@@ -42,3 +42,28 @@ def extract_sample(src: str, start: float, dur: float) -> bytes:
             return f.read()
     finally:
         os.remove(tmp)
+
+
+def extract_samples_concat(src: str, ranges: list[tuple[float, float]]) -> bytes:
+    """把多段 [(start, dur), ...] 各切一小段并拼接成一段 mp3，返回字节（试听用）。
+    用 concat 滤镜一次 ffmpeg 调用完成解码+拼接+重编码（n=1 也适用），避免 mp3 直接拷贝拼接的
+    时基/爆音问题。ranges 为空返回空字节。"""
+    if not ranges:
+        return b""
+    fd, outf = tempfile.mkstemp(suffix=".mp3")
+    os.close(fd)
+    try:
+        inputs: list[str] = []
+        for start, dur in ranges:
+            inputs += ["-ss", f"{start}", "-t", f"{dur}", "-i", src]
+        n = len(ranges)
+        filt = "".join(f"[{i}:a]" for i in range(n)) + f"concat=n={n}:v=0:a=1[out]"
+        subprocess.run(
+            ["ffmpeg", *inputs, "-filter_complex", filt, "-map", "[out]",
+             "-ac", "1", outf, "-y", "-loglevel", "error"],
+            check=True,
+        )
+        with open(outf, "rb") as f:
+            return f.read()
+    finally:
+        os.remove(outf)

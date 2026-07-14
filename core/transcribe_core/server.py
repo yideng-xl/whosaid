@@ -151,13 +151,13 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
         j = _job_or_404(job_id)
         if j.transcript is None:
             raise HTTPException(409, "转写未完成")
-        from .backend import sample_range
-        from .audio import extract_sample
-        rng = sample_range(j.transcript.segments, spk)
-        if rng is None:
+        from .backend import sample_ranges
+        from .audio import extract_samples_concat
+        # 取该说话人 3 段较长发言拼接：单段常混音难辨，多段更好判断是谁
+        ranges = sample_ranges(j.transcript.segments, spk)
+        if not ranges:
             raise HTTPException(404, "该说话人不存在")
-        start, dur = rng
-        data = extract_sample(j.audio_path, start, dur)
+        data = extract_samples_concat(j.audio_path, ranges)
         return Response(content=data, media_type="audio/mpeg")
 
     @app.get("/models")

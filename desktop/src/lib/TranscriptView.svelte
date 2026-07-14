@@ -16,24 +16,81 @@
     audioPath: string;
     // 由父组件透传的侧栏状态；变化（如转写完成）时触发重新取稿
     status: string;
-    onPause?: () => void;
-    onResume?: () => void;
+    // 返回 Promise 以便感知「请求是否失败」：请求本身失败(如 409)立即恢复按钮
+    onPause?: () => void | Promise<void>;
+    onResume?: () => void | Promise<void>;
   } = $props();
 
   let detail = $state<JobDetail | null>(null);
   let loadError = $state<string | null>(null);
   let exporting = $state(false);
 
-  // jobId 变化、或状态变化（转写中→完成）时重新取稿
+  // 暂停/继续的过渡态：从点击到真正生效有延迟（暂停需等当前块转完），期间按钮置灰显
+  // "暂停中…/启动中…"，避免用户以为没点上而反复点击。
+  let transitioning = $state<"pausing" | "resuming" | null>(null);
+
+  // 目标状态达成即清除过渡态（由每秒轮询的 detail 驱动）
   $effect(() => {
-    jobId;
-    status;
-    void load();
+    const st = detail?.status;
+    if (transitioning === "pausing" && st === "paused") transitioning = null;
+    else if (
+      transitioning === "resuming" &&
+      (st === "running" || st === "done" || st === "failed")
+    )
+      transitioning = null;
   });
 
-  async function load() {
+  async function doPause() {
+    transitioning = "pausing";
+    try {
+      await onPause?.();
+    } catch {
+      transitioning = null; // 请求即失败(如 409)则立即恢复可点
+    }
+  }
+  async function doResume() {
+    transitioning = "resuming";
+    try {
+      await onResume?.();
+    } catch {
+      transitioning = null;
+    }
+  }
+
+  // 切换任务 / 父状态跳变时：立即取一次，并对「未到终态」的任务开启每秒轮询刷新。
+  // 关键：WS 只驱动侧栏的 progress，主区 detail(块数/阶段/预览/稿子)不在 WS 消息里，
+  // 且转写全程 status 字符串恒为 "running" 不变——若只靠 jobId/status 触发重取，主区会冻在
+  // 选中那一刻(常是 0/0)，要切走再切回才更新。故运行中自行轮询，到 done/failed 停。
+  $effect(() => {
+    const id = jobId;
+    status; // 依赖父状态：完成/失败等跳变时重建轮询
+    let stopped = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
     detail = null;
     loadError = null;
+
+    const tick = async () => {
+      try {
+        const d = await api.getJob(id);
+        if (stopped || id !== jobId) return; // 已切走则丢弃这次结果，防竞态覆盖
+        detail = d;
+        loadError = null;
+        if (d.status === "done" || d.status === "failed") clearInterval(timer);
+      } catch (e) {
+        if (!stopped) loadError = `${e}`;
+      }
+    };
+
+    void tick(); // 立即拉一次，不等第一个轮询间隔
+    timer = setInterval(tick, 1000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  });
+
+  // 改名后手动刷新稿子与说话人列表（done 态，单次取即可）
+  async function load() {
     try {
       detail = await api.getJob(jobId);
     } catch (e) {
@@ -114,10 +171,14 @@
         <span>{detail.status === "paused" ? "已暂停" : "转写中"} {detail.chunks_done}/{detail.total_chunks} 块</span>
         <div class="bar"><div class="fill" style="width:{Math.round(detail.progress * 100)}%"></div></div>
       </div>
-      {#if detail.status === "paused"}
-        <button class="ctl" onclick={() => onResume?.()}>继续</button>
+      {#if transitioning === "pausing"}
+        <button class="ctl" disabled>暂停中…</button>
+      {:else if transitioning === "resuming"}
+        <button class="ctl" disabled>启动中…</button>
+      {:else if detail.status === "paused"}
+        <button class="ctl" onclick={doResume}>继续</button>
       {:else}
-        <button class="ctl" onclick={() => onPause?.()}>暂停</button>
+        <button class="ctl" onclick={doPause}>暂停</button>
       {/if}
       {#if detail.txt}<div class="preview">{detail.txt}</div>{/if}
     </div>
@@ -238,7 +299,8 @@
     font-size: 13px;
     cursor: pointer;
   }
-  .ctl:hover { opacity: 0.9; }
+  .ctl:hover:not(:disabled) { opacity: 0.9; }
+  .ctl:disabled { opacity: 0.5; cursor: default; }
   .preview {
     margin-top: 14px;
     padding-top: 12px;

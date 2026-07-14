@@ -67,6 +67,19 @@ def sample_range(segments: list[Segment], speaker: str, max_sec: float = 6.0):
     return (start, min(dur, max_sec))
 
 
+def sample_ranges(segments: list[Segment], speaker: str,
+                  n: int = 3, max_sec_each: float = 4.0) -> list[tuple[float, float]]:
+    """取该说话人最长的 n 段（各截前 max_sec_each 秒），按时间先后返回 [(start, dur), ...]。
+    多取几段拼起来：单段常混入他人说话/杂音，难以判断，给用户多个片段更好辨认。
+    无该说话人返回 []。"""
+    segs = [(s.end - s.start, s.start) for s in segments if s.speaker == speaker]
+    if not segs:
+        return []
+    segs.sort(reverse=True)               # 按时长降序，取最长的 n 段
+    top = sorted(segs[:n], key=lambda x: x[1])   # 再按起点时间升序，听起来自然、覆盖录音不同处
+    return [(start, min(dur, max_sec_each)) for dur, start in top]
+
+
 class InferenceBackend(ABC):
     """推理后端抽象。一期实现为 MlxBackend；扩展平台时新增实现即可。"""
 

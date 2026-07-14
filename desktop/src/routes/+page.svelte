@@ -176,6 +176,7 @@
               await api!.pauseJob(selectedJobId!);
             } catch (e) {
               errorBanner = `暂停失败：${e}`;
+              throw e; // 抛给 TranscriptView：请求即失败则立即恢复按钮
             }
           }}
           onResume={async () => {
@@ -183,6 +184,7 @@
               await api!.resumeJob(selectedJobId!);
             } catch (e) {
               errorBanner = `继续失败：${e}`;
+              throw e;
             }
           }}
         />
