@@ -4,6 +4,7 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import Sidebar from "$lib/Sidebar.svelte";
   import TranscriptView from "$lib/TranscriptView.svelte";
+  import ModelManager from "$lib/ModelManager.svelte";
   import { createApi, type JobSummary } from "$lib/api";
 
   type Api = ReturnType<typeof createApi>;
@@ -152,8 +153,8 @@
       onOpenModels={() => (view = "models")}
     />
     <main class="content">
-      {#if view === "models"}
-        <div class="placeholder">模型管理（Task 8 实现）</div>
+      {#if view === "models" && api}
+        <ModelManager {api} onClose={() => (view = "transcript")} />
       {:else if api && selectedJobId}
         <TranscriptView
           {api}
