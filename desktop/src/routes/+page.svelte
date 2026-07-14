@@ -170,8 +170,21 @@
 {/if}
 
 <style>
-  :global(html, body) { margin: 0; height: 100%; }
+  /* 全局主题：主区背景随明暗适配，避免深色模式下浅字落到白底看不清 */
+  :global(html, body) {
+    margin: 0;
+    height: 100%;
+    background: #ffffff;
+    color: #1a1a1a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :global(html, body) {
+      background: #1e1e21;
+      color: #eaeaea;
+    }
+  }
   .layout { display: flex; height: 100vh; }
+  .content { background: transparent; }
   .err-banner {
     position: fixed;
     top: 0; left: 0; right: 0;
