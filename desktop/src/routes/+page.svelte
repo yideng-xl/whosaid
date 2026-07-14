@@ -151,6 +151,16 @@
       {dragging}
       {onSelect}
       onOpenModels={() => (view = "models")}
+      onDelete={async (id) => {
+        try {
+          await api!.deleteJob(id);
+        } catch (e) {
+          errorBanner = `删除失败：${e}`;
+          return;
+        }
+        jobs = jobs.filter((j) => j.id !== id);
+        if (selectedJobId === id) selectedJobId = null;
+      }}
     />
     <main class="content">
       {#if view === "models" && api}

@@ -135,6 +135,24 @@ def test_delete_removes_job_and_file(tmp_path):
     assert JobStore(str(tmp_path / "data"))._path(jid).exists() is False
 
 
+def test_delete_running_job_returns_409(tmp_path):
+    """running/queued 的 job 后台线程仍在跑：删除应被拒绝（409），避免线程存活期间 job 被摘除、
+    且经 on_change=store.save 把已删 JSON 复活。"""
+    from transcribe_core.jobs import Job
+    from transcribe_core.store import JobStore
+    store = JobStore(str(tmp_path / "data"))
+    reg = ModelRegistry(str(tmp_path / "c.json"), is_downloaded_fn=lambda r: True, download_fn=lambda r: None)
+    q = JobQueue(FakeBackend(), on_change=store.save)
+    c = TestClient(create_app(q, reg, store))
+    jid = "job_running"
+    # 直接构造一个处于 running 态的 job（绕开真实后台线程，专注测服务端状态校验）
+    q._jobs[jid] = Job(id=jid, audio_path="/x/a.m4a", status="running", progress=0.5,
+                        transcript=None, error=None)
+    resp = c.delete(f"/jobs/{jid}")
+    assert resp.status_code == 409
+    assert q.get(jid) is not None  # 未被摘除
+
+
 def test_pause_resume_endpoints_return_ok_or_409(tmp_path):
     c = make_client(tmp_path)
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]

@@ -8,12 +8,14 @@
     dragging = false,
     onSelect,
     onOpenModels,
+    onDelete,
   }: {
     jobs: JobSummary[];
     selectedJobId: string | null;
     dragging: boolean;
     onSelect: (id: string) => void;
     onOpenModels: () => void;
+    onDelete: (id: string) => void;
   } = $props();
 
   function basename(p: string): string {
@@ -26,6 +28,7 @@
     running: { label: "转写中", cls: "running" },
     done: { label: "完成", cls: "done" },
     failed: { label: "失败", cls: "failed" },
+    paused: { label: "已暂停", cls: "paused" },
   };
 
   function statusOf(s: string) {
@@ -53,6 +56,9 @@
         <div class="job-top">
           <span class="name" title={job.audio_path}>{basename(job.audio_path)}</span>
           <span class="badge {statusOf(job.status).cls}">{statusOf(job.status).label}</span>
+          {#if job.status !== "running" && job.status !== "queued"}
+            <button class="del" title="删除任务" onclick={(e) => { e.stopPropagation(); onDelete(job.id); }}>✕</button>
+          {/if}
         </div>
         {#if job.status === "running" || job.status === "queued"}
           <div class="bar"><div class="fill" style="width:{Math.round(job.progress * 100)}%"></div></div>
@@ -147,6 +153,21 @@
   .badge.running { background: #e5efff; color: #2f6fd0; }
   .badge.done { background: #e3f6e8; color: #2c8a4b; }
   .badge.failed { background: #fde8e8; color: #cf3b3b; }
+  .badge.paused { background: #fdf0dc; color: #b9711a; }
+  .del {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    padding: 0 2px;
+    font-size: 12px;
+    line-height: 1;
+    color: var(--muted, #a0a0a6);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s, color 0.12s;
+  }
+  .job:hover .del { opacity: 1; }
+  .del:hover { color: #cf3b3b; }
   .bar {
     margin-top: 6px;
     height: 4px;
@@ -183,5 +204,6 @@
   @media (prefers-color-scheme: dark) {
     .sidebar { --line: #2a2a2e; --side-bg: #1b1b1e; --fg: #eaeaea; --muted: #8a8a90; --card: #232327; }
     .badge.queued { background: #333; color: #bbb; }
+    .badge.paused { background: #4a3416; color: #e3a44b; }
   }
 </style>

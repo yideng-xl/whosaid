@@ -116,8 +116,13 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
 
     @app.delete("/jobs/{job_id}")
     def delete_job(job_id: str):
-        _job_or_404(job_id)
+        j = _job_or_404(job_id)
+        # running/queued 时后台线程仍在跑：直接 pop 既不会停线程，线程还会经 on_change=store.save
+        # 把已删 JSON 复活，故仅允许终态（done/failed）与 paused 删除。
+        if j.status in ("running", "queued"):
+            raise HTTPException(409, "任务进行中，请先暂停或等待完成再删除")
         queue._jobs.pop(job_id, None)
+        queue._pause.pop(job_id, None)
         if store is not None:
             store.delete(job_id)
         return {"ok": True}
