@@ -118,6 +118,40 @@ def test_list_jobs_includes_audio_path(tmp_path):
     assert any(j["id"] == jid and j["audio_path"] == "/x/会议.m4a" for j in jobs)
 
 
+def test_delete_removes_job_and_file(tmp_path):
+    from transcribe_core.server import create_app
+    from transcribe_core.jobs import JobQueue
+    from transcribe_core.store import JobStore
+    from transcribe_core.models import ModelRegistry
+    from fastapi.testclient import TestClient
+    store = JobStore(str(tmp_path / "data"))
+    reg = ModelRegistry(str(tmp_path / "c.json"), is_downloaded_fn=lambda r: True, download_fn=lambda r: None)
+    q = JobQueue(FakeBackend(), on_change=store.save)
+    c = TestClient(create_app(q, reg, store))
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+    assert c.delete(f"/jobs/{jid}").json()["ok"] is True
+    assert all(j["id"] != jid for j in c.get("/jobs").json())
+    assert JobStore(str(tmp_path / "data"))._path(jid).exists() is False
+
+
+def test_pause_resume_endpoints_return_ok_or_409(tmp_path):
+    c = make_client(tmp_path)
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+    # 已完成的任务不可暂停 → 409
+    assert c.post(f"/jobs/{jid}/pause").status_code == 409
+
+
+def test_get_job_includes_chunk_and_phase(tmp_path):
+    c = make_client(tmp_path)
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+    d = c.get(f"/jobs/{jid}").json()
+    assert "total_chunks" in d and "chunks_done" in d
+    assert d["phase"] == "done"
+
+
 def test_rename_persists_via_store(tmp_path):
     """rename 后通过 store 持久化，重启后能读回修改后的 speaker"""
     from transcribe_core.store import JobStore

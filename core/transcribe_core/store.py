@@ -25,6 +25,9 @@ class JobStore:
         }
         self._path(job.id).write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
 
+    def delete(self, job_id: str) -> None:
+        self._path(job_id).unlink(missing_ok=True)
+
     def load_all(self) -> list[Job]:
         jobs: list[Job] = []
         for p in sorted(self.dir.glob("*.json")):

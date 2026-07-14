@@ -75,8 +75,9 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
     @app.get("/jobs/{job_id}")
     def get_job(job_id: str):
         j = _job_or_404(job_id)
+        done = j.status == "done"
         speakers = []
-        if j.transcript is not None:
+        if j.transcript is not None and done:
             # 去重保序地列出原始说话人标签及其当前显示名，供前端改名 UI 使用。
             # 用原始标签(seg.speaker)作为 rename 的 orig，才能反复改名（映射恒以原始标签为键）。
             seen = set()
@@ -86,11 +87,40 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
                     continue
                 seen.add(orig)
                 speakers.append({"orig": orig, "name": j.transcript.display_speaker(seg)})
+        if j.status in ("done", "failed", "paused", "queued"):
+            phase = j.status
+        else:  # running
+            phase = "diarizing" if j.progress >= 0.85 else "transcribing"
+        txt = ""
+        if j.transcript is not None:
+            txt = j.transcript.to_txt() if done else j.transcript.plain_text()
         return {
             "id": j.id, "status": j.status, "progress": j.progress, "error": j.error,
-            "txt": j.transcript.to_txt() if j.transcript else "",
-            "speakers": speakers,
+            "total_chunks": j.total_chunks, "chunks_done": j.chunks_done,
+            "phase": phase, "txt": txt, "speakers": speakers,
         }
+
+    @app.post("/jobs/{job_id}/pause")
+    def pause(job_id: str):
+        _job_or_404(job_id)
+        if not queue.pause(job_id):
+            raise HTTPException(409, "当前不可暂停（非转写阶段）")
+        return {"ok": True}
+
+    @app.post("/jobs/{job_id}/resume")
+    def resume(job_id: str):
+        _job_or_404(job_id)
+        if not queue.resume(job_id):
+            raise HTTPException(409, "当前不可继续")
+        return {"ok": True}
+
+    @app.delete("/jobs/{job_id}")
+    def delete_job(job_id: str):
+        _job_or_404(job_id)
+        queue._jobs.pop(job_id, None)
+        if store is not None:
+            store.delete(job_id)
+        return {"ok": True}
 
     @app.post("/jobs/{job_id}/rename")
     def rename(job_id: str, req: RenameReq):
