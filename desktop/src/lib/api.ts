@@ -52,11 +52,12 @@ export function createApi(port: number) {
     },
 
     async rename(id: string, orig: string, name: string): Promise<void> {
-      await fetch(`${base}/jobs/${id}/rename`, {
+      // 走 j() 包装：非 2xx（如转写未完成 409）会抛，调用方能感知失败
+      await j(await fetch(`${base}/jobs/${id}/rename`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ orig, name }),
-      });
+      }));
     },
 
     exportUrl(id: string, fmt: "txt" | "srt"): string {
@@ -69,15 +70,16 @@ export function createApi(port: number) {
     },
 
     async downloadModel(id: string): Promise<void> {
-      await fetch(`${base}/models/${id}/download`, { method: "POST" });
+      // 走 j()：下载失败（模型不存在等）能抛给调用方，不被静默吞掉
+      await j(await fetch(`${base}/models/${id}/download`, { method: "POST" }));
     },
 
     async setActive(id: string): Promise<void> {
-      await fetch(`${base}/models/active`, {
+      await j(await fetch(`${base}/models/active`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ model_id: id }),
-      });
+      }));
     },
 
     // WebSocket 进度订阅
@@ -87,6 +89,8 @@ export function createApi(port: number) {
     ): () => void {
       const ws = new WebSocket(`ws://localhost:${port}/ws/jobs/${id}`);
       ws.onmessage = (e) => onMsg(JSON.parse(e.data));
+      // TODO(Task 9)：onerror/onclose 兜底——网络中断或服务重启时通知前端重连/刷新
+      ws.onerror = () => console.warn(`[api] WS 进度连接异常 job=${id}`);
       return () => ws.close();
     },
   };
