@@ -175,7 +175,12 @@
 
   async function doRediarize() {
     showRediarizeConfirm = false;
-    countSyncedFor = ""; // 允许下一轮轮询用新的回显值重新同步草稿
+    // 不重置 countSyncedFor：草稿 countDraft 本身就是本次提交的值 n，后端 rediarize
+    // 完成后会把 detail.num_speakers 写成同一个 n，届时 baselineCount 自然等于
+    // countDraft，showRediarize 自动变 false。若在此重置守卫，回显同步 $effect 会在
+    // 下一个 microtask（后端尚未跑完、detail 还是旧值）用旧的 num_speakers 把 countDraft
+    // 覆盖回旧值，导致完成后 baselineCount 变新值而 countDraft 卡在旧值，「重新分人」
+    // 按钮假性重新出现、输入框显示错误人数。
     await onRediarize(parseCount(countDraft));
   }
 
@@ -203,6 +208,12 @@
     }
   }
 </script>
+
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && showRediarizeConfirm) showRediarizeConfirm = false;
+  }}
+/>
 
 <div class="view">
   {#if detail}
@@ -279,7 +290,14 @@
   {/if}
 
   {#if showRediarizeConfirm}
-    <div class="modal-backdrop" role="presentation">
+    <div
+      class="modal-backdrop"
+      role="presentation"
+      onclick={(e) => {
+        // 只在点到遮罩本身(而非冒泡自内部弹窗)时关闭，避免给内层 .modal 加事件处理器触发 a11y 警告
+        if (e.target === e.currentTarget) showRediarizeConfirm = false;
+      }}
+    >
       <div class="modal" role="dialog" aria-modal="true">
         <div class="modal-title">重新分人</div>
         <p class="modal-body">
