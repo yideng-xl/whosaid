@@ -516,26 +516,30 @@ git commit -m "feat: 前端 setNumSpeakers/rediarize 接口 + jobState 纯逻辑
 
 ---
 
-### Task 5: 侧栏移除全局人数框 + 「分人中」徽标
+### Task 5: 移除全局人数(Sidebar + +page) + 「分人中」徽标
+
+删除全局人数是一件事、横跨两文件,必须一起改才能保持编译通过(Sidebar 删 prop、+page 删绑定)。
 
 **Files:**
 - Modify: `desktop/src/lib/Sidebar.svelte`
+- Modify: `desktop/src/routes/+page.svelte`
 
 **Interfaces:**
 - Consumes: `JobSummary`(含 `status`、`progress`)
-- 移除: `expectedSpeakers` prop(下游 Task 7 的 +page 同步移除绑定)
+- 移除: Sidebar `expectedSpeakers` prop 与 +page 的 `expectedSpeakers` state/`bind:`/submit 传参
+- 保留不动: +page 的 `onRediarize` 接线留给 Task 7;`api.submitJob(path)` 第二参可选,省略即 null
 
-- [ ] **Step 1: 先读文件**
+- [ ] **Step 1: 先读两文件**
 
-Read `desktop/src/lib/Sidebar.svelte` 全文(当前含 `expectedSpeakers = $bindable("")` prop、`.spk-hint` 输入块、`statusOf` 徽标)。
+Read `desktop/src/lib/Sidebar.svelte` 与 `desktop/src/routes/+page.svelte` 全文。Sidebar 当前含 `expectedSpeakers = $bindable("")` prop、`.spk-hint` 输入块、`statusOf` 徽标;+page 含 `let expectedSpeakers = $state<string>("")`、`<Sidebar ... bind:expectedSpeakers ... />`、`submit()` 内 `parseInt(expectedSpeakers)`。
 
-- [ ] **Step 2: 移除全局人数框**
+- [ ] **Step 2: Sidebar 移除全局人数框**
 
 - 删除 `$props()` 解构里的 `expectedSpeakers = $bindable(""),` 及类型 `expectedSpeakers?: string;`。
 - 删除模板中整个 `<label class="spk-hint" ...>...</label>` 块。
 - 删除 `<style>` 里 `.spk-hint`、`.spk-hint input`、`.spk-tip` 三条规则,以及深色模式里 `--input-bg`(若仅此处用)。
 
-- [ ] **Step 3: 「分人中」徽标**
+- [ ] **Step 3: Sidebar 「分人中」徽标**
 
 在 `statusOf` 函数后新增按进度细分的辅助,并在模板改用它:
 
@@ -550,17 +554,23 @@ Read `desktop/src/lib/Sidebar.svelte` 全文(当前含 `expectedSpeakers = $bind
 
 模板里把 `{statusOf(job.status).cls}` / `{statusOf(job.status).label}` 两处改为 `{badgeFor(job).cls}` / `{badgeFor(job).label}`。
 
-- [ ] **Step 4: 类型检查**
+- [ ] **Step 4: +page 移除全局人数**
+
+- 删除 `let expectedSpeakers = $state<string>("");` 及其上方注释。
+- `submit()` 里删掉 `const n = parseInt(expectedSpeakers, 10);` 一行,把提交改为不带人数:`const id = await api.submitJob(path);`。
+- `<Sidebar ... />` 删除 `bind:expectedSpeakers`。
+- (不要动 `<TranscriptView ...>`;onRediarize 是 Task 7 的活。)
+
+- [ ] **Step 5: 类型检查**
 
 Run: `cd desktop && npm run check`
-Expected: 0 errors(会顺带暴露 +page 仍在 `bind:expectedSpeakers` → Task 7 修复;若本步报此错,记录待 Task 7 解决,不在此改 +page)
-注:若 svelte-check 因 +page 绑定报错,先跳过 commit,与 Task 7 合并验证;否则本步可独立通过。
+Expected: 0 errors、0 warnings(两文件同改后应干净通过)
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 6: 提交**
 
 ```bash
-git add desktop/src/lib/Sidebar.svelte
-git commit -m "feat: 侧栏移除全局人数框 + 新增分人中徽标"
+git add desktop/src/lib/Sidebar.svelte desktop/src/routes/+page.svelte
+git commit -m "feat: 移除全局人数框 + 侧栏分人中徽标"
 ```
 
 ---
@@ -692,22 +702,17 @@ git commit -m "feat: 详情面板人数控件 + 重新分人 + 改名确认"
 
 ---
 
-### Task 7: +page 移除全局人数 + 接线 onRediarize + 重订阅
+### Task 7: +page 接线 onRediarize + 重订阅
+
+(全局人数已在 Task 5 移除;本任务只加重新分人接线。)
 
 **Files:**
 - Modify: `desktop/src/routes/+page.svelte`
 
 **Interfaces:**
 - Consumes: `api.rediarize`(Task 4)、TranscriptView `onRediarize`(Task 6)、`subscribe`(现有)
-- 移除: `expectedSpeakers` state 与 `bind:expectedSpeakers`
 
-- [ ] **Step 1: 移除全局人数**
-
-- 删除 `let expectedSpeakers = $state<string>("");` 及其注释。
-- `submit()` 里删掉 `const n = parseInt(...)`,把提交改为不带人数:`const id = await api.submitJob(path);`(api.submitJob 第二参可选,省略即 null)。
-- `<Sidebar ... />` 删除 `bind:expectedSpeakers`。
-
-- [ ] **Step 2: 接线 onRediarize(乐观重订阅)**
+- [ ] **Step 1: 接线 onRediarize(乐观重订阅)**
 
 在 `<TranscriptView ... onResume={...} />` 里追加 `onRediarize`:
 
@@ -731,16 +736,16 @@ git commit -m "feat: 详情面板人数控件 + 重新分人 + 改名确认"
 
 (说明:`subscribe` 现有守卫会因 status 变为 running 而放行订阅;`watching.delete` 是为绕过"已订阅过"判定重新建连。)
 
-- [ ] **Step 3: 类型检查 + 单测**
+- [ ] **Step 2: 类型检查 + 单测**
 
 Run: `cd desktop && npm run check && npm test -- --run`
 Expected: svelte-check 0 errors、0 warnings;vitest 全绿。
 
-- [ ] **Step 4: 提交**
+- [ ] **Step 3: 提交**
 
 ```bash
 git add desktop/src/routes/+page.svelte
-git commit -m "feat: +page 移除全局人数 + 接线重新分人重订阅"
+git commit -m "feat: +page 接线重新分人重订阅"
 ```
 
 ---
@@ -779,6 +784,6 @@ cd desktop && WHOSAID_PYTHON=$(cd ../core && pwd)/venv/bin/python HF_ENDPOINT=ht
 
 ## Self-Review(计划自查)
 
-- **Spec 覆盖:** 侧栏删框→T5;右侧人数控件+状态机→T6;set_num_speakers→T1/T3;rediarize(清真名/复用闸门/幂等)→T2/T3;GET 回显→T3;新拖入流程(不带人数)→T7;重订阅→T7;分人中徽标→T5;改名确认→T6。全覆盖。
+- **Spec 覆盖:** 侧栏删框 + 新拖入不带人数→T5;右侧人数控件+状态机→T6;set_num_speakers→T1/T3;rediarize(清真名/复用闸门/幂等)→T2/T3;GET 回显→T3;重订阅→T7;分人中徽标→T5;改名确认→T6。全覆盖。
 - **占位符:** 无 TBD/TODO;所有代码步给出完整代码或明确"读文件后改哪几处"。
 - **类型一致:** `set_num_speakers(job_id, n)`、`rediarize(job_id, n)`、`api.setNumSpeakers(id,n)`、`api.rediarize(id,n)`、`canEditSpeakerCount(status,progress)`、`isRenamed(speakers)`、`parseCount(v)`、`onRediarize(n)` 全程一致;body 均 `{num_speakers}`;`JobDetail.num_speakers` 与 GET 返回字段名一致。
