@@ -17,8 +17,6 @@
   let view = $state<"transcript" | "models">("transcript");
   let dragging = $state(false);
   let errorBanner = $state<string | null>(null);
-  // 预计说话人数（可选）：填了就传给 pyannote 约束分离，明显提升多人会议的分人准确率；空=自动
-  let expectedSpeakers = $state<string>("");
   // 待确认删除的任务（点 ✕ 先弹确认，删除会永久丢失文字稿/字幕稿，不可恢复）
   let deleteTarget = $state<{ id: string; name: string } | null>(null);
 
@@ -145,8 +143,7 @@
       return;
     }
     try {
-      const n = parseInt(expectedSpeakers, 10);
-      const id = await api.submitJob(path, Number.isFinite(n) && n > 0 ? n : undefined);
+      const id = await api.submitJob(path);
       const job: JobSummary = {
         id, status: "queued", progress: 0, error: null, audio_path: path,
         created_at: Date.now() / 1000,
@@ -190,7 +187,6 @@
       {selectedJobId}
       {dragging}
       {onSelect}
-      bind:expectedSpeakers
       onOpenModels={() => (view = "models")}
       onDelete={(id) => {
         // 不直接删：先弹二次确认，避免误删丢失稿子
