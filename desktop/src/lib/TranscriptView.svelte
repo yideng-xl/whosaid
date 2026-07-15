@@ -507,12 +507,11 @@
   }
   .btn-danger:hover { background: #b83232; }
 
-  @media (prefers-color-scheme: dark) {
-    .view { --line: #2a2a2e; --card: #232327; --fg: #eaeaea; --muted: #8a8a90; }
-    .modal { background: #26262a; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
-    .modal-title { color: #eaeaea; }
-    .modal-body { color: #c4c4c8; }
-    .btn-cancel { border-color: #3a3a40; color: #d0d0d4; }
-    .btn-cancel:hover { border-color: #55555c; }
-  }
+  /* 深色主题：由 <html data-theme="dark"> 驱动，不再依赖媒体查询；边框调亮、卡片压深以拉开明暗对比 */
+  :global(:root[data-theme="dark"]) .view { --line: #3a3a40; --card: #1f1f23; --fg: #eaeaea; --muted: #8a8a90; }
+  :global(:root[data-theme="dark"]) .modal { background: #26262a; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
+  :global(:root[data-theme="dark"]) .modal-title { color: #eaeaea; }
+  :global(:root[data-theme="dark"]) .modal-body { color: #c4c4c8; }
+  :global(:root[data-theme="dark"]) .btn-cancel { border-color: #3a3a40; color: #d0d0d4; }
+  :global(:root[data-theme="dark"]) .btn-cancel:hover { border-color: #55555c; }
 </style>

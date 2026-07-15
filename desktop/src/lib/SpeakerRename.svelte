@@ -211,7 +211,6 @@
   }
   @keyframes play-spin { to { transform: rotate(360deg); } }
 
-  @media (prefers-color-scheme: dark) {
-    .rename { --line: #2a2a2e; --card: #202024; --fg: #eaeaea; --input-bg: #17171a; }
-  }
+  /* 深色主题：由 <html data-theme="dark"> 驱动，不再依赖媒体查询；边框调亮以拉开明暗对比 */
+  :global(:root[data-theme="dark"]) .rename { --line: #3a3a40; --card: #202024; --fg: #eaeaea; --input-bg: #17171a; }
 </style>

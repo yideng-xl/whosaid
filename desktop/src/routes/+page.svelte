@@ -6,6 +6,7 @@
   import TranscriptView from "$lib/TranscriptView.svelte";
   import ModelManager from "$lib/ModelManager.svelte";
   import { createApi, type JobSummary } from "$lib/api";
+  import { resolveInitialTheme, applyTheme, saveTheme, type Theme } from "$lib/theme";
 
   type Api = ReturnType<typeof createApi>;
 
@@ -17,6 +18,14 @@
   let view = $state<"transcript" | "models">("transcript");
   let dragging = $state(false);
   let errorBanner = $state<string | null>(null);
+  // 深色/浅色主题：未手动选过时跟随系统，选过则覆盖系统并持久化到 localStorage
+  let theme = $state<Theme>("light");
+
+  function toggleTheme() {
+    theme = theme === "dark" ? "light" : "dark";
+    applyTheme(theme);
+    saveTheme(theme);
+  }
   // 待确认删除的任务（点 ✕ 先弹确认，删除会永久丢失文字稿/字幕稿，不可恢复）
   let deleteTarget = $state<{ id: string; name: string } | null>(null);
 
@@ -50,6 +59,10 @@
     let cancelled = false;
     let unlistenDrop: (() => void) | null = null;
     const mountedAt = Date.now();
+
+    // 初始化主题：读 localStorage，没有则跟随系统偏好；写入 data-theme 使 CSS 规则生效
+    theme = resolveInitialTheme();
+    applyTheme(theme);
 
     // 0) 最先注册拖放监听：不依赖端口/服务，避免任何加载失败导致监听器注册不上。
     //    submit() 内部已 guard（api 未就绪时提示），所以早注册是安全的。
@@ -188,6 +201,8 @@
       {dragging}
       {onSelect}
       onOpenModels={() => (view = "models")}
+      currentTheme={theme}
+      onToggleTheme={toggleTheme}
       onDelete={(id) => {
         // 不直接删：先弹二次确认，避免误删丢失稿子
         const j = jobs.find((x) => x.id === id);
@@ -266,11 +281,10 @@
     background: #ffffff;
     color: #1a1a1a;
   }
-  @media (prefers-color-scheme: dark) {
-    :global(html, body) {
-      background: #1e1e21;
-      color: #eaeaea;
-    }
+  /* 深色主题：由 <html data-theme="dark"> 驱动，不再依赖媒体查询；主背景压更深以拉开明暗对比 */
+  :global(:root[data-theme="dark"] body) {
+    background: #141416;
+    color: #eaeaea;
   }
   .layout { display: flex; height: 100vh; }
   .content { background: transparent; }
@@ -372,11 +386,9 @@
   }
   .btn-danger:hover { background: #b83232; }
 
-  @media (prefers-color-scheme: dark) {
-    .modal { background: #26262a; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
-    .modal-title { color: #eaeaea; }
-    .modal-body { color: #c4c4c8; }
-    .btn-cancel { border-color: #3a3a40; color: #d0d0d4; }
-    .btn-cancel:hover { border-color: #55555c; }
-  }
+  :global(:root[data-theme="dark"]) .modal { background: #26262a; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
+  :global(:root[data-theme="dark"]) .modal-title { color: #eaeaea; }
+  :global(:root[data-theme="dark"]) .modal-body { color: #c4c4c8; }
+  :global(:root[data-theme="dark"]) .btn-cancel { border-color: #3a3a40; color: #d0d0d4; }
+  :global(:root[data-theme="dark"]) .btn-cancel:hover { border-color: #55555c; }
 </style>

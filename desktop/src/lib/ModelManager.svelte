@@ -177,10 +177,9 @@
   .ops button:disabled { opacity: 0.5; cursor: default; }
   .note { font-size: 12px; color: var(--muted, #9a9aa0); margin-top: 8px; line-height: 1.6; }
 
-  @media (prefers-color-scheme: dark) {
-    .mm { --line: #2a2a2e; --card: #232327; --fg: #eaeaea; --muted: #8a8a90; }
-    .tag.on { background: #1c3a5e; color: #7fb0ff; }
-    .tag.ok { background: #1e3d28; color: #7fd39a; }
-    .tag.no { background: #333; color: #aaa; }
-  }
+  /* 深色主题：由 <html data-theme="dark"> 驱动，不再依赖媒体查询；边框调亮、卡片压深以拉开明暗对比 */
+  :global(:root[data-theme="dark"]) .mm { --line: #3a3a40; --card: #1f1f23; --fg: #eaeaea; --muted: #8a8a90; }
+  :global(:root[data-theme="dark"]) .tag.on { background: #1c3a5e; color: #7fb0ff; }
+  :global(:root[data-theme="dark"]) .tag.ok { background: #1e3d28; color: #7fd39a; }
+  :global(:root[data-theme="dark"]) .tag.no { background: #333; color: #aaa; }
 </style>

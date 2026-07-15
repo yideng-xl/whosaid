@@ -9,6 +9,8 @@
     onSelect,
     onOpenModels,
     onDelete,
+    currentTheme = "light",
+    onToggleTheme,
   }: {
     jobs: JobSummary[];
     selectedJobId: string | null;
@@ -16,6 +18,9 @@
     onSelect: (id: string) => void;
     onOpenModels: () => void;
     onDelete: (id: string) => void;
+    // 当前主题与切换回调：由 +page 统一持有并下发
+    currentTheme?: "light" | "dark";
+    onToggleTheme?: () => void;
   } = $props();
 
   function basename(p: string): string {
@@ -107,7 +112,12 @@
     {/each}
   </div>
 
-  <button class="models-entry" onclick={onOpenModels}>⚙ 模型管理</button>
+  <div class="footer">
+    <button class="models-entry" onclick={onOpenModels}>⚙ 模型管理</button>
+    <button class="theme-toggle" title="切换深色/浅色" onclick={onToggleTheme}>
+      {currentTheme === "dark" ? "☀️" : "🌙"}
+    </button>
+  </div>
 </aside>
 
 <style>
@@ -226,22 +236,39 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-top: 1px solid var(--line, #e8e8ec);
+    padding-top: 6px;
+  }
   .models-entry {
     text-align: left;
     background: transparent;
     border: none;
-    border-top: 1px solid var(--line, #e8e8ec);
-    padding: 10px 4px 2px;
+    padding: 4px 4px 2px;
     cursor: pointer;
     font: inherit;
     font-size: 13px;
     color: var(--muted, #6a6a70);
   }
   .models-entry:hover { color: var(--accent, #3b7ddd); }
-
-  @media (prefers-color-scheme: dark) {
-    .sidebar { --line: #2a2a2e; --side-bg: #1b1b1e; --fg: #eaeaea; --muted: #8a8a90; --card: #232327; }
-    .badge.queued { background: #333; color: #bbb; }
-    .badge.paused { background: #4a3416; color: #e3a44b; }
+  .theme-toggle {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    padding: 4px 6px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    border-radius: 6px;
+    transition: background 0.12s;
   }
+  .theme-toggle:hover { background: color-mix(in srgb, var(--accent, #3b7ddd) 12%, transparent); }
+
+  /* 深色主题：由 <html data-theme="dark"> 驱动，不再依赖媒体查询；边框调亮、背景压深以拉开明暗对比 */
+  :global(:root[data-theme="dark"]) .sidebar { --line: #3a3a40; --side-bg: #161618; --fg: #eaeaea; --muted: #8a8a90; --card: #1f1f23; }
+  :global(:root[data-theme="dark"]) .badge.queued { background: #333; color: #bbb; }
+  :global(:root[data-theme="dark"]) .badge.paused { background: #4a3416; color: #e3a44b; }
 </style>
