@@ -271,6 +271,55 @@ class JobQueue:
         self._notify(job)   # 触发 store.save 持久化
         return True
 
+    def rediarize(self, job_id: str, n: int | None) -> bool:
+        """已完成任务用新人数只重跑「拆分人声」(diarize+align),不重听。
+        要求 status==done 且有文字稿;in-flight 则幂等拒绝。返回是否被接受。"""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.status != "done" or job.transcript is None:
+                return False
+            if job_id in self._inflight:
+                return False
+            self._inflight.add(job_id)
+            job.num_speakers = n
+        threading.Thread(target=self._run_rediarize, args=(job, self._emit),
+                         daemon=True).start()
+        return True
+
+    def _run_rediarize(self, job: Job, on_progress: Callable[[Job], None]) -> None:
+        """重跑分人:拿已存文字段 → diarize(新人数) → align(生成全新 说话人A/B,
+        旧真名随旧 transcript 丢弃)。走单并发闸门,与普通任务串行。"""
+        try:
+            with _infer_gate:
+                try:
+                    backend = self.backend
+                    if self._backend_factory is not None and self._registry is not None:
+                        backend = self._backend_factory(
+                            self._registry.active_repo("transcribe"),
+                            self._registry.active_repo("diarize"),
+                        )
+                    job.status = "running"
+                    job.error = None
+                    job.progress = 0.85           # 进入分人阶段(phase=diarizing)
+                    on_progress(job); self._notify(job)
+                    segments = job.transcript.segments
+                    turns = backend.diarize(job.audio_path,
+                                            job.num_speakers or self.num_speakers)
+                    job.progress = 0.95
+                    on_progress(job)
+                    labeled = align(segments, turns)
+                    job.transcript = Transcript(segments=labeled)  # 新稿,真名清空
+                    job.progress = 1.0
+                    job.status = "done"
+                    on_progress(job); self._notify(job)
+                except Exception as e:
+                    job.status = "failed"
+                    job.error = str(e)
+                    on_progress(job); self._notify(job)
+        finally:
+            with self._lock:
+                self._inflight.discard(job.id)
+
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 

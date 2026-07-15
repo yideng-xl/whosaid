@@ -389,3 +389,51 @@ def test_set_num_speakers_rejected_while_diarizing():
 def test_set_num_speakers_unknown_job():
     q = JobQueue(FakeBackend())
     assert q.set_num_speakers("nope", 3) is False
+
+
+def test_rediarize_reruns_with_new_count_and_clears_renames():
+    from transcribe_core.transcript import Transcript, Segment
+    counts = []
+
+    class CountBackend(InferenceBackend):
+        id = "count"
+        def transcribe(self, a, l, p):
+            return [Segment(0, 2, "你好")]
+        def diarize(self, a, num_speakers):
+            counts.append(num_speakers)
+            return [(0.0, 2.0, "SPEAKER_00")]
+
+    q = JobQueue(CountBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda s, st, d: s)
+    t = Transcript(segments=[Segment(0, 2, "你好", "说话人A")],
+                   speaker_names={"说话人A": "张三"})
+    q.preload([Job(id="jr", audio_path="/x/a.m4a", status="done", progress=1.0,
+                   transcript=t, error=None, total_chunks=1, chunks_done=1)])
+    assert q.rediarize("jr", 2) is True
+    for _ in range(200):
+        if counts and q.get("jr").status == "done" and "jr" not in q._inflight:
+            break
+        time.sleep(0.02)
+    job = q.get("jr")
+    assert job.status == "done" and job.progress == 1.0
+    assert counts[-1] == 2                       # 用新人数
+    assert job.transcript.speaker_names == {}    # 旧真名被清
+    assert [s.speaker for s in job.transcript.segments] == ["说话人A"]  # 标签重新生成
+
+
+def test_rediarize_rejects_non_done():
+    q = JobQueue(FakeBackend())
+    q.preload([Job(id="jn", audio_path="/x/a.m4a", status="paused", progress=0.4,
+                   transcript=None, error=None)])
+    assert q.rediarize("jn", 2) is False
+
+
+def test_rediarize_rejects_when_inflight():
+    from transcribe_core.transcript import Transcript, Segment
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda s, st, d: s)
+    q.preload([Job(id="ji", audio_path="/x/a.m4a", status="done", progress=1.0,
+                   transcript=Transcript(segments=[Segment(0, 2, "你好", "说话人A")]),
+                   error=None, total_chunks=1, chunks_done=1)])
+    q._inflight.add("ji")
+    assert q.rediarize("ji", 2) is False
