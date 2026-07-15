@@ -219,6 +219,21 @@
               throw e;
             }
           }}
+          onRediarize={async (n) => {
+            if (!api || !selectedJobId) return;
+            const id = selectedJobId;
+            try {
+              await api.rediarize(id, n);
+            } catch (e) {
+              errorBanner = `重新分人失败：${e}`;
+              return;
+            }
+            // 乐观置为运行态并重订阅：恢复侧栏实时进度 + 面板轮询（原 done 任务的 WS 已摘除）
+            jobs = jobs.map((jb) => (jb.id === id ? { ...jb, status: "running", progress: 0.85 } : jb));
+            watching.delete(id);
+            const jb = jobs.find((x) => x.id === id);
+            if (jb) subscribe(jb);
+          }}
         />
       {:else}
         <div class="placeholder">从左侧选择一个任务，或把音频拖进窗口</div>
