@@ -358,3 +358,34 @@ def test_resume_clears_stale_error():
     job = q.get("je")
     assert job.status == "done"
     assert job.error is None         # 续跑成功后旧错误被清
+
+
+def test_set_num_speakers_updates_paused_job():
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda s, st, d: s)
+    q.preload([Job(id="jp", audio_path="/x/a.m4a", status="paused", progress=0.4,
+                   transcript=None, error=None, total_chunks=3, chunks_done=1)])
+    assert q.set_num_speakers("jp", 3) is True
+    assert q.get("jp").num_speakers == 3
+    assert q.set_num_speakers("jp", None) is True   # 允许清回自动
+    assert q.get("jp").num_speakers is None
+
+
+def test_set_num_speakers_rejected_when_done():
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda s, st, d: s)
+    jid = q.submit("/x/a.m4a")
+    assert q.get(jid).status == "done"
+    assert q.set_num_speakers(jid, 3) is False       # 已完成走 rediarize
+
+
+def test_set_num_speakers_rejected_while_diarizing():
+    q = JobQueue(FakeBackend())
+    q.preload([Job(id="jd", audio_path="/x/a.m4a", status="running", progress=0.9,
+                   transcript=None, error=None)])
+    assert q.set_num_speakers("jd", 3) is False       # 正在分人锁定
+
+
+def test_set_num_speakers_unknown_job():
+    q = JobQueue(FakeBackend())
+    assert q.set_num_speakers("nope", 3) is False

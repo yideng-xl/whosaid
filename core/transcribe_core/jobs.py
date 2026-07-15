@@ -257,6 +257,20 @@ class JobQueue:
         threading.Thread(target=self.run_job, args=(job, self._emit), daemon=True).start()
         return True
 
+    def set_num_speakers(self, job_id: str, n: int | None) -> bool:
+        """分人前写入预计人数(供 diarize 约束)。仅在尚未分人时允许:
+        done 走 rediarize;正在分人(running & progress≥0.85)锁定;其余(queued/paused/
+        failed/running<0.85)可写。返回是否被接受。"""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.status == "done":
+                return False
+            if job.status == "running" and job.progress >= 0.85:
+                return False
+            job.num_speakers = n
+        self._notify(job)   # 触发 store.save 持久化
+        return True
+
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
