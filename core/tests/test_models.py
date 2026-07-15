@@ -41,10 +41,13 @@ def test_list_marks_active(tmp_path):
     assert active_ids == {"whisper-large-v3", "pyannote-community-1"}
 
 
-def test_available_has_five_whisper_and_one_pyannote():
+def test_available_has_transcribe_and_one_pyannote():
     kinds = [m.kind for m in AVAILABLE]
-    assert kinds.count("transcribe") == 5
+    # 5 个原版 whisper（tiny/base/small/medium/large-v3）+ 2 个 Belle 中文微调
+    assert kinds.count("transcribe") == 7
     assert kinds.count("diarize") == 1
+    ids = {m.id for m in AVAILABLE}
+    assert {"belle-v3-zh-punct", "belle-v3-turbo-zh"} <= ids  # 中文微调已登记
 
 
 def test_active_repo_returns_current_active_models_repo(tmp_path):

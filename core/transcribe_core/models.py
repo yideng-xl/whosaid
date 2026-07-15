@@ -21,7 +21,10 @@ AVAILABLE: list[ModelInfo] = [
     ModelInfo("whisper-base", "transcribe", "Whisper Base", "mlx-community/whisper-base-mlx", 145),
     ModelInfo("whisper-small", "transcribe", "Whisper Small", "mlx-community/whisper-small-mlx", 484),
     ModelInfo("whisper-medium", "transcribe", "Whisper Medium", "mlx-community/whisper-medium-mlx", 1530),
-    ModelInfo("whisper-large-v3", "transcribe", "Whisper Large v3（最准/最慢）", "mlx-community/whisper-large-v3-mlx", 3100),
+    ModelInfo("whisper-large-v3", "transcribe", "Whisper Large v3（通用·最准/最慢）", "mlx-community/whisper-large-v3-mlx", 3100),
+    # 中文微调（BELLE）：针对普通话明显更准，会议/口语场景优先。punct 版自带标点，读起来更顺。
+    ModelInfo("belle-v3-zh-punct", "transcribe", "Belle 中文微调 v3·带标点（会议推荐）", "mlx-community/belle-whisper-large-v3-zh-punct-fp16", 3080),
+    ModelInfo("belle-v3-turbo-zh", "transcribe", "Belle 中文微调 v3·Turbo（快）", "mlx-community/belle-whisper-large-v3-turbo-zh-fp16", 1600),
     ModelInfo("pyannote-community-1", "diarize", "pyannote 说话人分离 community-1", "pyannote/speaker-diarization-community-1", 90),
 ]
 
