@@ -33,6 +33,7 @@ export interface JobDetail {
   total_chunks: number;
   chunks_done: number;
   phase: string;
+  num_speakers: number | null;
 }
 
 interface ProgressMessage {
@@ -95,6 +96,22 @@ export function createApi(port: number) {
 
     async deleteJob(id: string): Promise<void> {
       await j(await fetch(`${base}/jobs/${id}`, { method: "DELETE" }));
+    },
+
+    async setNumSpeakers(id: string, n: number | null): Promise<void> {
+      await j(await fetch(`${base}/jobs/${id}/num_speakers`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ num_speakers: n }),
+      }));
+    },
+
+    async rediarize(id: string, n: number | null): Promise<void> {
+      await j(await fetch(`${base}/jobs/${id}/rediarize`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ num_speakers: n }),
+      }));
     },
 
     speakerSampleUrl(id: string, spk: string): string {

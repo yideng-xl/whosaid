@@ -61,4 +61,26 @@ describe("api", () => {
     expect(api.speakerSampleUrl("j1", "说话人A")).toBe(
       "http://127.0.0.1:3333/jobs/j1/speaker_sample?spk=" + encodeURIComponent("说话人A"));
   });
+
+  it("setNumSpeakers POSTs num_speakers", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(2222);
+    await api.setNumSpeakers("job7", 3);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:2222/jobs/job7/num_speakers",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ num_speakers: 3 }) }),
+    );
+  });
+
+  it("rediarize POSTs num_speakers (null 允许)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(2222);
+    await api.rediarize("job7", null);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:2222/jobs/job7/rediarize",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ num_speakers: null }) }),
+    );
+  });
 });
