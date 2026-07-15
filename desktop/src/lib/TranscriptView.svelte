@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import SpeakerRename from "./SpeakerRename.svelte";
   import type { createApi, JobDetail } from "./api";
+  import { canEditSpeakerCount, isRenamed, parseCount } from "./jobState";
 
   let {
     api,
@@ -10,6 +11,7 @@
     status = "",
     onPause,
     onResume,
+    onRediarize = () => {},
   }: {
     api: ReturnType<typeof createApi>;
     jobId: string;
@@ -19,11 +21,20 @@
     // 返回 Promise 以便感知「请求是否失败」：请求本身失败(如 409)立即恢复按钮
     onPause?: () => void | Promise<void>;
     onResume?: () => void | Promise<void>;
+    // 「重新分人」提交：n 为新的人数(null=自动)。由 +page 接线，本组件单测/单独渲染时用默认空实现。
+    onRediarize?: (n: number | null) => void | Promise<void>;
   } = $props();
 
   let detail = $state<JobDetail | null>(null);
   let loadError = $state<string | null>(null);
   let exporting = $state(false);
+
+  // 人数控件：草稿字符串("" = 自动)、已回显同步过草稿的 jobId(防重复覆盖用户输入)、
+  // 改名确认弹窗开关、非 done 态输入防抖计时器
+  let countDraft = $state("");
+  let countSyncedFor = $state("");
+  let showRediarizeConfirm = $state(false);
+  let countSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   // 暂停/继续的过渡态：从点击到真正生效有延迟（暂停需等当前块转完），期间按钮置灰显
   // "暂停中…/启动中…"，避免用户以为没点上而反复点击。
@@ -86,7 +97,21 @@
     return () => {
       stopped = true;
       clearInterval(timer);
+      // 切走任务时清掉未触发的人数防抖，避免其在新任务上生效（写错 job）
+      if (countSaveTimer) {
+        clearTimeout(countSaveTimer);
+        countSaveTimer = null;
+      }
     };
+  });
+
+  // 切换到新 job、或该 job 首次拿到 detail.num_speakers 时，用回显值初始化草稿；
+  // 之后用户的输入不再被轮询结果覆盖（靠 countSyncedFor 只同步一次）。
+  $effect(() => {
+    if (detail && countSyncedFor !== jobId) {
+      countDraft = detail.num_speakers != null ? String(detail.num_speakers) : "";
+      countSyncedFor = jobId;
+    }
   });
 
   // 改名后手动刷新稿子与说话人列表（done 态，单次取即可）
@@ -127,6 +152,33 @@
     return PALETTE[h % PALETTE.length];
   }
 
+  // 人数框是否可编辑：分人进行中(running & progress≥0.85)锁定
+  const editable = $derived(
+    !!detail && canEditSpeakerCount(detail.status, detail.progress)
+  );
+  // done 态下，草稿人数与「上次分人所用值」不同才出现「重新分人」按钮
+  const baselineCount = $derived(detail?.num_speakers != null ? String(detail.num_speakers) : "");
+  const showRediarize = $derived(!!detail && detail.status === "done" && countDraft !== baselineCount);
+
+  // 非 done 可编辑状态：输入防抖直接写后端；done 态仅暂存草稿，等用户点「重新分人」才提交
+  function onCountInput() {
+    if (!detail || detail.status === "done") return;
+    if (countSaveTimer) clearTimeout(countSaveTimer);
+    const n = parseCount(countDraft);
+    countSaveTimer = setTimeout(() => { void api.setNumSpeakers(jobId, n); }, 600);
+  }
+
+  function clickRediarize() {
+    if (detail && isRenamed(detail.speakers)) showRediarizeConfirm = true;
+    else void doRediarize();
+  }
+
+  async function doRediarize() {
+    showRediarizeConfirm = false;
+    countSyncedFor = ""; // 允许下一轮轮询用新的回显值重新同步草稿
+    await onRediarize(parseCount(countDraft));
+  }
+
   function basename(p: string): string {
     const parts = p.split(/[\\/]/);
     return (parts[parts.length - 1] || "transcript").replace(/\.[^.]+$/, "");
@@ -153,6 +205,21 @@
 </script>
 
 <div class="view">
+  {#if detail}
+    <div class="count-row">
+      <label>
+        人数
+        <input type="number" min="1" max="20" placeholder="自动"
+               bind:value={countDraft} oninput={onCountInput} disabled={!editable} />
+      </label>
+      {#if detail.status === "running" && detail.progress >= 0.85}
+        <span class="count-hint">重新分人中…</span>
+      {:else if showRediarize}
+        <button class="rediarize" onclick={clickRediarize}>重新分人</button>
+      {/if}
+    </div>
+  {/if}
+
   {#if loadError}
     <div class="notice error">{loadError}</div>
   {:else if !detail}
@@ -208,6 +275,21 @@
           <span class="text">{b.text}</span>
         </div>
       {/each}
+    </div>
+  {/if}
+
+  {#if showRediarizeConfirm}
+    <div class="modal-backdrop" role="presentation">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-title">重新分人</div>
+        <p class="modal-body">
+          重新分人会重新划分说话人，<b>已改的真名会被清空、需重新认领</b>。文字稿不受影响。确定继续？
+        </p>
+        <div class="modal-actions">
+          <button class="btn-cancel" onclick={() => (showRediarizeConfirm = false)}>取消</button>
+          <button class="btn-danger" onclick={doRediarize}>确定重新分人</button>
+        </div>
+      </div>
     </div>
   {/if}
 </div>
@@ -313,7 +395,106 @@
     line-height: 1.6;
   }
 
+  /* 人数控件区 */
+  .count-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+    font-size: 13px;
+    color: var(--muted, #6a6a70);
+  }
+  .count-row label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .count-row input {
+    width: 54px;
+    padding: 4px 6px;
+    border: 1px solid var(--line, #d8d8dc);
+    background: var(--card, #fff);
+    color: var(--fg, #1a1a1a);
+    border-radius: 6px;
+    font: inherit;
+    font-size: 13px;
+  }
+  .count-row input:disabled { opacity: 0.5; cursor: default; }
+  .count-hint { color: var(--muted, #8a8a90); }
+  .rediarize {
+    padding: 5px 12px;
+    border: 1px solid var(--accent, #3b7ddd);
+    background: var(--accent, #3b7ddd);
+    color: #fff;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .rediarize:hover { opacity: 0.9; }
+
+  /* 改名确认弹窗：样式与 +page.svelte 的删除确认弹窗保持一致 */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal {
+    width: 340px;
+    max-width: 90vw;
+    background: #fff;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  }
+  .modal-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 10px;
+  }
+  .modal-body {
+    font-size: 13px;
+    line-height: 1.7;
+    color: #4a4a4a;
+    margin: 0 0 18px;
+  }
+  .modal-body b { color: #cf3b3b; }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+  .modal-actions button {
+    padding: 7px 16px;
+    border-radius: 7px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .btn-cancel {
+    background: transparent;
+    border-color: #d8d8dc;
+    color: #333;
+  }
+  .btn-cancel:hover { border-color: #b0b0b6; }
+  .btn-danger {
+    background: #cf3b3b;
+    color: #fff;
+  }
+  .btn-danger:hover { background: #b83232; }
+
   @media (prefers-color-scheme: dark) {
     .view { --line: #2a2a2e; --card: #232327; --fg: #eaeaea; --muted: #8a8a90; }
+    .modal { background: #26262a; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
+    .modal-title { color: #eaeaea; }
+    .modal-body { color: #c4c4c8; }
+    .btn-cancel { border-color: #3a3a40; color: #d0d0d4; }
+    .btn-cancel:hover { border-color: #55555c; }
   }
 </style>
