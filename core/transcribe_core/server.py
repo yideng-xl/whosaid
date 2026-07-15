@@ -21,6 +21,10 @@ class RenameReq(BaseModel):
     name: str
 
 
+class NumSpeakersReq(BaseModel):
+    num_speakers: int | None = None  # 预计说话人数;None=自动
+
+
 class ActiveReq(BaseModel):
     model_id: str
 
@@ -100,6 +104,7 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
             "id": j.id, "status": j.status, "progress": j.progress, "error": j.error,
             "total_chunks": j.total_chunks, "chunks_done": j.chunks_done,
             "phase": phase, "txt": txt, "speakers": speakers,
+            "num_speakers": j.num_speakers,
         }
 
     @app.post("/jobs/{job_id}/pause")
@@ -137,6 +142,20 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
         j.transcript.rename_speaker(req.orig, req.name)
         if store is not None:
             store.save(j)
+        return {"ok": True}
+
+    @app.post("/jobs/{job_id}/num_speakers")
+    def set_num_speakers(job_id: str, req: NumSpeakersReq):
+        _job_or_404(job_id)
+        if not queue.set_num_speakers(job_id, req.num_speakers):
+            raise HTTPException(409, "当前不可修改人数(已完成请用重新分人,或正在分人中)")
+        return {"ok": True}
+
+    @app.post("/jobs/{job_id}/rediarize")
+    def rediarize(job_id: str, req: NumSpeakersReq):
+        _job_or_404(job_id)
+        if not queue.rediarize(job_id, req.num_speakers):
+            raise HTTPException(409, "仅已完成的任务可重新分人")
         return {"ok": True}
 
     @app.get("/jobs/{job_id}/export", response_class=PlainTextResponse)

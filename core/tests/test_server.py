@@ -212,3 +212,66 @@ def test_rename_persists_via_store(tmp_path):
     # 重新加载存储中的 job，验证修改已持久化
     reloaded = {j.id: j for j in JobStore(str(tmp_path / "data")).load_all()}
     assert "李四" in reloaded[jid].transcript.to_txt()
+
+
+def test_num_speakers_endpoint_updates_paused_job(tmp_path):
+    from transcribe_core.jobs import Job
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda r: True, download_fn=lambda r: None)
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda s, st, d: s)
+    q.preload([Job(id="jp", audio_path="/x/a.m4a", status="paused", progress=0.4,
+                   transcript=None, error=None, total_chunks=3, chunks_done=1)])
+    c = TestClient(create_app(q, reg))
+    assert c.post("/jobs/jp/num_speakers", json={"num_speakers": 3}).status_code == 200
+    assert q.get("jp").num_speakers == 3
+
+
+def test_num_speakers_endpoint_409_when_done(tmp_path):
+    c = make_client(tmp_path)
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+    assert c.post(f"/jobs/{jid}/num_speakers",
+                  json={"num_speakers": 3}).status_code == 409
+
+
+def test_get_job_returns_num_speakers(tmp_path):
+    from transcribe_core.jobs import Job
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda r: True, download_fn=lambda r: None)
+    q = JobQueue(FakeBackend())
+    q.preload([Job(id="jg", audio_path="/x/a.m4a", status="paused", progress=0.4,
+                   transcript=None, error=None, num_speakers=4)])
+    c = TestClient(create_app(q, reg))
+    assert c.get("/jobs/jg").json()["num_speakers"] == 4
+
+
+def test_rediarize_endpoint(tmp_path):
+    import time
+    from transcribe_core.transcript import Transcript, Segment
+    from transcribe_core.jobs import Job
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda r: True, download_fn=lambda r: None)
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda s, st, d: s)
+    q.preload([Job(id="jr", audio_path="/x/a.m4a", status="done", progress=1.0,
+                   transcript=Transcript(segments=[Segment(0, 2, "你好", "说话人A")]),
+                   error=None, total_chunks=1, chunks_done=1)])
+    c = TestClient(create_app(q, reg))
+    assert c.post("/jobs/jr/rediarize", json={"num_speakers": 2}).status_code == 200
+    for _ in range(100):
+        if q.get("jr").status == "done" and "jr" not in q._inflight and q.get("jr").progress == 1.0:
+            break
+        time.sleep(0.02)
+    assert q.get("jr").status == "done"
+
+
+def test_rediarize_endpoint_409_non_done(tmp_path):
+    from transcribe_core.jobs import Job
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda r: True, download_fn=lambda r: None)
+    q = JobQueue(FakeBackend())
+    q.preload([Job(id="jn", audio_path="/x/a.m4a", status="paused", progress=0.4,
+                   transcript=None, error=None)])
+    c = TestClient(create_app(q, reg))
+    assert c.post("/jobs/jn/rediarize", json={"num_speakers": 2}).status_code == 409
