@@ -437,3 +437,63 @@ def test_rediarize_rejects_when_inflight():
                    error=None, total_chunks=1, chunks_done=1)])
     q._inflight.add("ji")
     assert q.rediarize("ji", 2) is False
+
+
+def test_rediarize_flips_status_synchronously():
+    """终审 Important-1 回归:rediarize 返回 True 后应立即 running/0.85(不等 worker),
+    否则前端重订阅 WS 会读到旧 done 帧、界面卡在旧结果。"""
+    from transcribe_core.transcript import Transcript, Segment
+    gate = threading.Event()
+
+    class SlowDiarize(InferenceBackend):
+        id = "slowd"
+        def transcribe(self, a, l, p):
+            return [Segment(0, 2, "你好")]
+        def diarize(self, a, num_speakers):
+            gate.wait(timeout=2)   # 阻住 worker,模拟闸门竞争/慢分人
+            return [(0.0, 2.0, "S0")]
+
+    q = JobQueue(SlowDiarize(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda s, st, d: s)
+    q.preload([Job(id="jf", audio_path="/x/a.m4a", status="done", progress=1.0,
+                   transcript=Transcript(segments=[Segment(0, 2, "你好", "说话人A")]),
+                   error=None, total_chunks=1, chunks_done=1)])
+    assert q.rediarize("jf", 2) is True
+    job = q.get("jf")
+    assert job.status == "running" and job.progress == 0.85   # 同步已翻,不等 worker
+    gate.set()
+    for _ in range(100):
+        if q.get("jf").status == "done" and "jf" not in q._inflight:
+            break
+        time.sleep(0.02)
+    assert q.get("jf").status == "done"
+
+
+def test_rediarize_failure_keeps_done_and_transcript():
+    """终审 Important-2 回归:分人失败绝不能降级 failed / 丢稿子,应恢复 done 保留旧稿。"""
+    from transcribe_core.transcript import Transcript, Segment
+
+    class BoomDiarize(InferenceBackend):
+        id = "boomd"
+        def transcribe(self, a, l, p):
+            return [Segment(0, 2, "你好")]
+        def diarize(self, a, num_speakers):
+            raise RuntimeError("分人炸了")
+
+    q = JobQueue(BoomDiarize(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda s, st, d: s)
+    old = Transcript(segments=[Segment(0, 2, "你好", "说话人A")],
+                     speaker_names={"说话人A": "张三"})
+    q.preload([Job(id="jb", audio_path="/x/a.m4a", status="done", progress=1.0,
+                   transcript=old, error=None, total_chunks=1, chunks_done=1)])
+    assert q.rediarize("jb", 2) is True
+    for _ in range(100):
+        if "jb" not in q._inflight:
+            break
+        time.sleep(0.02)
+    job = q.get("jb")
+    assert job.status == "done"                    # 未降级
+    assert job.transcript is old                   # 旧稿对象完好保留
+    assert [s.speaker for s in job.transcript.segments] == ["说话人A"]
+    assert job.transcript.speaker_names == {"说话人A": "张三"}  # 真名也还在
+    assert job.error and "重新分人失败" in job.error

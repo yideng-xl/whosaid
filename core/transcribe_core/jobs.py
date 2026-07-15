@@ -282,6 +282,11 @@ class JobQueue:
                 return False
             self._inflight.add(job_id)
             job.num_speakers = n
+            # 同步翻状态:让 POST 返回时即 running,避免前端重订阅 WS 读到旧 done 帧后
+            # 关连接、界面卡在旧的分人结果(worker 可能阻塞在 _infer_gate 前迟迟未翻)。
+            job.status = "running"
+            job.progress = 0.85
+            job.error = None
         threading.Thread(target=self._run_rediarize, args=(job, self._emit),
                          daemon=True).start()
         return True
@@ -313,8 +318,11 @@ class JobQueue:
                     job.status = "done"
                     on_progress(job); self._notify(job)
                 except Exception as e:
-                    job.status = "failed"
-                    job.error = str(e)
+                    # 重新分人失败:旧 transcript 完好,绝不能降级为 failed
+                    #(那会藏起完好稿子并放开删除按钮,可能致用户误删)。恢复 done,记非阻断错误。
+                    job.status = "done"
+                    job.progress = 1.0
+                    job.error = f"重新分人失败：{e}（已保留原结果）"
                     on_progress(job); self._notify(job)
         finally:
             with self._lock:

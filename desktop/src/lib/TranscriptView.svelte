@@ -165,7 +165,7 @@
     if (!detail || detail.status === "done") return;
     if (countSaveTimer) clearTimeout(countSaveTimer);
     const n = parseCount(countDraft);
-    countSaveTimer = setTimeout(() => { void api.setNumSpeakers(jobId, n); }, 600);
+    countSaveTimer = setTimeout(() => { void api.setNumSpeakers(jobId, n).catch(() => {}); }, 600);
   }
 
   function clickRediarize() {
