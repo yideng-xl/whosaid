@@ -15,12 +15,14 @@
         "title": "whosaid",
         "width": 960,
         "height": 680,
-        "dragDropEnabled": true
+        "dragDropEnabled": true,
+        "transparent": true
       }
     ],
     "security": {
       "csp": null
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,

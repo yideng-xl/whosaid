@@ -93,6 +93,18 @@ pub fn run() {
                     eprintln!("[whosaid] 服务启动失败: {e}（python={python}）");
                 }
             }
+
+            // 真 macOS vibrancy：给主窗口套 NSVisualEffectView（Sidebar 材质），
+            // 配合窗口 transparent + CSS 侧栏透明，让磨砂从侧栏透出。
+            // 仅 macOS 编译；apply_vibrancy 失败（如系统版本过旧）不影响其余启动流程。
+            #[cfg(target_os = "macos")]
+            {
+                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = apply_vibrancy(&win, NSVisualEffectMaterial::Sidebar, None, None);
+                }
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {

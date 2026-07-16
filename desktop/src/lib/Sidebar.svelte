@@ -143,8 +143,11 @@
 </aside>
 
 <style>
-  /* 侧栏容器：背景/分隔线全部走全局 token，深浅主题由 tokens.css 的 data-theme 统一驱动，
-     组件内不再重复定义任何深色覆盖。 */
+  /* 侧栏容器：分隔线走全局 token，深浅主题由 tokens.css 的 data-theme 统一驱动，
+     组件内不再重复定义任何深色覆盖。
+     背景改半透明（在 --sidebar-bg 基础上做 color-mix 降到 70% 不透明度）：
+     让 Rust 侧 apply_vibrancy 铺的 NSVisualEffectView 磨砂能透出来，
+     同时保留足够色调避免文字对比度塌陷；发丝右分隔线不受背景透明度影响，正常保留。 */
   .sidebar {
     width: 260px;
     min-width: 260px;
@@ -153,7 +156,7 @@
     display: flex;
     flex-direction: column;
     border-right: 1px solid var(--hairline);
-    background: var(--sidebar-bg);
+    background: color-mix(in srgb, var(--sidebar-bg) 70%, transparent);
     padding: var(--space-3);
     gap: var(--space-2);
   }

@@ -275,17 +275,21 @@
 {/if}
 
 <style>
-  /* 全局主题：背景/前景/字体统一走 token，深色由 :root[data-theme="dark"] 覆盖变量值，此处无需再重复硬编码 */
+  /* 全局主题：背景/前景/字体统一走 token，深色由 :root[data-theme="dark"] 覆盖变量值，此处无需再重复硬编码。
+     背景改透明：配合 tauri.conf.json 的 windows.transparent + Rust 侧 apply_vibrancy，
+     让 NSVisualEffectView 的磨砂能透到窗口层；主区 .content 下方单独铺回不透明底，
+     避免正文区域透出桌面导致文字不可读。 */
   :global(html, body) {
     margin: 0;
     height: 100%;
-    background: var(--bg);
+    background: transparent;
     color: var(--fg);
     font-family: var(--font);
     font-size: 13px;
   }
   .layout { display: flex; height: 100vh; }
-  .content { background: transparent; }
+  /* 主区保持不透明：只有侧栏透出磨砂，正文区仍需可读对比度 */
+  .content { background: var(--bg); }
   .err-banner {
     position: fixed;
     top: 0; left: 0; right: 0;
