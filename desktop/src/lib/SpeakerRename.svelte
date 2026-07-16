@@ -128,6 +128,7 @@
             onkeydown={(e) => e.key === "Enter" && save(s.orig)}
           />
           <button
+            class="save"
             aria-label="保存说话人改名"
             disabled={savingOrig === s.orig || (draft[s.orig] ?? "").trim() === s.name}
             onclick={() => save(s.orig)}
@@ -179,7 +180,9 @@
     outline: 2px solid var(--focus);
     outline-offset: 1px;
   }
-  .row button {
+  /* 「改名」保存按钮：用 .save 专属类而非 `.row button` 后代选择器，
+     否则会连同一行内的试听按钮 .play 一起被刷成实心蓝（.row button 优先级高于 .play）。 */
+  .row button.save {
     padding: 5px var(--space-3);
     border: 1px solid var(--accent);
     background: var(--accent);
@@ -190,13 +193,13 @@
     cursor: pointer;
     transition: transform 0.12s ease, opacity 0.15s ease;
   }
-  .row button:hover:not(:disabled) { opacity: 0.9; }
-  .row button:active:not(:disabled) { transform: scale(0.97); }
-  .row button:focus-visible {
+  .row button.save:hover:not(:disabled) { opacity: 0.9; }
+  .row button.save:active:not(:disabled) { transform: scale(0.97); }
+  .row button.save:focus-visible {
     outline: 2px solid var(--focus);
     outline-offset: 1px;
   }
-  .row button:disabled {
+  .row button.save:disabled {
     opacity: 0.45;
     cursor: default;
   }
