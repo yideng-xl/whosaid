@@ -100,10 +100,13 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
         txt = ""
         if j.transcript is not None:
             txt = j.transcript.to_txt() if done else j.transcript.plain_text()
+        # plain_txt：始终为无说话人分组的纯文字稿，供详情面板"①转文字"视图用；
+        # 与 txt（done 时切换为分人稿 to_txt）语义独立，不随 done 变化。
+        plain = j.transcript.plain_text() if j.transcript is not None else ""
         return {
             "id": j.id, "status": j.status, "progress": j.progress, "error": j.error,
             "total_chunks": j.total_chunks, "chunks_done": j.chunks_done,
-            "phase": phase, "txt": txt, "speakers": speakers,
+            "phase": phase, "txt": txt, "plain_txt": plain, "speakers": speakers,
             "num_speakers": j.num_speakers,
         }
 

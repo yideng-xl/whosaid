@@ -29,6 +29,7 @@ export interface JobDetail {
   progress: number;
   error: string | null;
   txt: string;
+  plain_txt: string; // 纯文字稿（不分说话人），始终为 transcript.plain_text()，与 txt 语义独立
   speakers: Speaker[];
   total_chunks: number;
   chunks_done: number;

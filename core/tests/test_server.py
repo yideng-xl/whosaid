@@ -55,6 +55,15 @@ def test_submit_and_fetch_job(tmp_path):
     assert "说话人A：你好" in job["txt"]
 
 
+def test_get_job_returns_plain_txt_without_speaker_prefix(tmp_path):
+    """done 任务的 plain_txt 是纯文字稿（各段 text 直接拼接），不含分人稿的"说话人X："前缀。"""
+    c = make_client(tmp_path)
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    resp = _wait_done(c, jid)
+    assert resp["plain_txt"] != ""
+    assert "：" not in resp["plain_txt"]
+
+
 def test_rename_then_export(tmp_path):
     c = make_client(tmp_path)
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
