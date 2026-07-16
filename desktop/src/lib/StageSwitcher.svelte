@@ -27,9 +27,10 @@
     return `${label}，待处理`;
   }
 
-  // pending 段不可点：即使意外触发 click 也在此拦截，不派发 onSelect。
+  // 仅 done 段可点：active 段（进行中）尚无产出，点击会切到还没内容的视图，
+  // 其"选中显示"完全由父组件下发的 active prop 控制，不需要点击触发；pending 段同样拦截。
   function handleClick(n: 1 | 2, state: "active" | "done" | "pending") {
-    if (state === "pending") return;
+    if (state !== "done") return;
     onSelect(n);
   }
 </script>
@@ -88,9 +89,10 @@
     transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, transform 0.12s ease;
   }
 
-  /* 可点段（done / active）hover 时轻微提亮，与 Sidebar 的 hover 公式保持一致 */
-  .seg:not(:disabled):not(.selected):hover {
-    background: color-mix(in srgb, var(--fg) 6%, transparent);
+  /* 可点段（仅 done）hover 时轻微提亮，与 Sidebar 的 hover 公式保持一致；
+     is-active 段不可点，排除在外，避免出现"可点"的视觉误导 */
+  .seg:not(:disabled):not(.selected):not(.is-active):hover {
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
   }
 
   /* 按压反馈：scale(0.97)，pending 段因 disabled 天然不会触发 active 态 */
@@ -104,10 +106,13 @@
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
   }
 
-  /* active 状态（进行中）：文字高亮为 accent 色，独立于是否被选中显示 */
+  /* active 状态（进行中）：文字高亮为 accent 色，独立于是否被选中显示；
+     不可点击（选中显示由父组件 active prop 控制），视觉上与 is-pending 一致地
+     去掉手型光标，避免"看起来能点、点了却没反应"的视觉欺骗 */
   .seg.is-active {
     color: var(--accent);
     font-weight: 600;
+    cursor: default;
   }
 
   /* pending 段：置灰、默认光标、不可交互 */
