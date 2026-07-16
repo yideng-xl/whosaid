@@ -26,5 +26,5 @@ tauri-plugin-dialog = "2.7.1"
 
 # 仅 macOS 编译：磨砂侧栏（NSVisualEffectView），其余平台不引入该依赖
 [target.'cfg(target_os = "macos")'.dependencies]
-window-vibrancy = "0.5"
+window-vibrancy = "0.6"
 
