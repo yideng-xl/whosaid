@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Speaker } from "./api";
+  import Icon from "./Icon.svelte";
 
   let {
     speakers = [],
@@ -105,15 +106,20 @@
             class="play"
             class:active={activeOrig === s.orig && phase !== "paused"}
             title="试听这位说话人的 3 段发言"
+            aria-label={activeOrig === s.orig && phase === "loading"
+              ? "试听音频加载中"
+              : activeOrig === s.orig && phase === "playing"
+                ? "暂停试听"
+                : "试听这位说话人的发言"}
             disabled={activeOrig === s.orig && phase === "loading"}
             onclick={() => togglePlay(s.orig)}
           >
             {#if activeOrig === s.orig && phase === "loading"}
               <span class="spin"></span>
             {:else if activeOrig === s.orig && phase === "playing"}
-              ⏸
+              <Icon name="pause" size={12} />
             {:else}
-              ▶
+              <Icon name="play" size={12} />
             {/if}
           </button>
           <input
@@ -122,6 +128,7 @@
             onkeydown={(e) => e.key === "Enter" && save(s.orig)}
           />
           <button
+            aria-label="保存说话人改名"
             disabled={savingOrig === s.orig || (draft[s.orig] ?? "").trim() === s.name}
             onclick={() => save(s.orig)}
           >
@@ -134,50 +141,66 @@
 {/if}
 
 <style>
+  /* 卡片容器：token 化边框/圆角/底色，深浅主题由全局 tokens.css 的 data-theme 驱动，
+     不再需要组件内自定义深色覆盖块。 */
   .rename {
-    border: 1px solid var(--line, #e8e8ec);
-    border-radius: 10px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-card);
     padding: 12px 14px;
     margin-bottom: 16px;
-    background: var(--card, #fafafa);
+    background: var(--card);
   }
   .title {
     font-size: 13px;
     font-weight: 600;
-    color: var(--fg, #333);
+    color: var(--fg);
     margin-bottom: 8px;
   }
   .rows { display: flex; flex-direction: column; gap: 8px; }
   .row { display: flex; align-items: center; gap: 8px; }
   .orig {
     font-size: 12px;
-    color: var(--muted, #8a8a90);
+    color: var(--muted);
     min-width: 64px;
   }
+  /* Apple 输入框：细描边、圆角 6，聚焦时用 --focus 焦点环，与 TranscriptView 的输入框规范一致 */
   .row input {
     flex: 1;
     padding: 5px 8px;
-    border: 1px solid var(--line, #d8d8dc);
-    border-radius: 6px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-btn);
     font: inherit;
     font-size: 13px;
-    background: var(--input-bg, #fff);
-    color: var(--fg, #1a1a1a);
+    background: var(--card);
+    color: var(--fg);
+    transition: border-color 0.15s ease;
+  }
+  .row input:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
   }
   .row button {
     padding: 5px 12px;
-    border: 1px solid var(--accent, #3b7ddd);
-    background: var(--accent, #3b7ddd);
+    border: 1px solid var(--accent);
+    background: var(--accent);
     color: #fff;
-    border-radius: 6px;
+    border-radius: var(--radius-btn);
     font: inherit;
     font-size: 12px;
     cursor: pointer;
+    transition: transform 0.12s ease, opacity 0.15s ease;
+  }
+  .row button:hover:not(:disabled) { opacity: 0.9; }
+  .row button:active:not(:disabled) { transform: scale(0.97); }
+  .row button:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
   }
   .row button:disabled {
     opacity: 0.45;
     cursor: default;
   }
+  /* 试听圆形按钮：描边随主题走 --hairline，hover/激活态转 accent，按压 scale(0.97) */
   .play {
     flex-shrink: 0;
     width: 26px;
@@ -186,20 +209,26 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border: 1px solid var(--line, #d8d8dc);
-    background: var(--input-bg, #fff);
-    color: var(--fg, #333);
+    border: 1px solid var(--hairline);
+    background: var(--card);
+    color: var(--fg);
     border-radius: 50%;
-    font-size: 11px;
     cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, transform 0.12s ease;
   }
-  .play:hover:not(:disabled) { border-color: var(--accent, #3b7ddd); color: var(--accent, #3b7ddd); }
+  .play:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .play:active:not(:disabled) { transform: scale(0.97); }
   .play:disabled { cursor: default; }
+  .play:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
   .play.active {
-    border-color: var(--accent, #3b7ddd);
-    background: var(--accent, #3b7ddd);
+    border-color: var(--accent);
+    background: var(--accent);
     color: #fff;
   }
+  /* loading 转圈：沿用原有 spinner CSS，颜色随 currentColor 自适应，不改动状态机 */
   .spin {
     width: 11px;
     height: 11px;
@@ -210,7 +239,7 @@
     animation: play-spin 0.7s linear infinite;
   }
   @keyframes play-spin { to { transform: rotate(360deg); } }
-
-  /* 深色主题：由 <html data-theme="dark"> 驱动，不再依赖媒体查询；边框调亮以拉开明暗对比 */
-  :global(:root[data-theme="dark"]) .rename { --line: #3a3a40; --card: #202024; --fg: #eaeaea; --input-bg: #17171a; }
+  @media (prefers-reduced-motion: reduce) {
+    .spin { animation: none; }
+  }
 </style>

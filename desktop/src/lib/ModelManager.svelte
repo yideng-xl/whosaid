@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { createApi, ModelInfo } from "./api";
+  import Icon from "./Icon.svelte";
 
   let {
     api,
@@ -73,7 +74,9 @@
 <div class="mm">
   <div class="head">
     <div class="title">模型管理</div>
-    <button class="back" onclick={onClose}>← 返回</button>
+    <button class="close-btn" aria-label="关闭模型管理" title="返回" onclick={onClose}>
+      <Icon name="close" size={14} />
+    </button>
   </div>
 
   {#if loadError}
@@ -90,20 +93,22 @@
             <span class="msize">{sizeText(m.size_mb)}</span>
           </div>
           <div class="tags">
-            {#if m.active}<span class="tag on">● 当前</span>{/if}
+            {#if m.active}
+              <span class="tag on"><span class="dot"></span>当前</span>
+            {/if}
             {#if m.downloaded}
-              <span class="tag ok">✓ 已下载</span>
+              <span class="tag ok"><Icon name="check" size={10} />已下载</span>
             {:else}
               <span class="tag no">未下载</span>
             {/if}
           </div>
           <div class="ops">
             {#if !m.downloaded}
-              <button disabled={busyId === m.id} onclick={() => download(m.id)}>
+              <button class="btn-primary" disabled={busyId === m.id} onclick={() => download(m.id)}>
                 {busyId === m.id ? "下载中…" : "下载"}
               </button>
             {:else if !m.active}
-              <button disabled={busyId === m.id} onclick={() => setActive(m.id)}>
+              <button class="btn-secondary" disabled={busyId === m.id} onclick={() => setActive(m.id)}>
                 {busyId === m.id ? "切换中…" : "设为当前"}
               </button>
             {/if}
@@ -124,62 +129,108 @@
     justify-content: space-between;
     margin-bottom: 18px;
   }
-  .title { font-size: 18px; font-weight: 600; color: var(--fg, #1a1a1a); }
-  .back {
+  .title { font-size: 18px; font-weight: 600; color: var(--fg); }
+
+  /* 关闭按钮：圆形描边图标钮，与 Sidebar 主题切换钮同一套触控尺寸(28px)，
+     hover 描边/文字转 accent 色，按压 scale(0.97)，聚焦环用 --focus。 */
+  .close-btn {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
     background: transparent;
-    border: 1px solid var(--line, #d8d8dc);
-    border-radius: 6px;
-    padding: 5px 12px;
-    font: inherit;
-    font-size: 13px;
-    color: var(--muted, #6a6a70);
+    border: 1px solid var(--hairline);
+    border-radius: 50%;
+    color: var(--muted);
     cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease, transform 0.12s ease;
   }
-  .back:hover { border-color: var(--accent, #3b7ddd); color: var(--accent, #3b7ddd); }
-  .err { color: #cf3b3b; font-size: 13px; margin-bottom: 12px; }
+  .close-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .close-btn:active { transform: scale(0.97); }
+  .close-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+  .err { color: var(--danger); font-size: 13px; margin-bottom: 12px; }
   .group { margin-bottom: 22px; }
   .group-title {
     font-size: 13px;
     font-weight: 600;
-    color: var(--muted, #8a8a90);
+    color: var(--muted);
     margin-bottom: 10px;
   }
+
+  /* 模型行卡片：发丝描边 + 卡片底色，hover 描边微微透出 accent，
+     当前项(active)描边实心 accent + 淡 accent 底，替代原先纯边框高亮。 */
   .model {
     display: flex;
     align-items: center;
     gap: 12px;
     padding: 10px 14px;
-    border: 1px solid var(--line, #e8e8ec);
-    border-radius: 8px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-card);
     margin-bottom: 8px;
-    background: var(--card, #fff);
+    background: var(--card);
+    transition: border-color 0.15s ease, background 0.15s ease;
   }
-  .model.active { border-color: var(--accent, #3b7ddd); }
+  .model:hover:not(.active) {
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--hairline));
+  }
+  .model.active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 6%, var(--card));
+  }
   .info { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-  .mname { font-size: 14px; color: var(--fg, #1a1a1a); }
-  .msize { font-size: 12px; color: var(--muted, #9a9aa0); }
+  .mname { font-size: 14px; color: var(--fg); }
+  .msize { font-size: 12px; color: var(--muted); }
   .tags { display: flex; gap: 6px; flex-shrink: 0; }
-  .tag { font-size: 11px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
-  .tag.on { background: #e5efff; color: #2f6fd0; }
-  .tag.ok { background: #e3f6e8; color: #2c8a4b; }
-  .tag.no { background: #eee; color: #888; }
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  /* 徽标底色沿用 Sidebar 的低饱和 color-mix 公式，无需单独维护深色覆盖 */
+  .tag.on { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+  .tag.ok { background: color-mix(in srgb, #2c8a4b 16%, transparent); color: #2c8a4b; }
+  .tag.no { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+  .tag .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
   .ops { flex-shrink: 0; min-width: 84px; text-align: right; }
   .ops button {
     padding: 5px 12px;
-    border: 1px solid var(--accent, #3b7ddd);
-    background: var(--accent, #3b7ddd);
-    color: #fff;
-    border-radius: 6px;
+    border-radius: var(--radius-btn);
     font: inherit;
     font-size: 12px;
     cursor: pointer;
+    border: 1px solid transparent;
+    transition: transform 0.12s ease, opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
   }
   .ops button:disabled { opacity: 0.5; cursor: default; }
-  .note { font-size: 12px; color: var(--muted, #9a9aa0); margin-top: 8px; line-height: 1.6; }
-
-  /* 深色主题：由 <html data-theme="dark"> 驱动，不再依赖媒体查询；边框调亮、卡片压深以拉开明暗对比 */
-  :global(:root[data-theme="dark"]) .mm { --line: #3a3a40; --card: #1f1f23; --fg: #eaeaea; --muted: #8a8a90; }
-  :global(:root[data-theme="dark"]) .tag.on { background: #1c3a5e; color: #7fb0ff; }
-  :global(:root[data-theme="dark"]) .tag.ok { background: #1e3d28; color: #7fd39a; }
-  :global(:root[data-theme="dark"]) .tag.no { background: #333; color: #aaa; }
+  .ops button:active:not(:disabled) { transform: scale(0.97); }
+  .ops button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  /* 主按钮：下载（首次获取，实心 accent 白字） */
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:hover:not(:disabled) { opacity: 0.9; }
+  /* 次按钮：设为当前（已下载后的切换动作，低强调描边） */
+  .btn-secondary {
+    background: transparent;
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .note { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.6; }
 </style>
