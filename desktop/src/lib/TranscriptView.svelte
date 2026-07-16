@@ -1,6 +1,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import SpeakerRename from "./SpeakerRename.svelte";
+  import StageSwitcher from "./StageSwitcher.svelte";
+  import Icon from "./Icon.svelte";
   import type { createApi, JobDetail } from "./api";
   import { canEditSpeakerCount, isRenamed, parseCount } from "./jobState";
 
@@ -35,6 +37,12 @@
   let countSyncedFor = $state("");
   let showRediarizeConfirm = $state(false);
   let countSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // 两阶段面板：当前查看的视图段（① 转文字 / ② 分人）。用 stageSyncedFor 守卫按 jobId
+  // 只做一次默认初始化，避免每秒轮询刷新 detail 时把用户手动点击 StageSwitcher 切换的
+  // 选段覆盖回去（与下面 countSyncedFor 的用法同一模式）。
+  let activeStage = $state<1 | 2>(1);
+  let stageSyncedFor = $state("");
 
   // 暂停/继续的过渡态：从点击到真正生效有延迟（暂停需等当前块转完），期间按钮置灰显
   // "暂停中…/启动中…"，避免用户以为没点上而反复点击。
@@ -114,6 +122,16 @@
     }
   });
 
+  // 两阶段默认视图初始化：done 任务打开时默认停在②(分人稿，现有说话人分组视图)；
+  // 未 done(排队/转写中/分离中)默认停在①(转文字，此时②尚无内容)。仅在该 jobId
+  // 首次拿到 detail 时生效一次，之后用户手动点 StageSwitcher 切换不会被此处覆盖。
+  $effect(() => {
+    if (detail && stageSyncedFor !== jobId) {
+      activeStage = detail.status === "done" ? 2 : 1;
+      stageSyncedFor = jobId;
+    }
+  });
+
   // 改名后手动刷新稿子与说话人列表（done 态，单次取即可）
   async function load() {
     try {
@@ -123,7 +141,7 @@
     }
   }
 
-  // 把 to_txt 的 "说话人X：内容\n\n" 拆成分行块
+  // 把 to_txt 的 "说话人X：内容\n\n" 拆成分行块（②分人稿用）
   const blocks = $derived.by(() => {
     const txt = detail?.txt ?? "";
     return txt
@@ -135,6 +153,16 @@
           ? { speaker: b.slice(0, i), text: b.slice(i + 1) }
           : { speaker: "", text: b };
       });
+  });
+
+  // ①纯文字稿拆段：plain_text() 以 "\n" 拼接每个片段文本，一行即一段，无说话人标签。
+  // 转写/分离进行中与 done 后①视图共用同一份数据来源与呈现方式。
+  const plainBlocks = $derived.by(() => {
+    const txt = detail?.plain_txt ?? "";
+    return txt
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
   });
 
   // 显示名 → 原始标签映射：按原始标签分色，改名不改颜色（同一人恒定一色）
@@ -159,6 +187,23 @@
   // done 态下，草稿人数与「上次分人所用值」不同才出现「重新分人」按钮
   const baselineCount = $derived(detail?.num_speakers != null ? String(detail.num_speakers) : "");
   const showRediarize = $derived(!!detail && detail.status === "done" && countDraft !== baselineCount);
+
+  // 两阶段状态（供顶部 StageSwitcher）：
+  // ①转文字——done 或 progress≥0.85（分人阶段代表转写早已完成）视为完成；
+  // running 且 progress<0.85 为进行中；其余（queued，以及未到 0.85 的 paused/failed）为待处理。
+  const stage1State = $derived.by((): "active" | "done" | "pending" => {
+    if (!detail) return "pending";
+    if (detail.status === "done" || detail.progress >= 0.85) return "done";
+    if (detail.status === "running" && detail.progress < 0.85) return "active";
+    return "pending";
+  });
+  // ②分人——仅 done 才算完成；running 且 progress≥0.85（含重新分人）为分离中；其余待处理。
+  const stage2State = $derived.by((): "active" | "done" | "pending" => {
+    if (!detail) return "pending";
+    if (detail.status === "done") return "done";
+    if (detail.status === "running" && detail.progress >= 0.85) return "active";
+    return "pending";
+  });
 
   // 非 done 可编辑状态：输入防抖直接写后端；done 态仅暂存草稿，等用户点「重新分人」才提交
   function onCountInput() {
@@ -215,8 +260,21 @@
   }}
 />
 
+<!-- ①纯文字稿：转写中/分离中/done 但停在①段时共用，按段落只读展示，不含说话人/改名/试听 -->
+{#snippet plainText()}
+  {#each plainBlocks as line}
+    <p class="plain-line">{line}</p>
+  {/each}
+{/snippet}
+
 <div class="view">
   {#if detail}
+    <StageSwitcher
+      {stage1State}
+      {stage2State}
+      active={activeStage}
+      onSelect={(n) => (activeStage = n)}
+    />
     <div class="count-row">
       <label>
         人数
@@ -226,7 +284,7 @@
       {#if detail.status === "running" && detail.progress >= 0.85}
         <span class="count-hint">重新分人中…</span>
       {:else if showRediarize}
-        <button class="rediarize" onclick={clickRediarize}>重新分人</button>
+        <button class="rediarize" onclick={clickRediarize}><Icon name="refresh" size={13} /> 重新分人</button>
       {/if}
     </div>
   {/if}
@@ -245,6 +303,12 @@
       <p class="phase">说话人分离中…</p>
       <div class="bar indeterminate"><div class="stripe"></div></div>
       <p class="hint">说话人分离中，长录音可能需要几分钟，此步不可中断</p>
+      <!-- ②分离中：主区默认显示①纯文字（转写早已完成，稿子已就绪），不必等②做完才有内容看 -->
+      {#if plainBlocks.length}
+        <div class="transcript plain">
+          {@render plainText()}
+        </div>
+      {/if}
     </div>
   {:else if detail.status === "running" || detail.status === "paused"}
     <div class="panel">
@@ -258,11 +322,13 @@
       {:else if transitioning === "resuming"}
         <button class="ctl" disabled>启动中…</button>
       {:else if detail.status === "paused"}
-        <button class="ctl" onclick={doResume}>继续</button>
+        <button class="ctl" onclick={doResume}><Icon name="play" size={13} /> 继续</button>
       {:else}
-        <button class="ctl" onclick={doPause}>暂停</button>
+        <button class="ctl" onclick={doPause}><Icon name="pause" size={13} /> 暂停</button>
       {/if}
-      {#if detail.txt}<div class="preview">{detail.txt}</div>{/if}
+      {#if plainBlocks.length}
+        <div class="preview">{@render plainText()}</div>
+      {/if}
     </div>
   {:else if detail.status !== "done"}
     <div class="notice">转写中…（{Math.round(detail.progress * 100)}%）稿子完成后显示</div>
@@ -277,20 +343,27 @@
       </div>
     </div>
 
-    <SpeakerRename
-      speakers={detail.speakers}
-      {onRename}
-      sampleUrl={(orig) => api.speakerSampleUrl(jobId, orig)}
-    />
+    {#if activeStage === 2}
+      <SpeakerRename
+        speakers={detail.speakers}
+        {onRename}
+        sampleUrl={(orig) => api.speakerSampleUrl(jobId, orig)}
+      />
 
-    <div class="transcript">
-      {#each blocks as b}
-        <div class="block">
-          <span class="speaker" style="color:{colorOf(b.speaker)}">{b.speaker}</span>
-          <span class="text">{b.text}</span>
-        </div>
-      {/each}
-    </div>
+      <div class="transcript">
+        {#each blocks as b}
+          <div class="block">
+            <span class="speaker" style="color:{colorOf(b.speaker)}">{b.speaker}</span>
+            <span class="text">{b.text}</span>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <!-- ①纯文字稿：done 但停在①段，无说话人/改名/试听，仅按段落只读展示 -->
+      <div class="transcript plain">
+        {@render plainText()}
+      </div>
+    {/if}
   {/if}
 
   {#if showRediarizeConfirm}
@@ -317,79 +390,93 @@
 </div>
 
 <style>
+  /* 全组件颜色/圆角/间距均走全局 token（tokens.css），双主题由 :root[data-theme] 统一驱动，
+     组件内不再定义局部颜色回退或深色覆盖块。 */
   .view { max-width: 760px; }
   .notice {
-    color: var(--muted, #8a8a90);
-    font-size: 14px;
-    padding: 8px 0;
+    color: var(--muted);
+    font-size: 13px;
+    padding: var(--space-2) 0;
   }
-  .notice.error { color: #cf3b3b; }
+  .notice.error { color: var(--danger); }
   .toolbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 16px;
-    gap: 12px;
+    margin-bottom: var(--space-4);
+    gap: var(--space-3);
   }
   .fname {
     font-size: 15px;
     font-weight: 600;
-    color: var(--fg, #1a1a1a);
+    color: var(--fg);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
+  /* 导出按钮 = Apple 次按钮：描边 accent、透明底 */
   .actions button {
     padding: 6px 12px;
-    border: 1px solid var(--line, #d8d8dc);
-    background: var(--card, #fff);
-    color: var(--fg, #333);
-    border-radius: 6px;
+    border: 1px solid var(--accent);
+    background: transparent;
+    color: var(--accent);
+    border-radius: var(--radius-btn);
     font: inherit;
     font-size: 13px;
     cursor: pointer;
+    transition: background 0.15s ease, transform 0.12s ease;
   }
-  .actions button:hover:not(:disabled) { border-color: var(--accent, #3b7ddd); }
+  .actions button:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .actions button:active:not(:disabled) { transform: scale(0.97); }
   .actions button:disabled { opacity: 0.5; cursor: default; }
-  .transcript { display: flex; flex-direction: column; gap: 14px; }
+  .transcript { display: flex; flex-direction: column; gap: 14px; margin-top: var(--space-4); }
   .block { line-height: 1.7; }
   .speaker {
     font-weight: 600;
-    font-size: 13px;
-    margin-right: 8px;
+    font-size: 12px;
+    margin-right: var(--space-2);
   }
   .text {
-    color: var(--fg, #222);
-    font-size: 14px;
+    color: var(--fg);
+    font-size: 13px;
+    white-space: pre-wrap;
+  }
+  /* ①纯文字稿：按段落展示，无说话人标签 */
+  .transcript.plain { gap: 10px; }
+  .plain-line {
+    margin: 0;
+    color: var(--fg);
+    font-size: 13px;
+    line-height: 1.7;
     white-space: pre-wrap;
   }
 
   .panel {
-    border: 1px solid var(--line, #e8e8ec);
-    border-radius: 10px;
-    padding: 16px 18px;
-    background: var(--card, #fafafa);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-card);
+    padding: var(--space-4) 18px;
+    background: var(--card);
   }
   .phase {
-    color: var(--muted, #8a8a90);
-    font-size: 14px;
-    margin: 10px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+    margin: var(--space-2) 0 0;
   }
   .hint {
-    color: var(--muted, #8a8a90);
+    color: var(--muted);
     font-size: 12px;
-    margin: 8px 0 0;
+    margin: var(--space-2) 0 0;
   }
   /* 分人阶段不确定态进度条：一条高亮色块来回滑动，替代停在 85% 的固定宽度 */
-  .bar.indeterminate { position: relative; overflow: hidden; margin-top: 10px; }
+  .bar.indeterminate { position: relative; overflow: hidden; margin-top: var(--space-2); }
   .bar.indeterminate .stripe {
     position: absolute;
     top: 0;
     left: 0;
     height: 100%;
     width: 40%;
-    background: var(--accent, #3b7ddd);
+    background: var(--accent);
     border-radius: 3px;
     animation: indeterminate 1.15s ease-in-out infinite;
   }
@@ -397,86 +484,107 @@
     0% { transform: translateX(-110%); }
     100% { transform: translateX(360%); }
   }
+  @media (prefers-reduced-motion: reduce) {
+    .bar.indeterminate .stripe { animation: none; }
+  }
   .prog {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin: 10px 0;
+    margin: var(--space-2) 0;
     font-size: 13px;
-    color: var(--muted, #6a6a70);
+    color: var(--muted);
   }
   .bar {
     height: 6px;
     border-radius: 3px;
-    background: var(--line, #e0e0e4);
+    background: var(--hairline);
     overflow: hidden;
   }
   .fill {
     height: 100%;
-    background: var(--accent, #3b7ddd);
+    background: var(--accent);
     transition: width 0.3s ease;
   }
+  /* 暂停/继续 = Apple 主按钮：实心 accent、白字、圆角 6、按压缩放 */
   .ctl {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     padding: 6px 14px;
-    border: 1px solid var(--accent, #3b7ddd);
-    background: var(--accent, #3b7ddd);
+    border: 1px solid var(--accent);
+    background: var(--accent);
     color: #fff;
-    border-radius: 6px;
+    border-radius: var(--radius-btn);
     font: inherit;
     font-size: 13px;
     cursor: pointer;
+    transition: opacity 0.15s ease, transform 0.12s ease;
   }
   .ctl:hover:not(:disabled) { opacity: 0.9; }
+  .ctl:active:not(:disabled) { transform: scale(0.97); }
   .ctl:disabled { opacity: 0.5; cursor: default; }
   .preview {
-    margin-top: 14px;
-    padding-top: 12px;
-    border-top: 1px dashed var(--line, #e0e0e4);
-    color: var(--fg, #444);
-    font-size: 13px;
-    white-space: pre-wrap;
-    line-height: 1.6;
+    margin-top: var(--space-4);
+    padding-top: var(--space-3);
+    border-top: 1px dashed var(--hairline);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
+  .preview .plain-line { font-size: 13px; color: var(--fg); }
 
   /* 人数控件区 */
   .count-row {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-bottom: 14px;
+    gap: var(--space-3);
+    margin: var(--space-3) 0 var(--space-4);
     font-size: 13px;
-    color: var(--muted, #6a6a70);
+    color: var(--muted);
   }
   .count-row label {
     display: flex;
     align-items: center;
     gap: 6px;
   }
+  /* Apple 输入框：细描边、圆角 6，聚焦时用 --focus 焦点环 */
   .count-row input {
     width: 54px;
     padding: 4px 6px;
-    border: 1px solid var(--line, #d8d8dc);
-    background: var(--card, #fff);
-    color: var(--fg, #1a1a1a);
-    border-radius: 6px;
+    border: 1px solid var(--hairline);
+    background: var(--card);
+    color: var(--fg);
+    border-radius: var(--radius-btn);
     font: inherit;
     font-size: 13px;
+    transition: border-color 0.15s ease;
+  }
+  .count-row input:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
   }
   .count-row input:disabled { opacity: 0.5; cursor: default; }
-  .count-hint { color: var(--muted, #8a8a90); }
+  .count-hint { color: var(--muted); }
   .rediarize {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     padding: 5px 12px;
-    border: 1px solid var(--accent, #3b7ddd);
-    background: var(--accent, #3b7ddd);
+    border: 1px solid var(--accent);
+    background: var(--accent);
     color: #fff;
-    border-radius: 6px;
+    border-radius: var(--radius-btn);
     font: inherit;
     font-size: 12px;
     cursor: pointer;
+    transition: opacity 0.15s ease, transform 0.12s ease;
   }
   .rediarize:hover { opacity: 0.9; }
+  .rediarize:active { transform: scale(0.97); }
 
-  /* 改名确认弹窗：样式与 +page.svelte 的删除确认弹窗保持一致 */
+  /* 改名确认弹窗：token 化，与 +page.svelte 的删除确认弹窗视觉保持同一套规范
+     （圆角 12 / 柔和阴影 / 遮罩 40% 黑），仅浮层允许用阴影表达深度 */
   .modal-backdrop {
     position: fixed;
     inset: 0;
@@ -489,54 +597,52 @@
   .modal {
     width: 340px;
     max-width: 90vw;
-    background: #fff;
-    border-radius: 12px;
-    padding: 20px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+    background: var(--card);
+    border-radius: var(--radius-modal);
+    padding: var(--space-5);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.16);
   }
   .modal-title {
     font-size: 15px;
     font-weight: 600;
-    color: #1a1a1a;
-    margin-bottom: 10px;
+    color: var(--fg);
+    margin-bottom: var(--space-2);
   }
   .modal-body {
     font-size: 13px;
     line-height: 1.7;
-    color: #4a4a4a;
-    margin: 0 0 18px;
+    color: var(--muted);
+    margin: 0 0 var(--space-4);
   }
-  .modal-body b { color: #cf3b3b; }
+  .modal-body b { color: var(--danger); }
   .modal-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 10px;
+    gap: var(--space-2);
   }
   .modal-actions button {
     padding: 7px 16px;
-    border-radius: 7px;
+    border-radius: var(--radius-btn);
     font: inherit;
     font-size: 13px;
     cursor: pointer;
     border: 1px solid transparent;
+    transition: transform 0.12s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .modal-actions button:active { transform: scale(0.97); }
+  .modal-actions button:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
   }
   .btn-cancel {
     background: transparent;
-    border-color: #d8d8dc;
-    color: #333;
+    border-color: var(--hairline);
+    color: var(--fg);
   }
-  .btn-cancel:hover { border-color: #b0b0b6; }
+  .btn-cancel:hover { border-color: var(--muted); }
   .btn-danger {
-    background: #cf3b3b;
+    background: var(--danger);
     color: #fff;
   }
-  .btn-danger:hover { background: #b83232; }
-
-  /* 深色主题：由 <html data-theme="dark"> 驱动，不再依赖媒体查询；边框调亮、卡片压深以拉开明暗对比 */
-  :global(:root[data-theme="dark"]) .view { --line: #3a3a40; --card: #1f1f23; --fg: #eaeaea; --muted: #8a8a90; }
-  :global(:root[data-theme="dark"]) .modal { background: #26262a; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
-  :global(:root[data-theme="dark"]) .modal-title { color: #eaeaea; }
-  :global(:root[data-theme="dark"]) .modal-body { color: #c4c4c8; }
-  :global(:root[data-theme="dark"]) .btn-cancel { border-color: #3a3a40; color: #d0d0d4; }
-  :global(:root[data-theme="dark"]) .btn-cancel:hover { border-color: #55555c; }
+  .btn-danger:hover { opacity: 0.9; }
 </style>
