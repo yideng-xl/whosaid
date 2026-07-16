@@ -172,7 +172,11 @@
     return m;
   });
 
-  const PALETTE = ["#3b7ddd", "#2c8a4b", "#c0562b", "#7a4fd0", "#0e8a8a", "#b03060"];
+  // 说话人色板走全局 token（tokens.css 的 --spk-1..8，深浅各自调亮度、避开 accent 蓝）
+  const PALETTE = [
+    "var(--spk-1)", "var(--spk-2)", "var(--spk-3)", "var(--spk-4)",
+    "var(--spk-5)", "var(--spk-6)", "var(--spk-7)", "var(--spk-8)",
+  ];
   function colorOf(displayName: string): string {
     const key = nameToOrig[displayName] ?? displayName; // 用原始标签算色，稳定
     let h = 0;
