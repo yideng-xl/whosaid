@@ -7,6 +7,7 @@
   import ModelManager from "$lib/ModelManager.svelte";
   import { createApi, type JobSummary } from "$lib/api";
   import { resolveInitialTheme, applyTheme, saveTheme, type Theme } from "$lib/theme";
+  import "$lib/tokens.css";
 
   type Api = ReturnType<typeof createApi>;
 
@@ -274,17 +275,14 @@
 {/if}
 
 <style>
-  /* 全局主题：主区背景随明暗适配，避免深色模式下浅字落到白底看不清 */
+  /* 全局主题：背景/前景/字体统一走 token，深色由 :root[data-theme="dark"] 覆盖变量值，此处无需再重复硬编码 */
   :global(html, body) {
     margin: 0;
     height: 100%;
-    background: #ffffff;
-    color: #1a1a1a;
-  }
-  /* 深色主题：由 <html data-theme="dark"> 驱动，不再依赖媒体查询；主背景压更深以拉开明暗对比 */
-  :global(:root[data-theme="dark"] body) {
-    background: #141416;
-    color: #eaeaea;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font);
+    font-size: 13px;
   }
   .layout { display: flex; height: 100vh; }
   .content { background: transparent; }

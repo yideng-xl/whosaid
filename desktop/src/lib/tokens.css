@@ -1,0 +1,50 @@
+/*
+ * 全局 Apple/macOS 设计 token（双主题基座）
+ * 取值照抄 docs/superpowers/specs/2026-07-16-apple-restyle-and-two-stage-panel-design.md
+ * 「二、Apple/macOS 视觉规范」。深色通过 :root[data-theme="dark"] 覆盖，
+ * 由 theme.ts 在 <html> 上写入 data-theme="light"|"dark" 驱动切换。
+ *
+ * 仅此文件定义变量本身；具体组件迁移到使用这些变量是后续 task 的范围。
+ */
+
+:root {
+  /* 颜色 */
+  --accent: #0066cc; /* Action Blue */
+  --focus: #0071e3; /* 焦点环 */
+  --bg: #ffffff; /* 窗口/主区背景 */
+  --sidebar-bg: #f5f5f7; /* parchment */
+  --card: #ffffff;
+  --fg: #1d1d1f; /* 近黑墨 */
+  --muted: #7a7a7a; /* 次要文字 */
+  --hairline: #e0e0e0; /* 发丝分隔线 */
+  --danger: #ff3b30;
+
+  /* 圆角 */
+  --radius-btn: 6px;
+  --radius-card: 10px;
+  --radius-modal: 12px;
+  --radius-seg: 7px;
+
+  /* 间距（8px 基） */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* 字体：系统栈，不引 webfont */
+  --font: -apple-system, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+}
+
+:root[data-theme="dark"] {
+  --accent: #0a84ff;
+  --focus: #0a84ff;
+  --bg: #1e1e1e;
+  --sidebar-bg: #252527;
+  --card: #2a2a2c;
+  --fg: #f5f5f7;
+  --muted: #98989d;
+  --hairline: #3a3a3c;
+  --danger: #ff453a;
+}
