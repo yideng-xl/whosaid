@@ -15,9 +15,20 @@ struct ServicePort(Mutex<Option<u16>>);
 /// dev 阶段 core 仓库根（含 transcribe_core 包与 venv）：cargo run/tauri dev 的 cwd 为
 /// desktop/src-tauri/，故 core 在 ../../core；可用 WHOSAID_CORE 覆盖。返回绝对路径。
 fn core_root() -> std::path::PathBuf {
+    // ① 运行时环境变量覆盖（dev 或 CI 显式指定）
     if let Ok(p) = std::env::var("WHOSAID_CORE") {
         return std::path::PathBuf::from(p);
     }
+    // ② 打包（个人构建）兜底：编译期用 `WHOSAID_CORE=/abs/... tauri build` 烘焙进来的绝对路径。
+    //    双击启动的 .app 无 shell env、current_dir 常为 /，相对 ../../core 找不到，故需绝对路径。
+    //    仅当该路径确含 transcribe_core 包才采用，避免烘焙了错误路径时误用。
+    if let Some(baked) = option_env!("WHOSAID_CORE") {
+        let pb = std::path::PathBuf::from(baked);
+        if pb.join("transcribe_core").is_dir() {
+            return pb;
+        }
+    }
+    // ③ dev 相对路径：cargo run/tauri dev 的 cwd 为 desktop/src-tauri/
     let mut p = std::env::current_dir().unwrap_or_default();
     p.push("../../core");
     // 规整掉 .. 段（失败则退回原路径），保证 PYTHONPATH 是绝对可用路径

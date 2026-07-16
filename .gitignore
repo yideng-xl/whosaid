@@ -10,3 +10,4 @@ config.json
 # 服务运行时 pid 文件
 svc.pid
 core/svc.pid
+.DS_Store
