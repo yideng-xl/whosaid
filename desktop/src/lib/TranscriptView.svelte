@@ -240,7 +240,11 @@
   {:else if detail.status === "running" && detail.phase === "diarizing"}
     <div class="panel">
       <div class="fname">{basename(audioPath)}</div>
-      <p class="phase">说话人分离中…（{Math.round(detail.progress * 100)}%）</p>
+      <!-- 分人阶段(pyannote)进度粗粒度且不可中断，长录音要几分钟：不再显示会让人
+           误以为卡死的静态百分比，改用不确定态流动条 + 文案说明 -->
+      <p class="phase">说话人分离中…</p>
+      <div class="bar indeterminate"><div class="stripe"></div></div>
+      <p class="hint">说话人分离中，长录音可能需要几分钟，此步不可中断</p>
     </div>
   {:else if detail.status === "running" || detail.status === "paused"}
     <div class="panel">
@@ -371,6 +375,27 @@
     color: var(--muted, #8a8a90);
     font-size: 14px;
     margin: 10px 0 0;
+  }
+  .hint {
+    color: var(--muted, #8a8a90);
+    font-size: 12px;
+    margin: 8px 0 0;
+  }
+  /* 分人阶段不确定态进度条：一条高亮色块来回滑动，替代停在 85% 的固定宽度 */
+  .bar.indeterminate { position: relative; overflow: hidden; margin-top: 10px; }
+  .bar.indeterminate .stripe {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 40%;
+    background: var(--accent, #3b7ddd);
+    border-radius: 3px;
+    animation: indeterminate 1.15s ease-in-out infinite;
+  }
+  @keyframes indeterminate {
+    0% { transform: translateX(-110%); }
+    100% { transform: translateX(360%); }
   }
   .prog {
     display: flex;

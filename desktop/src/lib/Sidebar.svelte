@@ -102,7 +102,13 @@
             {/if}
           </div>
           {#if job.status === "running" || job.status === "queued"}
-            <div class="bar"><div class="fill" style="width:{Math.round(job.progress * 100)}%"></div></div>
+            {#if job.status === "running" && job.progress >= 0.85}
+              <!-- 分人阶段无细粒度进度、可能耗时数分钟：用不确定态流动条，
+                   避免进度条死停在 85% 让用户误以为卡死 -->
+              <div class="bar indeterminate"><div class="stripe"></div></div>
+            {:else}
+              <div class="bar"><div class="fill" style="width:{Math.round(job.progress * 100)}%"></div></div>
+            {/if}
           {/if}
           {#if job.status === "failed" && job.error}
             <div class="err">{job.error}</div>
@@ -227,6 +233,22 @@
     height: 100%;
     background: var(--accent, #3b7ddd);
     transition: width 0.25s;
+  }
+  /* 分人阶段不确定态进度条：一条高亮色块来回滑动，替代停在 85% 的固定宽度 */
+  .bar.indeterminate { position: relative; overflow: hidden; }
+  .bar.indeterminate .stripe {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 40%;
+    background: var(--accent, #3b7ddd);
+    border-radius: 3px;
+    animation: indeterminate 1.15s ease-in-out infinite;
+  }
+  @keyframes indeterminate {
+    0% { transform: translateX(-110%); }
+    100% { transform: translateX(360%); }
   }
   .err {
     margin-top: 4px;
