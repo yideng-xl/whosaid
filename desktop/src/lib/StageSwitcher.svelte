@@ -11,8 +11,8 @@
   } = $props();
 
   const SEGMENTS: { n: 1 | 2; label: string }[] = [
-    { n: 1, label: "① 转文字" },
-    { n: 2, label: "② 分人" },
+    { n: 1, label: "① 逐字稿" },
+    { n: 2, label: "② 会话稿" },
   ];
 
   function stateOf(n: 1 | 2): "active" | "done" | "pending" {
