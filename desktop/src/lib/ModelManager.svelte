@@ -74,7 +74,7 @@
 <div class="mm">
   <div class="head">
     <div class="title">模型管理</div>
-    <button class="close-btn" aria-label="关闭模型管理" title="返回" onclick={onClose}>
+    <button class="close-btn" aria-label="关闭模型管理" title="关闭模型管理" onclick={onClose}>
       <Icon name="close" size={14} />
     </button>
   </div>
@@ -151,7 +151,7 @@
   .close-btn:active { transform: scale(0.97); }
   .close-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 
-  .err { color: var(--danger); font-size: 13px; margin-bottom: 12px; }
+  .err { color: var(--danger); font-size: 13px; margin-bottom: var(--space-3); }
   .group { margin-bottom: 22px; }
   .group-title {
     font-size: 13px;
@@ -165,11 +165,11 @@
   .model {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: var(--space-3);
     padding: 10px 14px;
     border: 1px solid var(--hairline);
     border-radius: var(--radius-card);
-    margin-bottom: 8px;
+    margin-bottom: var(--space-2);
     background: var(--card);
     transition: border-color 0.15s ease, background 0.15s ease;
   }
@@ -189,14 +189,19 @@
     align-items: center;
     gap: 3px;
     font-size: 11px;
-    padding: 1px 8px;
+    padding: 1px var(--space-2);
     border-radius: 999px;
     white-space: nowrap;
   }
-  /* 徽标底色沿用 Sidebar 的低饱和 color-mix 公式，无需单独维护深色覆盖 */
-  .tag.on { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
-  .tag.ok { background: color-mix(in srgb, #2c8a4b 16%, transparent); color: #2c8a4b; }
-  .tag.no { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+  /* 徽标底色沿用 Sidebar 的低饱和 color-mix 公式，无需单独维护深色覆盖。
+     文字色在底色基础上，再与 --fg 做 55% 混合：浅色主题 --fg 近黑把文字拉深，
+     深色主题 --fg 近白把文字拉亮，同一份表达式两个主题都能补足对比度，
+     同时仍保留 45% 原色相，不会变成刺眼纯色。实测（叠加 .model.active 卡片底、
+     即最差场景）：tag.on 浅 7.05:1/深 5.26:1，tag.ok 浅 6.22:1/深 5.16:1，
+     tag.no（仅出现在非当前卡片）浅 6.50:1/深 6.01:1，均 ≥4.5:1。 */
+  .tag.on { background: color-mix(in srgb, var(--accent) 16%, transparent); color: color-mix(in srgb, var(--accent) 55%, var(--fg)); }
+  .tag.ok { background: color-mix(in srgb, #2c8a4b 16%, transparent); color: color-mix(in srgb, #2c8a4b 55%, var(--fg)); }
+  .tag.no { background: color-mix(in srgb, var(--muted) 18%, transparent); color: color-mix(in srgb, var(--muted) 55%, var(--fg)); }
   .tag .dot {
     width: 6px;
     height: 6px;
@@ -205,7 +210,7 @@
   }
   .ops { flex-shrink: 0; min-width: 84px; text-align: right; }
   .ops button {
-    padding: 5px 12px;
+    padding: 5px var(--space-3);
     border-radius: var(--radius-btn);
     font: inherit;
     font-size: 12px;
@@ -223,14 +228,18 @@
     color: #fff;
   }
   .btn-primary:hover:not(:disabled) { opacity: 0.9; }
-  /* 次按钮：设为当前（已下载后的切换动作，低强调描边） */
+  /* 次按钮：设为当前（已下载后的切换动作，低强调描边）。
+     文字改用 --fg（正文近黑/近白高对比色）而非 --accent：深色主题下
+     accent(#0a84ff) on card(#2a2a2c) 实测仅 3.93:1 不达标；--fg on --card
+     浅色 ≈17.05:1、深色 ≈13.15:1，两主题均远超 4.5:1。accent 保留在描边上
+     作低强调标识，符合 macOS bordered 次按钮的惯用样式。 */
   .btn-secondary {
     background: transparent;
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--fg);
   }
   .btn-secondary:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
-  .note { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.6; }
+  .note { font-size: 12px; color: var(--muted); margin-top: var(--space-2); line-height: 1.6; }
 </style>

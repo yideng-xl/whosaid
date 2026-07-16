@@ -146,18 +146,18 @@
   .rename {
     border: 1px solid var(--hairline);
     border-radius: var(--radius-card);
-    padding: 12px 14px;
-    margin-bottom: 16px;
+    padding: var(--space-3) 14px;
+    margin-bottom: var(--space-4);
     background: var(--card);
   }
   .title {
     font-size: 13px;
     font-weight: 600;
     color: var(--fg);
-    margin-bottom: 8px;
+    margin-bottom: var(--space-2);
   }
-  .rows { display: flex; flex-direction: column; gap: 8px; }
-  .row { display: flex; align-items: center; gap: 8px; }
+  .rows { display: flex; flex-direction: column; gap: var(--space-2); }
+  .row { display: flex; align-items: center; gap: var(--space-2); }
   .orig {
     font-size: 12px;
     color: var(--muted);
@@ -166,7 +166,7 @@
   /* Apple 输入框：细描边、圆角 6，聚焦时用 --focus 焦点环，与 TranscriptView 的输入框规范一致 */
   .row input {
     flex: 1;
-    padding: 5px 8px;
+    padding: 5px var(--space-2);
     border: 1px solid var(--hairline);
     border-radius: var(--radius-btn);
     font: inherit;
@@ -180,7 +180,7 @@
     outline-offset: 1px;
   }
   .row button {
-    padding: 5px 12px;
+    padding: 5px var(--space-3);
     border: 1px solid var(--accent);
     background: var(--accent);
     color: #fff;
