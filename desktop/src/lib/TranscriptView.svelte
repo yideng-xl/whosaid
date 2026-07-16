@@ -293,8 +293,31 @@
     <div class="notice error">{loadError}</div>
   {:else if !detail}
     <div class="notice">加载中…</div>
-  {:else if detail.status === "failed"}
+  {:else if detail.status === "failed" && !plainBlocks.length}
+    <!-- 转写本身失败（无稿）：无内容可看，维持纯错误提示 -->
     <div class="notice error">转写失败：{detail.error ?? "未知错误"}</div>
+  {:else if detail.status === "failed"}
+    <!-- 转写已完成、分人阶段失败（有稿）：不再无条件短路，顶部给错误提示条，
+         下方仍照常按 activeStage 渲染——此时 StageSwitcher 只有①可点（②因非 done 被禁用），
+         用户点①能看到已转好的文字稿；不含改名/试听/导出等 done 态专属操作。 -->
+    <div class="notice error">分人失败：{detail.error ?? "未知错误"}。以下为已转写的文字稿。</div>
+    <div class="panel">
+      <div class="fname">{basename(audioPath)}</div>
+      {#if activeStage === 2}
+        <div class="transcript">
+          {#each blocks as b}
+            <div class="block">
+              <span class="speaker" style="color:{colorOf(b.speaker)}">{b.speaker}</span>
+              <span class="text">{b.text}</span>
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <div class="transcript plain">
+          {@render plainText()}
+        </div>
+      {/if}
+    </div>
   {:else if detail.status === "running" && detail.phase === "diarizing"}
     <div class="panel">
       <div class="fname">{basename(audioPath)}</div>
