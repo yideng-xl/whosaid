@@ -210,7 +210,10 @@
     background: color-mix(in srgb, var(--fg) 8%, transparent);
   }
   .job.selected {
-    background: var(--accent);
+    /* 选中行底色在 --accent 基础上叠黑加深：原色直接铺白字对比不达标
+       （浅色主题≈5.57:1 达标，深色主题≈3.65:1 不达标），
+       与黑混合 82% 后白字对比实测浅色 7.43:1、深色 5.15:1，两主题均 ≥4.5:1。 */
+    background: color-mix(in srgb, var(--accent) 82%, black);
     color: #fff;
   }
   .job-top { display: flex; align-items: center; gap: var(--space-2); }
@@ -250,9 +253,11 @@
     background: color-mix(in srgb, #b9711a 18%, transparent);
     color: #b9711a;
   }
-  /* 选中行反白：名字继承父级白字，徽标改半透明白底 + 白字保持可读对比 */
+  /* 选中行反白：名字继承父级白字。徽标原先叠白（rgba(255,255,255,.25)）会把选中底色
+     稀释变亮，导致白字对比不达标（浅色≈3.51:1、深色≈2.65:1）；改为叠黑加深底色，
+     实测叠 22% 黑后白字对比浅色 9.99:1、深色 7.49:1，两主题均 ≥4.5:1。 */
   .job.selected .badge {
-    background: rgba(255, 255, 255, 0.25);
+    background: color-mix(in srgb, black 22%, transparent);
     color: #fff;
   }
   .del {
