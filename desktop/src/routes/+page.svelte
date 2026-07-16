@@ -311,7 +311,7 @@
     font-size: 14px;
   }
   .content { flex: 1; overflow-y: auto; padding: 24px; box-sizing: border-box; }
-  .placeholder { color: #9a9aa0; font-size: 14px; }
+  .placeholder { color: var(--muted); font-size: 14px; }
 
   .boot {
     height: 100vh;
@@ -320,19 +320,21 @@
     align-items: center;
     justify-content: center;
     gap: 14px;
-    color: #6a6a70;
+    color: var(--muted);
     font-size: 14px;
   }
   .spinner {
     width: 26px; height: 26px;
-    border: 3px solid #dcdce0;
-    border-top-color: #3b7ddd;
+    border: 3px solid var(--hairline);
+    border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* 删除二次确认 */
+  /* 删除二次确认：与 TranscriptView.svelte 的重新分人确认弹窗使用同一套 token 规范
+     （圆角 12 / 柔和阴影 / 遮罩 40% 黑），仅浮层允许用阴影表达深度。颜色全部走全局
+     token（tokens.css），双主题由 :root[data-theme] 统一驱动，此处不再单独覆盖深色值。 */
   .modal-backdrop {
     position: fixed;
     inset: 0;
@@ -345,52 +347,52 @@
   .modal {
     width: 340px;
     max-width: 90vw;
-    background: #fff;
-    border-radius: 12px;
-    padding: 20px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+    background: var(--card);
+    border-radius: var(--radius-modal);
+    padding: var(--space-5);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.16);
   }
   .modal-title {
     font-size: 15px;
     font-weight: 600;
-    color: #1a1a1a;
-    margin-bottom: 10px;
+    color: var(--fg);
+    margin-bottom: var(--space-2);
   }
   .modal-body {
     font-size: 13px;
     line-height: 1.7;
-    color: #4a4a4a;
-    margin: 0 0 18px;
+    color: var(--muted);
+    margin: 0 0 var(--space-4);
   }
-  .modal-body b { color: #cf3b3b; }
+  .modal-body b { color: var(--danger); }
   .modal-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 10px;
+    gap: var(--space-2);
   }
   .modal-actions button {
     padding: 7px 16px;
-    border-radius: 7px;
+    border-radius: var(--radius-btn);
     font: inherit;
     font-size: 13px;
     cursor: pointer;
     border: 1px solid transparent;
+    transition: transform 0.12s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .modal-actions button:active { transform: scale(0.97); }
+  .modal-actions button:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
   }
   .btn-cancel {
     background: transparent;
-    border-color: #d8d8dc;
-    color: #333;
+    border-color: var(--hairline);
+    color: var(--fg);
   }
-  .btn-cancel:hover { border-color: #b0b0b6; }
+  .btn-cancel:hover { border-color: var(--muted); }
   .btn-danger {
-    background: #cf3b3b;
+    background: var(--danger);
     color: #fff;
   }
-  .btn-danger:hover { background: #b83232; }
-
-  :global(:root[data-theme="dark"]) .modal { background: #26262a; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
-  :global(:root[data-theme="dark"]) .modal-title { color: #eaeaea; }
-  :global(:root[data-theme="dark"]) .modal-body { color: #c4c4c8; }
-  :global(:root[data-theme="dark"]) .btn-cancel { border-color: #3a3a40; color: #d0d0d4; }
-  :global(:root[data-theme="dark"]) .btn-cancel:hover { border-color: #55555c; }
+  .btn-danger:hover { opacity: 0.9; }
 </style>
