@@ -3,14 +3,14 @@ name = "transcribe-core"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi",
-    "uvicorn",
-    "websockets",
-    "mlx-whisper",
-    "pyannote.audio",
-    "torch",
-    "torchaudio",
-    "huggingface-hub",
+    "fastapi==0.139.0",
+    "uvicorn==0.51.0",
+    "websockets==16.1",
+    "mlx-whisper==0.4.3",
+    "pyannote.audio==4.0.7",
+    "torch==2.13.0",
+    "torchaudio==2.11.0",
+    "huggingface-hub==1.23.0",
 ]
 
 [tool.pytest.ini_options]
