@@ -2,6 +2,7 @@
 //! 前端通过 `get_service_port` 命令拿端口后走 REST/WS 连本地服务；退出时 kill 子进程。
 mod sidecar;
 
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use tauri::Manager;
@@ -12,37 +13,59 @@ struct ServiceProcess(Mutex<Option<std::process::Child>>);
 /// 已握手到的服务端口；None 表示尚未就绪，前端应轮询。
 struct ServicePort(Mutex<Option<u16>>);
 
-/// dev 阶段 core 仓库根（含 transcribe_core 包与 venv）：cargo run/tauri dev 的 cwd 为
-/// desktop/src-tauri/，故 core 在 ../../core；可用 WHOSAID_CORE 覆盖。返回绝对路径。
-fn core_root() -> std::path::PathBuf {
-    // ① 运行时环境变量覆盖（dev 或 CI 显式指定）
-    if let Ok(p) = std::env::var("WHOSAID_CORE") {
-        return std::path::PathBuf::from(p);
+/// 三态优先级的通用选择器：运行时 env 覆盖 > 候选路径（`exists` 判真才用）> dev 兜底。
+/// 纯函数，不摸文件系统/环境变量，靠调用方注入 `exists` 判定，故可单测（见 path_tests）。
+fn pick_path(
+    env_override: Option<PathBuf>,
+    candidate: Option<PathBuf>,
+    dev_fallback: PathBuf,
+    exists: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    if let Some(p) = env_override {
+        return p;
     }
-    // ② 打包（个人构建）兜底：编译期用 `WHOSAID_CORE=/abs/... tauri build` 烘焙进来的绝对路径。
-    //    双击启动的 .app 无 shell env、current_dir 常为 /，相对 ../../core 找不到，故需绝对路径。
-    //    仅当该路径确含 transcribe_core 包才采用，避免烘焙了错误路径时误用。
-    if let Some(baked) = option_env!("WHOSAID_CORE") {
-        let pb = std::path::PathBuf::from(baked);
-        if pb.join("transcribe_core").is_dir() {
-            return pb;
+    if let Some(c) = &candidate {
+        if exists(c) {
+            return c.clone();
         }
     }
-    // ③ dev 相对路径：cargo run/tauri dev 的 cwd 为 desktop/src-tauri/
-    let mut p = std::env::current_dir().unwrap_or_default();
-    p.push("../../core");
-    // 规整掉 .. 段（失败则退回原路径），保证 PYTHONPATH 是绝对可用路径
-    std::fs::canonicalize(&p).unwrap_or(p)
+    dev_fallback
 }
 
-/// dev 阶段的 python 解释器；Task 9 再做 resolve_python 健壮化。
-fn dev_python() -> String {
-    std::env::var("WHOSAID_PYTHON").unwrap_or_else(|_| {
-        core_root()
-            .join("venv/bin/python")
-            .to_string_lossy()
-            .into_owned()
+/// core 根目录（含 transcribe_core 包）三态解析：
+/// ① WHOSAID_CORE 环境变量（dev/CI/排障用）
+/// ② 打包态：resource_dir/core（仅当其下确有 transcribe_core 包才采用，由 Task 2 的
+///    build-runtime.sh 组装进 `.app/Contents/Resources/core/transcribe_core`）
+/// ③ dev 相对路径：cargo run/tauri dev 的 cwd 为 desktop/src-tauri/，故 core 在 ../../core
+/// 不再有编译期 option_env! 烘焙兜底——那只对烘焙时的那台机器有效，分发态由②替代。
+fn core_root(resource_dir: Option<PathBuf>) -> PathBuf {
+    let env_override = std::env::var("WHOSAID_CORE").ok().map(PathBuf::from);
+    let candidate = resource_dir.map(|rd| rd.join("core"));
+    let dev_fallback = {
+        let mut p = std::env::current_dir().unwrap_or_default();
+        p.push("../../core");
+        // 规整掉 .. 段（失败则退回原路径），保证 PYTHONPATH 是绝对可用路径
+        std::fs::canonicalize(&p).unwrap_or(p)
+    };
+    pick_path(env_override, candidate, dev_fallback, |p| {
+        p.join("transcribe_core").is_dir()
     })
+}
+
+/// python 解释器三态解析，语义与 core_root 对称：
+/// ① WHOSAID_PYTHON 环境变量
+/// ② 打包态：resource_dir/python/bin/python3（Task 2 的 build-runtime.sh 组装的可重定位
+///    CPython，仅当该文件确实存在才采用）
+/// ③ dev 相对路径：core_root 的 dev 分支下的 venv/bin/python
+fn dev_python(resource_dir: Option<PathBuf>) -> String {
+    let env_override = std::env::var("WHOSAID_PYTHON").ok().map(PathBuf::from);
+    let candidate = resource_dir
+        .clone()
+        .map(|rd| rd.join("python").join("bin").join("python3"));
+    let dev_fallback = core_root(resource_dir).join("venv/bin/python");
+    pick_path(env_override, candidate, dev_fallback, |p| p.is_file())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// 数据目录：~/Library/Application Support/whosaid（内核在此落 config.json 与持久化数据）。
@@ -88,11 +111,14 @@ pub fn run() {
             write_file
         ])
         .setup(|app| {
-            let python = dev_python();
+            // 打包态资源目录（.app/Contents/Resources/）；tauri dev 下通常返回 Some 但其下不会有
+            // python/core（Task 2 的构建脚本没跑过），resolve_* 里的 exists 判定会自然落回 dev 分支。
+            let resource_dir = app.path().resource_dir().ok();
+            let python = dev_python(resource_dir.clone());
             let cwd = data_dir();
             // transcribe_core 未 pip 安装进 venv，只能从 core 根目录导入；
             // 故 cwd 用数据目录（config.json/持久化落此），PYTHONPATH 指向 core 根让 import 生效
-            let pythonpath = core_root().to_string_lossy().into_owned();
+            let pythonpath = core_root(resource_dir).to_string_lossy().into_owned();
             match sidecar::spawn_service(&python, &cwd, &pythonpath) {
                 Ok((child, port)) => {
                     *app.state::<ServiceProcess>().0.lock().unwrap() = Some(child);
@@ -139,5 +165,50 @@ pub fn run() {
 fn kill_service(app: &tauri::AppHandle) {
     if let Some(mut child) = app.state::<ServiceProcess>().0.lock().unwrap().take() {
         child.kill().ok();
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn env_override_wins_over_everything() {
+        let got = pick_path(
+            Some(PathBuf::from("/env/core")),
+            Some(PathBuf::from("/resource/core")),
+            PathBuf::from("/dev/core"),
+            |_p| true,
+        );
+        assert_eq!(got, PathBuf::from("/env/core"));
+    }
+
+    #[test]
+    fn candidate_wins_when_exists_and_no_env_override() {
+        let got = pick_path(
+            None,
+            Some(PathBuf::from("/resource/core")),
+            PathBuf::from("/dev/core"),
+            |p| p == std::path::Path::new("/resource/core"),
+        );
+        assert_eq!(got, PathBuf::from("/resource/core"));
+    }
+
+    #[test]
+    fn falls_back_to_dev_when_candidate_missing() {
+        let got = pick_path(
+            None,
+            Some(PathBuf::from("/resource/core")),
+            PathBuf::from("/dev/core"),
+            |_p| false,
+        );
+        assert_eq!(got, PathBuf::from("/dev/core"));
+    }
+
+    #[test]
+    fn falls_back_to_dev_when_no_candidate_at_all() {
+        let got = pick_path(None, None, PathBuf::from("/dev/core"), |_p| true);
+        assert_eq!(got, PathBuf::from("/dev/core"));
     }
 }
