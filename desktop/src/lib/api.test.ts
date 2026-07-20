@@ -83,4 +83,30 @@ describe("api", () => {
       expect.objectContaining({ method: "POST", body: JSON.stringify({ num_speakers: null }) }),
     );
   });
+
+  it("getHfSettings fetches settings", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ hf_token: "hf_x", hf_endpoint: null }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(4444);
+    const s = await api.getHfSettings();
+    expect(s).toEqual({ hf_token: "hf_x", hf_endpoint: null });
+    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:4444/settings/hf");
+  });
+
+  it("setHfSettings POSTs token and endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(4444);
+    await api.setHfSettings({ hf_token: "hf_x", hf_endpoint: "https://hf-mirror.com" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4444/settings/hf",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ hf_token: "hf_x", hf_endpoint: "https://hf-mirror.com" }),
+      }),
+    );
+  });
 });

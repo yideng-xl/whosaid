@@ -18,6 +18,11 @@ export interface ModelInfo {
   size_mb: number;
 }
 
+export interface HfSettings {
+  hf_token: string | null;
+  hf_endpoint: string | null;
+}
+
 export interface Speaker {
   orig: string; // 原始标签，如 "说话人A"，rename 时作为 orig 传回
   name: string; // 当前显示名（改名后为真名）
@@ -134,6 +139,18 @@ export function createApi(port: number) {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ model_id: id }),
+      }));
+    },
+
+    async getHfSettings(): Promise<HfSettings> {
+      return j(await fetch(`${base}/settings/hf`));
+    },
+
+    async setHfSettings(settings: HfSettings): Promise<void> {
+      await j(await fetch(`${base}/settings/hf`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(settings),
       }));
     },
 

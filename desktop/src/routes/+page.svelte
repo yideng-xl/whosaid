@@ -6,6 +6,7 @@
   import TranscriptView from "$lib/TranscriptView.svelte";
   import ModelManager from "$lib/ModelManager.svelte";
   import { createApi, type JobSummary } from "$lib/api";
+  import { hasUndownloadedActiveModel } from "$lib/modelState";
   import { resolveInitialTheme, applyTheme, saveTheme, type Theme } from "$lib/theme";
   import "$lib/tokens.css";
 
@@ -19,6 +20,8 @@
   let view = $state<"transcript" | "models">("transcript");
   let dragging = $state(false);
   let errorBanner = $state<string | null>(null);
+  let modelsNotReady = $state(false);
+  let firstRunDismissed = $state(false);
   // 深色/浅色主题：未手动选过时跟随系统，选过则覆盖系统并持久化到 localStorage
   let theme = $state<Theme>("light");
 
@@ -109,16 +112,18 @@
         }
         const a = createApi(port);
 
-        // 2) 健康门：GET /models 成功即视为就绪
+        // 2) 健康门：GET /models 成功即视为就绪；顺带记下模型列表，判断是否需要首次提示
+        let modelsSnapshot: Awaited<ReturnType<typeof a.listModels>> = [];
         for (let i = 0; i < 20 && !cancelled; i++) {
           try {
-            await a.listModels();
+            modelsSnapshot = await a.listModels();
             break;
           } catch {
             await new Promise((r) => setTimeout(r, 500));
           }
         }
         if (cancelled) return;
+        modelsNotReady = hasUndownloadedActiveModel(modelsSnapshot);
 
         api = a;
         ready = true;
@@ -194,6 +199,13 @@
       <div class="err-banner">
         <span>{errorBanner}</span>
         <button onclick={() => (errorBanner = null)}>✕</button>
+      </div>
+    {/if}
+    {#if modelsNotReady && !firstRunDismissed}
+      <div class="hint-banner">
+        <span>还没有可用模型：请先在「模型管理」里填写 HuggingFace 访问令牌并下载模型，才能开始转写。</span>
+        <button onclick={() => (view = "models")}>去设置</button>
+        <button onclick={() => (firstRunDismissed = true)}>✕</button>
       </div>
     {/if}
     <Sidebar
@@ -309,6 +321,28 @@
     color: #fff;
     cursor: pointer;
     font-size: 14px;
+  }
+  .hint-banner {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 9;
+    background: var(--accent);
+    color: #fff;
+    font-size: 13px;
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .hint-banner button {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    border-radius: var(--radius-btn);
+    color: #fff;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 3px 10px;
   }
   .content { flex: 1; overflow-y: auto; padding: 24px; box-sizing: border-box; }
   .placeholder { color: var(--muted); font-size: 14px; }

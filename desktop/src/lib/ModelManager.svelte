@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { createApi, ModelInfo } from "./api";
   import Icon from "./Icon.svelte";
+  import { openUrl } from "@tauri-apps/plugin-opener";
 
   let {
     api,
@@ -13,6 +14,12 @@
   let models = $state<ModelInfo[]>([]);
   let loadError = $state<string | null>(null);
   let busyId = $state<string | null>(null); // 正在下载/切换的模型 id
+
+  let hfToken = $state("");
+  let hfEndpoint = $state("");
+  let hfSaving = $state(false);
+  let hfSaved = $state(false);
+  let hfError = $state<string | null>(null);
 
   const KIND_LABEL: Record<string, string> = {
     transcribe: "语音转写",
@@ -40,6 +47,31 @@
     } catch (e) {
       loadError = `加载模型列表失败：${e}`;
     }
+    try {
+      const s = await api.getHfSettings();
+      hfToken = s.hf_token ?? "";
+      hfEndpoint = s.hf_endpoint ?? "";
+    } catch (e) {
+      hfError = `加载 HF 设置失败：${e}`;
+    }
+  }
+
+  async function saveHfSettings() {
+    hfSaving = true;
+    hfError = null;
+    hfSaved = false;
+    try {
+      await api.setHfSettings({ hf_token: hfToken || null, hf_endpoint: hfEndpoint || null });
+      hfSaved = true;
+    } catch (e) {
+      hfError = `保存失败：${e}`;
+    } finally {
+      hfSaving = false;
+    }
+  }
+
+  function openTutorial() {
+    void openUrl("https://yideng-xl.github.io/whosaid/#hf-token");
   }
 
   async function download(id: string) {
@@ -82,6 +114,29 @@
   {#if loadError}
     <div class="err">{loadError}</div>
   {/if}
+
+  <div class="hf-section">
+    <div class="group-title">HuggingFace 访问设置</div>
+    <p class="hf-note">
+      下载 pyannote 说话人分离模型（门控模型）需要你自己的 HuggingFace 访问令牌，并在
+      HuggingFace 网站同意对应模型的使用条款。
+      <button class="link-btn" onclick={openTutorial}>查看教程</button>
+    </p>
+    {#if hfError}
+      <div class="err">{hfError}</div>
+    {/if}
+    <label class="hf-field">
+      <span>HF 访问令牌</span>
+      <input type="password" bind:value={hfToken} placeholder="hf_xxxxxxxxxxxx" autocomplete="off" />
+    </label>
+    <label class="hf-field">
+      <span>镜像地址（可选）</span>
+      <input type="text" bind:value={hfEndpoint} placeholder="留空使用官方 huggingface.co，如 https://hf-mirror.com" />
+    </label>
+    <button class="btn-primary hf-save" disabled={hfSaving} onclick={saveHfSettings}>
+      {hfSaving ? "保存中…" : hfSaved ? "已保存" : "保存"}
+    </button>
+  </div>
 
   {#each groups as [kind, items] (kind)}
     <div class="group">
@@ -152,6 +207,42 @@
   .close-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 
   .err { color: var(--danger); font-size: 13px; margin-bottom: var(--space-3); }
+  .hf-section {
+    padding: 14px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-card);
+    background: var(--card);
+    margin-bottom: 22px;
+  }
+  .hf-note { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 4px 0 12px; }
+  .link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+    text-decoration: underline;
+  }
+  .hf-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 10px;
+    font-size: 12px;
+    color: var(--fg);
+  }
+  .hf-field input {
+    padding: 6px 10px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-btn);
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+    font-size: 13px;
+  }
+  .hf-field input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  .hf-save { margin-top: 2px; }
   .group { margin-bottom: 22px; }
   .group-title {
     font-size: 13px;
