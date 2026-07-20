@@ -49,7 +49,7 @@
   <p class="sub">本地、私有的中文会议转写工具——把录音转成文字，并分清「谁在说」。以下是从下载到第一次转写的完整步骤，仅支持 <b>Apple Silicon Mac</b>（M 系列芯片）。</p>
 
   <h2 id="download"><span class="step-num">1</span>下载安装</h2>
-  <p>到 <a href="https://github.com/yideng-xl/whosaid/releases">GitHub Release</a> 页面下载最新的 <code>whosaid_x.x.x_aarch64.dmg</code>，双击打开，把 <b>whosaid.app</b> 拖进「应用程序」文件夹。无需另外安装任何东西——Python 运行时和 ffmpeg 都已打进包里。</p>
+  <p>到 <a href="https://github.com/yideng-xl/whosaid/releases" target="_blank" rel="noopener">GitHub Release</a> 页面下载最新的 <code>whosaid_x.x.x_aarch64.dmg</code>，双击打开，把 <b>whosaid.app</b> 拖进「应用程序」文件夹。无需另外安装任何东西——Python 运行时和 ffmpeg 都已打进包里。</p>
 
   <h2 id="first-open"><span class="step-num">2</span>首次打开（去隔离）</h2>
   <p>whosaid 没有走 Apple 签名+公证，第一次双击会被 macOS 拦下、提示"已损坏"或"无法打开"——这是正常现象，不是真的损坏。</p>
@@ -67,12 +67,12 @@
   <h2 id="hf-token"><span class="step-num">3</span>注册 HuggingFace 访问令牌</h2>
   <p>whosaid 不随包分发说话人分离模型（避免帮你违反模型许可协议），第一次使用需要你自己注册 HuggingFace 账号、拿到访问令牌，并同意门控模型的使用条款：</p>
   <ol>
-    <li>注册 <a href="https://huggingface.co/join">huggingface.co</a> 账号（免费）</li>
-    <li>登录后到 <a href="https://huggingface.co/settings/tokens">Settings → Access Tokens</a>，新建一个 <b>Read</b> 权限的 token，复制备用</li>
+    <li>注册 <a href="https://huggingface.co/login" target="_blank" rel="noopener">huggingface.co</a> 账号（免费）</li>
+    <li>登录后到 <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">Settings → Access Tokens</a>，新建一个 <b>Read</b> 权限的 token，复制备用</li>
     <li>依次打开下面两个模型页面，点 <b>Agree and access repository</b> 同意使用条款（说话人分离功能实际用到的两个门控模型）：
       <ul>
-        <li><a href="https://huggingface.co/pyannote/segmentation-3.0">pyannote/segmentation-3.0</a></li>
-        <li><a href="https://huggingface.co/pyannote/speaker-diarization-community-1">pyannote/speaker-diarization-community-1</a></li>
+        <li><a href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank" rel="noopener">pyannote/segmentation-3.0</a></li>
+        <li><a href="https://huggingface.co/pyannote/speaker-diarization-community-1" target="_blank" rel="noopener">pyannote/speaker-diarization-community-1</a></li>
       </ul>
     </li>
   </ol>
@@ -90,7 +90,7 @@
   <p>把录音文件（m4a/mp3/wav/aac/flac/mp4/mov/ogg）直接拖进 whosaid 窗口，等转写完成后即可看到分说话人的文字稿，支持改说话人名、导出 txt/srt。</p>
 
   <h2 id="oss">开源组件与许可</h2>
-  <p class="warn">本 app 内置了 <a href="https://ffmpeg.org">FFmpeg</a>（用于音频解码/切块）的静态构建，遵循其许可协议；对应源码可在 <a href="https://ffmpeg.org/download.html">ffmpeg.org/download.html</a> 获取。转写/说话人分离分别基于 mlx-whisper 与 pyannote.audio。</p>
+  <p class="warn">本 app 内置了 <a href="https://ffmpeg.org" target="_blank" rel="noopener">FFmpeg</a>（用于音频解码/切块）的静态构建，遵循其许可协议；对应源码可在 <a href="https://ffmpeg.org/download.html" target="_blank" rel="noopener">ffmpeg.org/download.html</a> 获取。转写/说话人分离分别基于 mlx-whisper 与 pyannote.audio。</p>
 </main>
 </body>
 </html>
