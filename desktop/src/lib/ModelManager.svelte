@@ -16,6 +16,10 @@
   let busyId = $state<string | null>(null); // 正在下载/切换/删除的模型 id
   // 待确认删除的模型（点删除先弹二次确认，避免误删需要重新下载）
   let deleteTarget = $state<ModelInfo | null>(null);
+  // 正在下载的模型 id → 百分比（0~99，来自轮询；resolve 后短暂置 100）。
+  // 用 map 而非单值：POST /download 每个模型各自独立请求，理论上可并发下载多个模型，
+  // 用 id 索引不互相覆盖进度。
+  let downloadPercent = $state<Record<string, number>>({});
 
   let hfToken = $state("");
   let hfEndpoint = $state("");
@@ -78,13 +82,33 @@
 
   async function download(id: string) {
     busyId = id;
+    downloadPercent = { ...downloadPercent, [id]: 0 };
+    let stopped = false;
+    // 边下载边轮询：POST /download 同步阻塞到下完，但服务端是 anyio 线程池里跑的
+    // 同步端点，不挡其他请求，故下载进行时这个只读进度端点仍能被正常服务。
+    // 轮询失败（如偶发网络抖动）不影响下载本身，静默忽略，等下一轮或下载 promise 本身兜底。
+    const pollTimer = setInterval(async () => {
+      try {
+        const p = await api.getModelProgress(id);
+        if (!stopped) downloadPercent = { ...downloadPercent, [id]: p.percent };
+      } catch {
+        // 忽略
+      }
+    }, 800);
     try {
-      await api.downloadModel(id); // 同步阻塞：返回即下载完成
+      await api.downloadModel(id); // 不 await 阻塞 UI：轮询与此并行，promise 仅用于知道完成/失败
+      stopped = true;
+      clearInterval(pollTimer);
+      downloadPercent = { ...downloadPercent, [id]: 100 };
       await load();
     } catch (e) {
-      loadError = `下载失败：${e}`;
+      stopped = true;
+      clearInterval(pollTimer);
+      loadError = `下载失败：${e}`; // 含令牌 403 等：服务端错误透传文案原样展示
     } finally {
       busyId = null;
+      const { [id]: _discard, ...rest } = downloadPercent;
+      downloadPercent = rest;
     }
   }
 
@@ -160,46 +184,56 @@
       <div class="group-title">{KIND_LABEL[kind] ?? kind}</div>
       {#each items as m (m.id)}
         <div class="model" class:active={m.active}>
-          <div class="info">
-            <span class="mname">{m.display_name}</span>
-            <span class="msize">{sizeText(m.size_mb)}</span>
-          </div>
-          <div class="tags">
-            {#if m.active}
-              <span class="tag on"><span class="dot"></span>当前</span>
-            {/if}
-            {#if m.downloaded}
-              <span class="tag ok"><Icon name="check" size={10} />已下载</span>
-            {:else}
-              <span class="tag no">未下载</span>
-            {/if}
-          </div>
-          <div class="ops">
-            {#if !m.downloaded}
-              <button class="btn-primary" disabled={busyId === m.id} onclick={() => download(m.id)}>
-                {busyId === m.id ? "下载中…" : "下载"}
-              </button>
-            {:else}
-              {#if !m.active}
-                <button class="btn-secondary" disabled={busyId === m.id} onclick={() => setActive(m.id)}>
-                  {busyId === m.id ? "切换中…" : "设为当前"}
+          <div class="row">
+            <div class="info">
+              <span class="mname">{m.display_name}</span>
+              <span class="msize">{sizeText(m.size_mb)}</span>
+            </div>
+            <div class="tags">
+              {#if m.active}
+                <span class="tag on"><span class="dot"></span>当前</span>
+              {/if}
+              {#if m.downloaded}
+                <span class="tag ok"><Icon name="check" size={10} />已下载</span>
+              {:else}
+                <span class="tag no">未下载</span>
+              {/if}
+            </div>
+            <div class="ops">
+              {#if !m.downloaded}
+                <button class="btn-primary" disabled={busyId === m.id} onclick={() => download(m.id)}>
+                  {m.id in downloadPercent ? `${Math.round(downloadPercent[m.id])}%` : "下载"}
+                </button>
+              {:else}
+                {#if !m.active}
+                  <button class="btn-secondary" disabled={busyId === m.id} onclick={() => setActive(m.id)}>
+                    {busyId === m.id ? "切换中…" : "设为当前"}
+                  </button>
+                {/if}
+                <button
+                  class="btn-delete"
+                  disabled={busyId === m.id}
+                  onclick={() => (deleteTarget = m)}
+                >
+                  删除
                 </button>
               {/if}
-              <button
-                class="btn-delete"
-                disabled={busyId === m.id}
-                onclick={() => (deleteTarget = m)}
-              >
-                删除
-              </button>
-            {/if}
+            </div>
           </div>
+          {#if m.id in downloadPercent}
+            <div class="progress" role="progressbar" aria-label="下载进度"
+                 aria-valuenow={Math.round(downloadPercent[m.id])} aria-valuemin="0" aria-valuemax="100">
+              <div class="progress-track">
+                <div class="progress-fill" style="width: {downloadPercent[m.id]}%"></div>
+              </div>
+            </div>
+          {/if}
         </div>
       {/each}
     </div>
   {/each}
 
-  <p class="note">下载较大模型时会一直转圈直到完成（服务端同步下载），请耐心等待。切换当前模型对下一个任务生效。</p>
+  <p class="note">下载较大模型耗时较长，进度条按缓存目录当前大小估算，请耐心等待完成。切换当前模型对下一个任务生效。</p>
 
   {#if deleteTarget}
     <div class="modal-backdrop" role="presentation">
@@ -300,8 +334,8 @@
      当前项(active)描边实心 accent + 淡 accent 底，替代原先纯边框高亮。 */
   .model {
     display: flex;
-    align-items: center;
-    gap: var(--space-3);
+    flex-direction: column;
+    gap: 8px;
     padding: 10px 14px;
     border: 1px solid var(--hairline);
     border-radius: var(--radius-card);
@@ -316,6 +350,7 @@
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 6%, var(--card));
   }
+  .row { display: flex; align-items: center; gap: var(--space-3); }
   .info { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .mname { font-size: 14px; color: var(--fg); }
   .msize { font-size: 12px; color: var(--muted); }
@@ -385,6 +420,20 @@
   }
   .btn-delete:hover:not(:disabled) {
     background: color-mix(in srgb, var(--danger) 10%, transparent);
+  }
+  /* 下载进度条：全局 token 填充（--accent），无裸 hex；轨道用低透明度 accent 混 hairline，
+     两主题不用单独覆盖也能保持可读的低对比轨道。 */
+  .progress-track {
+    height: 4px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 15%, var(--hairline));
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent);
+    transition: width 0.2s ease;
   }
   .note { font-size: 12px; color: var(--muted); margin-top: var(--space-2); line-height: 1.6; }
 

@@ -210,6 +210,27 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
             raise HTTPException(502, f"模型下载失败（HF 返回 {status}）：{e}")
         return {"ok": True}
 
+    @app.get("/models/{model_id}/progress")
+    def download_progress(model_id: str):
+        """只读、无状态：不触发/干预下载本身，仅量该模型在 HF 缓存里的目录当前大小估算进度，
+        供前端在 POST /download 阻塞期间轮询展示进度条。POST 端点是同步 def，在 anyio 线程池
+        跑，不挡本端点被并发服务。"""
+        from pathlib import Path
+        from huggingface_hub.constants import HF_HUB_CACHE
+        try:
+            m = registry.info(model_id)
+        except KeyError:
+            raise HTTPException(404, "模型不存在")
+        # 与 main() 里 delete 闭包同一套缓存路径拼接规则：{HF_HUB_CACHE}/models--{org}--{name}
+        cache_dir = Path(HF_HUB_CACHE) / ("models--" + m["repo"].replace("/", "--"))
+        downloaded_bytes = 0
+        if cache_dir.is_dir():
+            downloaded_bytes = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file())
+        total_bytes = m["size_mb"] * 1024 * 1024
+        # size_mb 是估算值，下载中封顶 99，避免实际字节数超估算总量时百分比越过/顶满 100
+        percent = min(99.0, downloaded_bytes / total_bytes * 100) if total_bytes > 0 else 0.0
+        return {"downloaded_bytes": downloaded_bytes, "total_bytes": total_bytes, "percent": percent}
+
     @app.delete("/models/{model_id}")
     def delete_model(model_id: str):
         registry.delete(model_id)

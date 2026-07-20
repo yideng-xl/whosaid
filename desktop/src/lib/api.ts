@@ -18,6 +18,12 @@ export interface ModelInfo {
   size_mb: number;
 }
 
+export interface ModelProgress {
+  downloaded_bytes: number;
+  total_bytes: number;
+  percent: number; // 下载中封顶 99，避免估算值提前跳满 100（真正完成以 downloadModel 的 promise resolve 为准）
+}
+
 export interface HfSettings {
   hf_token: string | null;
   hf_endpoint: string | null;
@@ -132,6 +138,12 @@ export function createApi(port: number) {
     async downloadModel(id: string): Promise<void> {
       // 走 j()：下载失败（模型不存在等）能抛给调用方，不被静默吞掉
       await j(await fetch(`${base}/models/${id}/download`, { method: "POST" }));
+    },
+
+    async getModelProgress(id: string): Promise<ModelProgress> {
+      // 只读轮询端点：下载中不断量该模型 HF 缓存目录当前大小，供前端画进度条；
+      // 不走 j() 之外的特殊处理，非 2xx（如未知 model_id）同样按现有约定抛给调用方。
+      return j(await fetch(`${base}/models/${id}/progress`));
     },
 
     async deleteModel(id: string): Promise<void> {

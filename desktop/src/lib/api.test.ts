@@ -107,6 +107,18 @@ describe("api", () => {
     );
   });
 
+  it("getModelProgress fetches progress endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ downloaded_bytes: 100, total_bytes: 200, percent: 50 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(2222);
+    const p = await api.getModelProgress("whisper-small");
+    expect(p).toEqual({ downloaded_bytes: 100, total_bytes: 200, percent: 50 });
+    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:2222/models/whisper-small/progress");
+  });
+
   it("setHfSettings POSTs token and endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
     vi.stubGlobal("fetch", fetchMock);

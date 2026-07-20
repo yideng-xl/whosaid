@@ -359,6 +359,50 @@ def test_delete_model_endpoint_without_delete_fn_raises(tmp_path):
         c.delete("/models/whisper-small")
 
 
+def test_model_progress_zero_when_no_cache_dir(tmp_path, monkeypatch):
+    """未开始下载（缓存目录不存在）：downloaded_bytes/percent 均为 0，total_bytes 按 size_mb 估算。"""
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path / "hf_cache"))
+    c = make_client(tmp_path)
+    resp = c.get("/models/whisper-small/progress")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d == {"downloaded_bytes": 0, "total_bytes": 484 * 1024 * 1024, "percent": 0.0}
+
+
+def test_model_progress_reflects_partial_cache_dir_size(tmp_path, monkeypatch):
+    """下载中：按 HF 缓存目录（models--{org}--{name}）里已落地文件的总大小算 downloaded_bytes，
+    percent = downloaded/total*100（未封顶场景）。"""
+    cache_root = tmp_path / "hf_cache"
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+    model_dir = cache_root / "models--mlx-community--whisper-small-mlx" / "blobs"
+    model_dir.mkdir(parents=True)
+    (model_dir / "weights.bin").write_bytes(b"x" * (1024 * 1024))  # 1MB
+    c = make_client(tmp_path)
+    d = c.get("/models/whisper-small/progress").json()
+    assert d["downloaded_bytes"] == 1024 * 1024
+    assert d["total_bytes"] == 484 * 1024 * 1024
+    assert 0 < d["percent"] < 99
+
+
+def test_model_progress_caps_at_99_percent(tmp_path, monkeypatch):
+    """size_mb 是估算值，缓存目录实际大小超过/等于估算总量时，percent 封顶 99，避免看起来"下完了"
+    但下载请求其实还没返回。"""
+    cache_root = tmp_path / "hf_cache"
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+    model_dir = cache_root / "models--pyannote--speaker-diarization-community-1" / "blobs"
+    model_dir.mkdir(parents=True)
+    (model_dir / "big.bin").write_bytes(b"x" * (200 * 1024 * 1024))  # 200MB >> size_mb(90)
+    c = make_client(tmp_path)
+    d = c.get("/models/pyannote-community-1/progress").json()
+    assert d["percent"] == 99.0
+
+
+def test_model_progress_404_for_unknown_model(tmp_path):
+    c = make_client(tmp_path)
+    resp = c.get("/models/does-not-exist/progress")
+    assert resp.status_code == 404
+
+
 def test_download_endpoint_maps_other_http_error_to_502(tmp_path):
     import httpx
     from huggingface_hub.errors import HfHubHTTPError

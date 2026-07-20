@@ -68,6 +68,13 @@ class ModelRegistry:
         """返回当前启用模型的 HF repo 路径。"""
         return self._by_id[self.active(kind)].repo
 
+    def info(self, model_id: str) -> dict:
+        """返回指定模型的静态信息（repo/size_mb 等），供下载进度查询等只读场景使用，
+        不经 self._by_id 之外暴露内部结构。model_id 不存在时抛 KeyError（与 download/set_active 一致）。"""
+        m = self._by_id[model_id]
+        return {"id": m.id, "kind": m.kind, "display_name": m.display_name,
+                "repo": m.repo, "size_mb": m.size_mb}
+
     def list_models(self) -> list[dict]:
         out = []
         for m in AVAILABLE:
