@@ -59,7 +59,10 @@ class ModelRegistry:
         )
 
     def _downloaded(self, m: ModelInfo) -> bool:
-        return m.id in self._state["downloaded"] or self._is_downloaded(m.repo)
+        # 以本地缓存为唯一权威：config.json 里的 downloaded 列表只是记账，
+        # 缓存被外部清掉/换了 HF_HOME 时不能拿它盖住真相，否则前端显示「已下载」，
+        # 直到转写时才炸在 mlx_backend 的 local_files_only 上。
+        return self._is_downloaded(m.repo)
 
     def active(self, kind: str) -> str:
         return self._state["active"][kind]

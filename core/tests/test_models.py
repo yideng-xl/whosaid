@@ -12,16 +12,27 @@ def test_defaults_and_active(tmp_path):
 
 def test_download_marks_downloaded_and_persists(tmp_path):
     cfg = str(tmp_path / "config.json")
-    calls = []
-    reg = ModelRegistry(cfg, is_downloaded_fn=lambda repo: False,
-                        download_fn=lambda repo: calls.append(repo))
+    cache = set()  # 假缓存：下载后真的落盘，重启后仍在
+    reg = ModelRegistry(cfg, is_downloaded_fn=lambda repo: repo in cache,
+                        download_fn=lambda repo: cache.add(repo))
     reg.download("whisper-small")
-    assert len(calls) == 1
+    assert len(cache) == 1
     # 新实例从磁盘恢复，应记得已下载
-    reg2 = ModelRegistry(cfg, is_downloaded_fn=lambda repo: False,
+    reg2 = ModelRegistry(cfg, is_downloaded_fn=lambda repo: repo in cache,
                          download_fn=lambda repo: None)
     ids = {m["id"]: m for m in reg2.list_models()}
     assert ids["whisper-small"]["downloaded"] is True
+
+
+def test_downloaded_list_does_not_mask_missing_cache(tmp_path):
+    """config.json 记着「已下载」但本地缓存实际不在（用户手动清缓存、换了 HF_HOME 等），
+    必须如实报 False——否则前端显示已就绪，转写时才炸在 local_files_only 上。"""
+    cfg = tmp_path / "config.json"
+    cfg.write_text('{"active": {}, "downloaded": ["whisper-small"]}', encoding="utf-8")
+    reg = ModelRegistry(str(cfg), is_downloaded_fn=lambda repo: False,
+                        download_fn=lambda repo: None)
+    ids = {m["id"]: m for m in reg.list_models()}
+    assert ids["whisper-small"]["downloaded"] is False
 
 
 def test_set_active_switches_within_kind(tmp_path):

@@ -50,11 +50,13 @@ pub fn spawn_service_with_timeout(
         .current_dir(cwd)
         .env("PYTHONPATH", pythonpath)
         .env("WHOSAID_DATA_DIR", cwd)
-        // HF_HOME 必须在 python 进程启动前注入：huggingface_hub 把实际缓存目录
-        // (HF_HUB_CACHE) 算成 import 时读一次的模块常量，进程起来后再在 Python 侧改
-        // os.environ 不会生效（已实测确认）。默认官方 HF——不再硬编码 HF_ENDPOINT
-        // 指向镜像，镜像地址交给用户在「模型管理」页配置（Task 3 的 /settings/hf）。
-        .env("HF_HOME", format!("{cwd}/hf-cache"))
+        // 刻意不注入 HF_HOME：模型缓存走 huggingface_hub 默认的 ~/.cache/huggingface。
+        // 曾把它改指到 App 数据目录下的 hf-cache，结果是本机/同事机上已有的几 GB 模型
+        // 全部「看不见」要重下，且换应用目录就再丢一次。默认缓存与其他 HF 工具共享、
+        // 跨版本升级天然保留，是这里唯一正确的选择。
+        // 注：真要改缓存位置只能在进程启动前注入 env——huggingface_hub 把 HF_HUB_CACHE
+        // 算成 import 时读一次的模块常量，进程起来后在 Python 侧改 os.environ 无效（已实测）。
+        // 镜像地址不硬编码，交给用户在「模型管理」页配置（/settings/hf）。
         .stdout(Stdio::piped());
     if let Some(extra) = extra_path {
         let base = std::env::var("PATH").unwrap_or_default();
