@@ -1,3 +1,19 @@
+<script module lang="ts">
+  // 忙碌态（下载中/切换中/删除中）纯逻辑，抽到 module 级导出，供测试直接单测，
+  // 不必渲染整个组件：按模型 id 的不可变 Set 增删，语义与 downloadPercent map 一致——
+  // 多个模型各自独立忙碌，互不清空。
+  export function withBusy(ids: Set<string>, id: string): Set<string> {
+    const next = new Set(ids);
+    next.add(id);
+    return next;
+  }
+  export function withoutBusy(ids: Set<string>, id: string): Set<string> {
+    const next = new Set(ids);
+    next.delete(id);
+    return next;
+  }
+</script>
+
 <script lang="ts">
   import type { createApi, ModelInfo } from "./api";
   import Icon from "./Icon.svelte";
@@ -13,7 +29,9 @@
 
   let models = $state<ModelInfo[]>([]);
   let loadError = $state<string | null>(null);
-  let busyId = $state<string | null>(null); // 正在下载/切换/删除的模型 id
+  // 正在下载/切换/删除的模型 id 集合（而非单值）：并发操作多个模型时，各自忙碌态独立
+  // 增删，后发的操作不会清掉先发的忙碌态（与 downloadPercent map 同一思路）。
+  let busyIds = $state<Set<string>>(new Set());
   // 待确认删除的模型（点删除先弹二次确认，避免误删需要重新下载）
   let deleteTarget = $state<ModelInfo | null>(null);
   // 正在下载的模型 id → 百分比（0~99，来自轮询；resolve 后短暂置 100）。
@@ -81,7 +99,7 @@
   }
 
   async function download(id: string) {
-    busyId = id;
+    busyIds = withBusy(busyIds, id);
     downloadPercent = { ...downloadPercent, [id]: 0 };
     let stopped = false;
     // 边下载边轮询：POST /download 同步阻塞到下完，但服务端是 anyio 线程池里跑的
@@ -106,21 +124,21 @@
       clearInterval(pollTimer);
       loadError = `下载失败：${e}`; // 含令牌 403 等：服务端错误透传文案原样展示
     } finally {
-      busyId = null;
+      busyIds = withoutBusy(busyIds, id);
       const { [id]: _discard, ...rest } = downloadPercent;
       downloadPercent = rest;
     }
   }
 
   async function setActive(id: string) {
-    busyId = id;
+    busyIds = withBusy(busyIds, id);
     try {
       await api.setActive(id);
       await load();
     } catch (e) {
       loadError = `切换失败：${e}`;
     } finally {
-      busyId = null;
+      busyIds = withoutBusy(busyIds, id);
     }
   }
 
@@ -128,14 +146,14 @@
     if (!deleteTarget) return;
     const id = deleteTarget.id;
     deleteTarget = null;
-    busyId = id;
+    busyIds = withBusy(busyIds, id);
     try {
       await api.deleteModel(id);
       await load();
     } catch (e) {
       loadError = `删除失败：${e}`;
     } finally {
-      busyId = null;
+      busyIds = withoutBusy(busyIds, id);
     }
   }
 
@@ -201,18 +219,18 @@
             </div>
             <div class="ops">
               {#if !m.downloaded}
-                <button class="btn-primary" disabled={busyId === m.id} onclick={() => download(m.id)}>
+                <button class="btn-primary" disabled={busyIds.has(m.id)} onclick={() => download(m.id)}>
                   {m.id in downloadPercent ? `${Math.round(downloadPercent[m.id])}%` : "下载"}
                 </button>
               {:else}
                 {#if !m.active}
-                  <button class="btn-secondary" disabled={busyId === m.id} onclick={() => setActive(m.id)}>
-                    {busyId === m.id ? "切换中…" : "设为当前"}
+                  <button class="btn-secondary" disabled={busyIds.has(m.id)} onclick={() => setActive(m.id)}>
+                    {busyIds.has(m.id) ? "切换中…" : "设为当前"}
                   </button>
                 {/if}
                 <button
                   class="btn-delete"
-                  disabled={busyId === m.id}
+                  disabled={busyIds.has(m.id)}
                   onclick={() => (deleteTarget = m)}
                 >
                   删除

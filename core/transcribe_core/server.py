@@ -223,9 +223,16 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
             raise HTTPException(404, "模型不存在")
         # 与 main() 里 delete 闭包同一套缓存路径拼接规则：{HF_HUB_CACHE}/models--{org}--{name}
         cache_dir = Path(HF_HUB_CACHE) / ("models--" + m["repo"].replace("/", "--"))
+        # 只统计 blobs/ 下的真实数据：HF 缓存布局里 snapshots/<rev>/ 下都是指向 blobs 的软链，
+        # 若用 rglob("*") 遍历整个模型目录，blobs 里的真文件与 snapshots 里指向它们的软链会被
+        # 各计一次，导致 downloaded_bytes 约翻倍、percent 早早顶到 99%，远早于真实下完。
+        # blobs 目录本身不含软链（真身即在此），故 iterdir 逐层遍历、不穿透符号链接即可。
         downloaded_bytes = 0
-        if cache_dir.is_dir():
-            downloaded_bytes = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file())
+        blobs_dir = cache_dir / "blobs"
+        if blobs_dir.is_dir():
+            downloaded_bytes = sum(
+                f.stat().st_size for f in blobs_dir.iterdir() if f.is_file()
+            )
         total_bytes = m["size_mb"] * 1024 * 1024
         # size_mb 是估算值，下载中封顶 99，避免实际字节数超估算总量时百分比越过/顶满 100
         percent = min(99.0, downloaded_bytes / total_bytes * 100) if total_bytes > 0 else 0.0

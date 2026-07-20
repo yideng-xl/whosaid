@@ -384,6 +384,30 @@ def test_model_progress_reflects_partial_cache_dir_size(tmp_path, monkeypatch):
     assert 0 < d["percent"] < 99
 
 
+def test_model_progress_not_doubled_by_snapshot_symlinks(tmp_path, monkeypatch):
+    """真实 HF 缓存布局：blobs/ 下是真实数据文件，snapshots/<rev>/ 下是指向 blobs 的软链
+    （文件名与 blobs 里不同，模拟 HF 用 hash 命名 blob、快照里用可读文件名软链指向它）。
+    旧实现用 rglob("*") 遍历整个模型目录会把 blobs 里的真文件与 snapshots 里的软链各计一次，
+    downloaded_bytes 变成约两倍；应只按 blobs/ 的真实字节数计，不被 snapshots 的软链翻倍。"""
+    cache_root = tmp_path / "hf_cache"
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache_root))
+    model_root = cache_root / "models--mlx-community--whisper-small-mlx"
+    blobs_dir = model_root / "blobs"
+    blobs_dir.mkdir(parents=True)
+    blob_file = blobs_dir / "abcd1234"
+    blob_file.write_bytes(b"x" * (2 * 1024 * 1024))  # 2MB 真实数据
+
+    snapshot_dir = model_root / "snapshots" / "rev1"
+    snapshot_dir.mkdir(parents=True)
+    (snapshot_dir / "model.bin").symlink_to(blob_file)  # 软链指向 blob，不应重复计入
+
+    c = make_client(tmp_path)
+    d = c.get("/models/whisper-small/progress").json()
+    assert d["downloaded_bytes"] == 2 * 1024 * 1024  # 只按 blobs 算，不被 snapshots 软链翻倍
+    total = 484 * 1024 * 1024
+    assert d["percent"] == (2 * 1024 * 1024) / total * 100
+
+
 def test_model_progress_caps_at_99_percent(tmp_path, monkeypatch):
     """size_mb 是估算值，缓存目录实际大小超过/等于估算总量时，percent 封顶 99，避免看起来"下完了"
     但下载请求其实还没返回。"""
