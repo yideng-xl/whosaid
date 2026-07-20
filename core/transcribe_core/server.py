@@ -210,6 +210,11 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
             raise HTTPException(502, f"模型下载失败（HF 返回 {status}）：{e}")
         return {"ok": True}
 
+    @app.delete("/models/{model_id}")
+    def delete_model(model_id: str):
+        registry.delete(model_id)
+        return {"ok": True}
+
     @app.post("/models/active")
     def set_active(req: ActiveReq):
         registry.set_active(req.model_id)
@@ -290,7 +295,17 @@ def main() -> None:  # 生产入口：注入真实 MlxBackend，随机端口，�
             endpoint=os.environ.get("HF_ENDPOINT") or None,
         )
 
-    registry = ModelRegistry("config.json", is_downloaded, download)
+    def delete(repo: str) -> None:
+        # HF 本地缓存布局固定为 {HF_HUB_CACHE}/models--{org}--{name}，直接删该目录即可，
+        # 无需额外 API（huggingface_hub 未提供单 repo 删除的公开函数）。
+        import shutil
+        from pathlib import Path
+        from huggingface_hub.constants import HF_HUB_CACHE
+        cache_dir = Path(HF_HUB_CACHE) / ("models--" + repo.replace("/", "--"))
+        if cache_dir.is_dir():
+            shutil.rmtree(cache_dir)
+
+    registry = ModelRegistry("config.json", is_downloaded, download, delete)
     # 应用重启后自动把上次保存的 token/镜像地址重新注入 env（/settings/hf 只在用户当次
     # 会话主动保存时注入，重启后要靠这里补一次，否则重启后 diarize()/download() 又拿不到）
     _saved = registry.get_settings()

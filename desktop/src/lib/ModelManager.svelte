@@ -13,7 +13,9 @@
 
   let models = $state<ModelInfo[]>([]);
   let loadError = $state<string | null>(null);
-  let busyId = $state<string | null>(null); // 正在下载/切换的模型 id
+  let busyId = $state<string | null>(null); // 正在下载/切换/删除的模型 id
+  // 待确认删除的模型（点删除先弹二次确认，避免误删需要重新下载）
+  let deleteTarget = $state<ModelInfo | null>(null);
 
   let hfToken = $state("");
   let hfEndpoint = $state("");
@@ -98,6 +100,21 @@
     }
   }
 
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    const id = deleteTarget.id;
+    deleteTarget = null;
+    busyId = id;
+    try {
+      await api.deleteModel(id);
+      await load();
+    } catch (e) {
+      loadError = `删除失败：${e}`;
+    } finally {
+      busyId = null;
+    }
+  }
+
   function sizeText(mb: number): string {
     return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`;
   }
@@ -162,9 +179,18 @@
               <button class="btn-primary" disabled={busyId === m.id} onclick={() => download(m.id)}>
                 {busyId === m.id ? "下载中…" : "下载"}
               </button>
-            {:else if !m.active}
-              <button class="btn-secondary" disabled={busyId === m.id} onclick={() => setActive(m.id)}>
-                {busyId === m.id ? "切换中…" : "设为当前"}
+            {:else}
+              {#if !m.active}
+                <button class="btn-secondary" disabled={busyId === m.id} onclick={() => setActive(m.id)}>
+                  {busyId === m.id ? "切换中…" : "设为当前"}
+                </button>
+              {/if}
+              <button
+                class="btn-delete"
+                disabled={busyId === m.id}
+                onclick={() => (deleteTarget = m)}
+              >
+                删除
               </button>
             {/if}
           </div>
@@ -174,6 +200,25 @@
   {/each}
 
   <p class="note">下载较大模型时会一直转圈直到完成（服务端同步下载），请耐心等待。切换当前模型对下一个任务生效。</p>
+
+  {#if deleteTarget}
+    <div class="modal-backdrop" role="presentation">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-title">删除模型</div>
+        <p class="modal-body">
+          确定删除「{deleteTarget.display_name}」？<br />
+          删除后<b>需重新下载才能使用</b>。
+          {#if deleteTarget.active}
+            <br />这是当前启用的模型，删除后对应任务将无法使用它转写/分人，请留意。
+          {/if}
+        </p>
+        <div class="modal-actions">
+          <button class="btn-cancel" onclick={() => (deleteTarget = null)}>取消</button>
+          <button class="btn-danger" onclick={confirmDelete}>删除</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -299,7 +344,7 @@
     border-radius: 50%;
     background: currentColor;
   }
-  .ops { flex-shrink: 0; min-width: 84px; text-align: right; }
+  .ops { flex-shrink: 0; min-width: 84px; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
   .ops button {
     padding: 5px var(--space-3);
     border-radius: var(--radius-btn);
@@ -332,5 +377,77 @@
   .btn-secondary:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
+  /* 删除按钮：低强调描边 + --danger 文字/描边，hover 才转实心，避免列表默认态过于刺眼 */
+  .btn-delete {
+    background: transparent;
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  .btn-delete:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+  }
   .note { font-size: 12px; color: var(--muted); margin-top: var(--space-2); line-height: 1.6; }
+
+  /* 删除确认弹窗：与 +page.svelte 的"删除任务"确认弹窗同一套风格（遮罩 40% 黑 + 卡片 +
+     圆角 + 柔和阴影），颜色全部走全局 token，双主题由 :root[data-theme] 统一驱动。 */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal {
+    width: 340px;
+    max-width: 90vw;
+    background: var(--card);
+    border-radius: var(--radius-modal);
+    padding: var(--space-5);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.16);
+  }
+  .modal-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: var(--space-2);
+  }
+  .modal-body {
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--muted);
+    margin: 0 0 var(--space-4);
+  }
+  .modal-body b { color: var(--danger); }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+  .modal-actions button {
+    padding: 7px 16px;
+    border-radius: var(--radius-btn);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: transform 0.12s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .modal-actions button:active { transform: scale(0.97); }
+  .modal-actions button:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+  .btn-cancel {
+    background: transparent;
+    border-color: var(--hairline);
+    color: var(--fg);
+  }
+  .btn-cancel:hover { border-color: var(--muted); }
+  .btn-danger {
+    background: var(--danger);
+    color: #fff;
+  }
+  .btn-danger:hover { opacity: 0.9; }
 </style>

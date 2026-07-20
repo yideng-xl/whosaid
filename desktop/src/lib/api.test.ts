@@ -96,6 +96,17 @@ describe("api", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:4444/settings/hf");
   });
 
+  it("deleteModel DELETEs model endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(2222);
+    await api.deleteModel("whisper-small");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:2222/models/whisper-small",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
   it("setHfSettings POSTs token and endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
     vi.stubGlobal("fetch", fetchMock);

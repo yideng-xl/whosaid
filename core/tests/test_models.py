@@ -82,3 +82,41 @@ def test_set_settings_empty_string_clears_to_none(tmp_path):
     reg.set_settings("hf_abc123", "https://hf-mirror.com")
     reg.set_settings("", "")
     assert reg.get_settings() == {"hf_token": None, "hf_endpoint": None}
+
+
+def test_delete_removes_from_downloaded_calls_delete_fn_and_persists(tmp_path):
+    cfg = str(tmp_path / "config.json")
+    calls = []
+    reg = ModelRegistry(cfg, is_downloaded_fn=lambda repo: False,
+                        download_fn=lambda repo: None,
+                        delete_fn=lambda repo: calls.append(repo))
+    reg.download("whisper-small")
+    reg.delete("whisper-small")
+    assert calls == ["mlx-community/whisper-small-mlx"]
+    ids = {m["id"]: m for m in reg.list_models()}
+    assert ids["whisper-small"]["downloaded"] is False
+    # 新实例从磁盘恢复，应记得已删除（不在 downloaded 列表里）
+    reg2 = ModelRegistry(cfg, is_downloaded_fn=lambda repo: False, download_fn=lambda repo: None)
+    ids2 = {m["id"]: m for m in reg2.list_models()}
+    assert ids2["whisper-small"]["downloaded"] is False
+
+
+def test_delete_without_delete_fn_raises_runtime_error(tmp_path):
+    """未注入 delete_fn（如旧调用方/测试未传该参数）时，delete 应显式报错而非静默跳过，
+    避免调用方误以为已删除。"""
+    import pytest
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: False,
+                        download_fn=lambda repo: None)
+    with pytest.raises(RuntimeError):
+        reg.delete("whisper-small")
+
+
+def test_delete_unknown_model_id_raises_keyerror(tmp_path):
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: False,
+                        download_fn=lambda repo: None,
+                        delete_fn=lambda repo: None)
+    import pytest
+    with pytest.raises(KeyError):
+        reg.delete("no-such-model")

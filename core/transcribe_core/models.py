@@ -34,10 +34,12 @@ _DEFAULT_ACTIVE = {"transcribe": "whisper-large-v3", "diarize": "pyannote-commun
 class ModelRegistry:
     def __init__(self, config_path: str,
                  is_downloaded_fn: Callable[[str], bool],
-                 download_fn: Callable[[str], None]):
+                 download_fn: Callable[[str], None],
+                 delete_fn: Callable[[str], None] | None = None):
         self.config_path = Path(config_path)
         self._is_downloaded = is_downloaded_fn
         self._download = download_fn
+        self._delete = delete_fn  # 可选：不传时 delete() 直接报错，不静默跳过
         self._by_id = {m.id: m for m in AVAILABLE}
         self._state = {
             "active": dict(_DEFAULT_ACTIVE), "downloaded": [],
@@ -82,6 +84,18 @@ class ModelRegistry:
         self._download(m.repo)
         if m.id not in self._state["downloaded"]:
             self._state["downloaded"].append(m.id)
+        self._save()
+
+    def delete(self, model_id: str) -> None:
+        """删除已下载模型：清掉本地缓存 + 从 downloaded 列表移除 + 持久化。
+        model_id 不存在时按 AVAILABLE 查找抛 KeyError（与 download/set_active 行为一致）；
+        未注入 delete_fn（服务端未妥善配置）时显式抛 RuntimeError，避免静默假装已删除。"""
+        m = self._by_id[model_id]
+        if self._delete is None:
+            raise RuntimeError("delete_fn 未配置，无法删除模型缓存")
+        self._delete(m.repo)
+        if m.id in self._state["downloaded"]:
+            self._state["downloaded"].remove(m.id)
         self._save()
 
     def set_active(self, model_id: str) -> None:

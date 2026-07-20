@@ -326,6 +326,39 @@ def test_download_endpoint_maps_401_to_readable_403(tmp_path):
     assert "yideng-xl.github.io/whosaid" in resp.json()["detail"]
 
 
+def test_delete_model_endpoint_calls_delete_fn_and_clears_downloaded(tmp_path):
+    """DELETE /models/{id}：应调用 registry.delete → delete_fn 收到 repo，且状态里
+    downloaded 标记随之清除（GET /models 能看到 downloaded: False）。"""
+    calls = []
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: False,
+                        download_fn=lambda repo: None,
+                        delete_fn=lambda repo: calls.append(repo))
+    reg.download("whisper-small")
+    q = JobQueue(FakeBackend())
+    c = TestClient(create_app(q, reg))
+    resp = c.delete("/models/whisper-small")
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert calls == ["mlx-community/whisper-small-mlx"]
+    models = {m["id"]: m for m in c.get("/models").json()}
+    assert models["whisper-small"]["downloaded"] is False
+
+
+def test_delete_model_endpoint_without_delete_fn_raises(tmp_path):
+    """registry 未注入 delete_fn 时应报错（服务端未妥善配置），而不是假装成功。
+    TestClient 默认会把服务端未捕获异常原样抛出（raise_server_exceptions=True），
+    故这里直接断言异常类型，而非某个 HTTP 状态码。"""
+    import pytest
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: False,
+                        download_fn=lambda repo: None)
+    q = JobQueue(FakeBackend())
+    c = TestClient(create_app(q, reg))
+    with pytest.raises(RuntimeError):
+        c.delete("/models/whisper-small")
+
+
 def test_download_endpoint_maps_other_http_error_to_502(tmp_path):
     import httpx
     from huggingface_hub.errors import HfHubHTTPError

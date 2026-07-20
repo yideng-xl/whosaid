@@ -134,6 +134,11 @@ export function createApi(port: number) {
       await j(await fetch(`${base}/models/${id}/download`, { method: "POST" }));
     },
 
+    async deleteModel(id: string): Promise<void> {
+      // 走 j()：删除失败（如缓存目录被占用等）能抛给调用方，不被静默吞掉
+      await j(await fetch(`${base}/models/${id}`, { method: "DELETE" }));
+    },
+
     async setActive(id: string): Promise<void> {
       await j(await fetch(`${base}/models/active`, {
         method: "POST",
