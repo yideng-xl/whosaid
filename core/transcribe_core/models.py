@@ -39,11 +39,16 @@ class ModelRegistry:
         self._is_downloaded = is_downloaded_fn
         self._download = download_fn
         self._by_id = {m.id: m for m in AVAILABLE}
-        self._state = {"active": dict(_DEFAULT_ACTIVE), "downloaded": []}
+        self._state = {
+            "active": dict(_DEFAULT_ACTIVE), "downloaded": [],
+            "hf_token": None, "hf_endpoint": None,
+        }
         if self.config_path.is_file():
             saved = json.loads(self.config_path.read_text(encoding="utf-8"))
             self._state["active"].update(saved.get("active", {}))
             self._state["downloaded"] = saved.get("downloaded", [])
+            self._state["hf_token"] = saved.get("hf_token")
+            self._state["hf_endpoint"] = saved.get("hf_endpoint")
 
     def _save(self) -> None:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,4 +87,16 @@ class ModelRegistry:
     def set_active(self, model_id: str) -> None:
         m = self._by_id[model_id]
         self._state["active"][m.kind] = m.id
+        self._save()
+
+    def get_settings(self) -> dict:
+        return {
+            "hf_token": self._state.get("hf_token"),
+            "hf_endpoint": self._state.get("hf_endpoint"),
+        }
+
+    def set_settings(self, hf_token: str | None, hf_endpoint: str | None) -> None:
+        # 空字符串按未设置处理，避免前端清空输入框后仍把 "" 当有效 token/endpoint 存下来
+        self._state["hf_token"] = hf_token or None
+        self._state["hf_endpoint"] = hf_endpoint or None
         self._save()

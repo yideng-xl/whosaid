@@ -57,3 +57,28 @@ def test_active_repo_returns_current_active_models_repo(tmp_path):
     assert reg.active_repo("transcribe") == "mlx-community/whisper-large-v3-mlx"
     reg.set_active("whisper-small")
     assert reg.active_repo("transcribe") == "mlx-community/whisper-small-mlx"
+
+
+def test_get_settings_defaults_to_none(tmp_path):
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: False,
+                        download_fn=lambda repo: None)
+    assert reg.get_settings() == {"hf_token": None, "hf_endpoint": None}
+
+
+def test_set_settings_persists_across_instances(tmp_path):
+    cfg = str(tmp_path / "config.json")
+    reg = ModelRegistry(cfg, is_downloaded_fn=lambda repo: False, download_fn=lambda repo: None)
+    reg.set_settings("hf_abc123", "https://hf-mirror.com")
+    assert reg.get_settings() == {"hf_token": "hf_abc123", "hf_endpoint": "https://hf-mirror.com"}
+    # 新实例从磁盘恢复，应记得设置
+    reg2 = ModelRegistry(cfg, is_downloaded_fn=lambda repo: False, download_fn=lambda repo: None)
+    assert reg2.get_settings() == {"hf_token": "hf_abc123", "hf_endpoint": "https://hf-mirror.com"}
+
+
+def test_set_settings_empty_string_clears_to_none(tmp_path):
+    cfg = str(tmp_path / "config.json")
+    reg = ModelRegistry(cfg, is_downloaded_fn=lambda repo: False, download_fn=lambda repo: None)
+    reg.set_settings("hf_abc123", "https://hf-mirror.com")
+    reg.set_settings("", "")
+    assert reg.get_settings() == {"hf_token": None, "hf_endpoint": None}

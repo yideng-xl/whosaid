@@ -284,3 +284,60 @@ def test_rediarize_endpoint_409_non_done(tmp_path):
                    transcript=None, error=None)])
     c = TestClient(create_app(q, reg))
     assert c.post("/jobs/jn/rediarize", json={"num_speakers": 2}).status_code == 409
+
+
+def test_hf_settings_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    c = make_client(tmp_path)
+    assert c.get("/settings/hf").json() == {"hf_token": None, "hf_endpoint": None}
+    r = c.post("/settings/hf", json={"hf_token": "hf_abc123", "hf_endpoint": "https://hf-mirror.com"})
+    assert r.json()["ok"] is True
+    assert c.get("/settings/hf").json() == {"hf_token": "hf_abc123", "hf_endpoint": "https://hf-mirror.com"}
+    import os
+    assert os.environ.get("HF_TOKEN") == "hf_abc123"
+    assert os.environ.get("HF_ENDPOINT") == "https://hf-mirror.com"
+
+
+def test_hf_settings_clearing_removes_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "stale")
+    c = make_client(tmp_path)
+    c.post("/settings/hf", json={"hf_token": "", "hf_endpoint": None})
+    import os
+    assert os.environ.get("HF_TOKEN") is None
+
+
+def test_download_endpoint_maps_401_to_readable_403(tmp_path):
+    import httpx
+    from huggingface_hub.errors import HfHubHTTPError
+
+    def failing_download(repo):
+        resp = httpx.Response(401, request=httpx.Request("GET", "https://huggingface.co/x"))
+        raise HfHubHTTPError("401 Client Error", response=resp)
+
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: False,
+                        download_fn=failing_download)
+    q = JobQueue(FakeBackend())
+    c = TestClient(create_app(q, reg))
+    resp = c.post("/models/whisper-small/download")
+    assert resp.status_code == 403
+    assert "令牌" in resp.json()["detail"]
+    assert "yideng-xl.github.io/whosaid" in resp.json()["detail"]
+
+
+def test_download_endpoint_maps_other_http_error_to_502(tmp_path):
+    import httpx
+    from huggingface_hub.errors import HfHubHTTPError
+
+    def failing_download(repo):
+        resp = httpx.Response(500, request=httpx.Request("GET", "https://huggingface.co/x"))
+        raise HfHubHTTPError("500 Server Error", response=resp)
+
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: False,
+                        download_fn=failing_download)
+    q = JobQueue(FakeBackend())
+    c = TestClient(create_app(q, reg))
+    resp = c.post("/models/whisper-small/download")
+    assert resp.status_code == 502

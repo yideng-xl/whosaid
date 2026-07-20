@@ -12,13 +12,20 @@ pub fn parse_port(line: &str) -> Option<u16> {
 
 /// 启动 `python -m transcribe_core.server` 并等待其打印 `PORT=<n>`，约定超时 30s。
 /// cwd 设为数据目录（内核在此落 config.json 与持久化数据）；pythonpath 指向 core 根，
-/// 让未 pip 安装的 transcribe_core 可被导入。同时透传数据目录与 HF 镜像环境变量。
+/// 让未 pip 安装的 transcribe_core 可被导入。同时透传数据目录环境变量，`extra_path` 有值时
+/// 前插进子进程 PATH（打包态包内 ffmpeg 优先命中）。
 /// 返回子进程句柄与端口，供外壳持有/退出时 kill。
-pub fn spawn_service(python: &str, cwd: &str, pythonpath: &str) -> std::io::Result<(Child, u16)> {
+pub fn spawn_service(
+    python: &str,
+    cwd: &str,
+    pythonpath: &str,
+    extra_path: Option<&str>,
+) -> std::io::Result<(Child, u16)> {
     spawn_service_with_timeout(
         python,
         cwd,
         pythonpath,
+        extra_path,
         Duration::from_secs(30),
         &["-m", "transcribe_core.server"],
     )
@@ -31,17 +38,29 @@ pub fn spawn_service_with_timeout(
     python: &str,
     cwd: &str,
     pythonpath: &str,
+    extra_path: Option<&str>,
     timeout: Duration,
     args: &[&str],
 ) -> std::io::Result<(Child, u16)> {
-    let mut child = Command::new(python)
-        .args(args)
+    // 有包内 ffmpeg 目录时前插进 PATH：让 audio.py/mlx_backend.py 调的裸 ffmpeg/ffprobe
+    // 优先命中包内静态二进制，系统 PATH 仍保留在后面作兜底；dev 态 extra_path=None 则不动
+    // PATH，走系统 brew ffmpeg。
+    let mut cmd = Command::new(python);
+    cmd.args(args)
         .current_dir(cwd)
         .env("PYTHONPATH", pythonpath)
         .env("WHOSAID_DATA_DIR", cwd)
-        .env("HF_ENDPOINT", "https://hf-mirror.com")
-        .stdout(Stdio::piped())
-        .spawn()?;
+        // HF_HOME 必须在 python 进程启动前注入：huggingface_hub 把实际缓存目录
+        // (HF_HUB_CACHE) 算成 import 时读一次的模块常量，进程起来后再在 Python 侧改
+        // os.environ 不会生效（已实测确认）。默认官方 HF——不再硬编码 HF_ENDPOINT
+        // 指向镜像，镜像地址交给用户在「模型管理」页配置（Task 3 的 /settings/hf）。
+        .env("HF_HOME", format!("{cwd}/hf-cache"))
+        .stdout(Stdio::piped());
+    if let Some(extra) = extra_path {
+        let base = std::env::var("PATH").unwrap_or_default();
+        cmd.env("PATH", format!("{extra}:{base}"));
+    }
+    let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("stdout piped");
     let (tx, rx) = mpsc::channel::<Option<u16>>();
     std::thread::spawn(move || {
@@ -99,6 +118,7 @@ mod tests {
             "/bin/sleep",
             ".",
             ".",
+            None,
             Duration::from_millis(300),
             &["2"],
         );

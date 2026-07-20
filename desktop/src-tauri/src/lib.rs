@@ -68,6 +68,18 @@ fn dev_python(resource_dir: Option<PathBuf>) -> String {
         .into_owned()
 }
 
+/// 包内静态 ffmpeg 目录：仅打包态（resource_dir/ffmpeg 确实存在）才返回 Some，供 spawn 时
+/// 前插进子进程 PATH，让 audio.py/mlx_backend.py 调的裸 ffmpeg/ffprobe 命中包内版本。
+/// dev 态资源不存在 → None → 不动 PATH，走系统 brew ffmpeg。
+fn ffmpeg_dir(resource_dir: Option<PathBuf>) -> Option<String> {
+    let dir = resource_dir?.join("ffmpeg");
+    if dir.join("ffmpeg").is_file() && dir.join("ffprobe").is_file() {
+        Some(dir.to_string_lossy().into_owned())
+    } else {
+        None
+    }
+}
+
 /// 数据目录：~/Library/Application Support/whosaid（内核在此落 config.json 与持久化数据）。
 fn data_dir() -> String {
     let mut base = std::env::var("HOME").unwrap_or_default();
@@ -118,8 +130,9 @@ pub fn run() {
             let cwd = data_dir();
             // transcribe_core 未 pip 安装进 venv，只能从 core 根目录导入；
             // 故 cwd 用数据目录（config.json/持久化落此），PYTHONPATH 指向 core 根让 import 生效
-            let pythonpath = core_root(resource_dir).to_string_lossy().into_owned();
-            match sidecar::spawn_service(&python, &cwd, &pythonpath) {
+            let pythonpath = core_root(resource_dir.clone()).to_string_lossy().into_owned();
+            let ffmpeg = ffmpeg_dir(resource_dir);
+            match sidecar::spawn_service(&python, &cwd, &pythonpath, ffmpeg.as_deref()) {
                 Ok((child, port)) => {
                     *app.state::<ServiceProcess>().0.lock().unwrap() = Some(child);
                     *app.state::<ServicePort>().0.lock().unwrap() = Some(port);
@@ -210,5 +223,19 @@ mod path_tests {
     fn falls_back_to_dev_when_no_candidate_at_all() {
         let got = pick_path(None, None, PathBuf::from("/dev/core"), |_p| true);
         assert_eq!(got, PathBuf::from("/dev/core"));
+    }
+
+    #[test]
+    fn ffmpeg_dir_none_when_no_resource_dir() {
+        assert_eq!(ffmpeg_dir(None), None);
+    }
+
+    #[test]
+    fn ffmpeg_dir_none_when_binaries_absent() {
+        // 一个存在但其下没有 ffmpeg/ffprobe 的临时目录 → None
+        let tmp = std::env::temp_dir().join("whosaid_ffmpeg_test_absent");
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert_eq!(ffmpeg_dir(Some(tmp.clone())), None);
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

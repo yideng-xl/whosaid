@@ -29,6 +29,11 @@ class ActiveReq(BaseModel):
     model_id: str
 
 
+class HfSettingsReq(BaseModel):
+    hf_token: str | None = None
+    hf_endpoint: str | None = None
+
+
 def _start_parent_watchdog(poll_sec: float = 2.0) -> None:
     """盯住父进程：Tauri 外壳一旦退出（含被强杀/dev 重启），本服务会被 launchd 收养
     （getppid()==1），此时自我退出，避免残留孤儿进程占用内存与模型。仅当父进程真的消失
@@ -190,12 +195,42 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
 
     @app.post("/models/{model_id}/download")
     def download(model_id: str):
-        registry.download(model_id)
+        from huggingface_hub.errors import HfHubHTTPError
+        try:
+            registry.download(model_id)
+        except HfHubHTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status in (401, 403):
+                raise HTTPException(
+                    403,
+                    "HF 访问令牌无效，或未在 HuggingFace 网站同意该模型的门控条款。"
+                    "请到「模型管理」页填写正确的令牌，并参考教程完成授权："
+                    "https://yideng-xl.github.io/whosaid/#hf-token",
+                )
+            raise HTTPException(502, f"模型下载失败（HF 返回 {status}）：{e}")
         return {"ok": True}
 
     @app.post("/models/active")
     def set_active(req: ActiveReq):
         registry.set_active(req.model_id)
+        return {"ok": True}
+
+    @app.get("/settings/hf")
+    def get_hf_settings():
+        return registry.get_settings()
+
+    @app.post("/settings/hf")
+    def set_hf_settings(req: HfSettingsReq):
+        import os
+        registry.set_settings(req.hf_token, req.hf_endpoint)
+        if req.hf_token:
+            os.environ["HF_TOKEN"] = req.hf_token
+        else:
+            os.environ.pop("HF_TOKEN", None)
+        if req.hf_endpoint:
+            os.environ["HF_ENDPOINT"] = req.hf_endpoint
+        else:
+            os.environ.pop("HF_ENDPOINT", None)
         return {"ok": True}
 
     @app.websocket("/ws/jobs/{job_id}")
@@ -249,9 +284,20 @@ def main() -> None:  # 生产入口：注入真实 MlxBackend，随机端口，�
 
     def download(repo: str) -> None:
         from huggingface_hub import snapshot_download
-        snapshot_download(repo)
+        snapshot_download(
+            repo,
+            token=os.environ.get("HF_TOKEN") or None,
+            endpoint=os.environ.get("HF_ENDPOINT") or None,
+        )
 
     registry = ModelRegistry("config.json", is_downloaded, download)
+    # 应用重启后自动把上次保存的 token/镜像地址重新注入 env（/settings/hf 只在用户当次
+    # 会话主动保存时注入，重启后要靠这里补一次，否则重启后 diarize()/download() 又拿不到）
+    _saved = registry.get_settings()
+    if _saved.get("hf_token"):
+        os.environ["HF_TOKEN"] = _saved["hf_token"]
+    if _saved.get("hf_endpoint"):
+        os.environ["HF_ENDPOINT"] = _saved["hf_endpoint"]
     store = JobStore(os.environ.get("WHOSAID_DATA_DIR", "."))
     # 注入 backend_factory + registry：每个任务开跑前按"当前启用模型"现构后端，
     # 使 /models/active 切换的模型能在下一个任务真正生效（而非固定在启动时的 large-v3）
