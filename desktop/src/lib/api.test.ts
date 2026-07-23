@@ -23,6 +23,11 @@ describe("api", () => {
       "http://127.0.0.1:999/jobs/job2/export?fmt=srt");
   });
 
+  it("exportUrl 支持 plain 逐字稿", () => {
+    const api = createApi(999);
+    expect(api.exportUrl("job2", "plain")).toContain("fmt=plain");
+  });
+
   it("pauseJob POSTs to pause endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
     vi.stubGlobal("fetch", fetchMock);

@@ -94,7 +94,7 @@ export function createApi(port: number) {
       }));
     },
 
-    exportUrl(id: string, fmt: "txt" | "srt"): string {
+    exportUrl(id: string, fmt: "txt" | "srt" | "plain"): string {
       return `${base}/jobs/${id}/export?fmt=${fmt}`;
     },
 
