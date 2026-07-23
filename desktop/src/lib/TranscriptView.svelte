@@ -3,6 +3,7 @@
   import SpeakerRename from "./SpeakerRename.svelte";
   import StageSwitcher from "./StageSwitcher.svelte";
   import Icon from "./Icon.svelte";
+  import BlockProgress from "./BlockProgress.svelte";
   import type { createApi, JobDetail } from "./api";
   import { canEditSpeakerCount, isRenamed, parseCount } from "./jobState";
 
@@ -341,8 +342,9 @@
     <div class="panel">
       <div class="fname">{basename(audioPath)}</div>
       <div class="prog">
-        <span>{detail.status === "paused" ? "已暂停" : "转写中"} {detail.chunks_done}/{detail.total_chunks} 块</span>
-        <div class="bar"><div class="fill" style="width:{Math.round(detail.progress * 100)}%"></div></div>
+        <span>{detail.status === "paused" ? "已暂停" : "转写中"}</span>
+        <!-- 转写阶段按发言块数逐段推进，块状进度条比连续填充条更贴合「分段」语义 -->
+        <BlockProgress total={detail.total_chunks} done={detail.chunks_done} phase="transcribing" />
       </div>
       {#if transitioning === "pausing"}
         <button class="ctl" disabled>暂停中…</button>
@@ -527,11 +529,6 @@
     border-radius: 3px;
     background: var(--hairline);
     overflow: hidden;
-  }
-  .fill {
-    height: 100%;
-    background: var(--accent);
-    transition: width 0.3s ease;
   }
   /* 暂停/继续 = Apple 主按钮：实心 accent、白字、圆角 6、按压缩放 */
   .ctl {
