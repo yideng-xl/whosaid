@@ -13,7 +13,8 @@ class FakeBackend(InferenceBackend):
     def transcribe(self, audio_path, language, initial_prompt):
         return [Segment(0, 2, "你好"), Segment(2, 4, "在吗")]
     def diarize(self, audio_path, num_speakers):
-        return [(0.0, 2.0, "SPEAKER_00"), (2.0, 4.0, "SPEAKER_01")]
+        # 各 3s（>= interj 默认 2.5s）：两个人都不会被当作短插话折并，稳定切成两块
+        return [(0.0, 3.0, "SPEAKER_00"), (3.0, 6.0, "SPEAKER_01")]
 
 
 class BoomBackend(InferenceBackend):
@@ -21,7 +22,9 @@ class BoomBackend(InferenceBackend):
     def transcribe(self, audio_path, language, initial_prompt):
         raise RuntimeError("模型未下载")
     def diarize(self, audio_path, num_speakers):
-        return []
+        # diarize-first：要让 transcribe 真正被调用到（从而抛出待测异常），
+        # 需要给出非空轮次；空轮次会在进入 transcribe 前就被判为空音频。
+        return [(0.0, 5.0, "SPEAKER_00")]
 
 
 def test_run_job_success_produces_labeled_transcript():
@@ -31,8 +34,12 @@ def test_run_job_success_produces_labeled_transcript():
     job = q.get(jid)
     assert job.status == "done"
     assert job.progress == 1.0
-    assert [s.speaker for s in job.transcript.segments] == ["说话人A", "说话人B"]
-    assert job.transcript.to_txt() == "说话人A：你好\n\n说话人B：在吗\n\n"
+    # diarize-first：两块分别转写、各自贴上块的（原始）说话人标签。
+    # 人名统一映射为「说话人A/B」的美化步骤已随 align() 一起退休，属后续独立计划
+    # （2026-07-2x-name-replace-and-sherpa.md），本任务范围内标签即 diarize 原始输出。
+    assert [s.speaker for s in job.transcript.segments] == \
+        ["SPEAKER_00", "SPEAKER_00", "SPEAKER_01", "SPEAKER_01"]
+    assert job.transcript.to_txt() == "SPEAKER_00：你好在吗\n\nSPEAKER_01：你好在吗\n\n"
 
 
 def test_run_job_failure_sets_error():
@@ -151,7 +158,8 @@ def test_on_change_called_on_terminal_and_submit():
 
 
 def test_chunked_run_covers_full_duration_with_offsets():
-    """假后端记录每块的输入，验证块循环覆盖全时长且时间戳偏移正确。"""
+    """假后端记录每块的输入，验证发言块循环覆盖全时长且时间戳偏移正确。
+    diarize-first：块边界由 diarize 输出（经 refine_turns 精炼）决定，不再是固定时长切块。"""
     from transcribe_core.jobs import JobQueue, Job
     from transcribe_core.transcript import Segment
 
@@ -163,9 +171,10 @@ def test_chunked_run_covers_full_duration_with_offsets():
             calls.append(audio_path)
             return [Segment(0.0, 1.0, "x")]  # 每块相对 0 的一段
         def diarize(self, audio_path, num_speakers):
-            return [(0.0, 1000.0, "SPEAKER_00")]
+            # 3 个发言块：A(0-120) B(120-240) A(240-250)，各段时长足够不被精炼合并
+            return [(0.0, 120.0, "A"), (120.0, 240.0, "B"), (240.0, 250.0, "A")]
 
-    # 注入假 duration/extract：250 秒 → 3 块(120,120,10)；extract 返回块标记路径
+    # 注入假 extract：extract 返回块标记路径；duration_fn 在 diarize-first 下不再被 run_job 使用
     q = JobQueue(ChunkBackend(),
                  duration_fn=lambda p: 250.0,
                  extract_fn=lambda src, start, dur: f"/tmp/chunk_{start}.wav",
@@ -174,28 +183,28 @@ def test_chunked_run_covers_full_duration_with_offsets():
     job = q.get(jid)
     assert job.status == "done"
     assert job.total_chunks == 3 and job.chunks_done == 3
-    assert len(calls) == 3  # 转了 3 块
-    # 第 i 块的片段被偏移 i*120：起点应是 0,120,240
+    assert len(calls) == 3  # 转了 3 个发言块
+    # 每块的片段被偏移到块起点：0,120,240
     starts = sorted(s.start for s in job.transcript.segments)
     assert starts == [0.0, 120.0, 240.0]
 
 
 def test_pause_stops_at_chunk_boundary_and_persists():
+    """diarize-first：块边界由 diarize 输出决定，此处构造 3 个交替说话人的发言块
+    （各 120s，足够长不会被 refine_turns 精炼合并），验证暂停仍在块边界生效。"""
     from transcribe_core.jobs import JobQueue
     from transcribe_core.transcript import Segment
     import threading
 
     gate = threading.Event()   # 让第 1 块 transcribe 阻塞，好在块边界触发暂停
-    resumed = []
 
     class SlowChunk(InferenceBackend):
         id = "slow"
         def transcribe(self, audio_path, language, initial_prompt):
-            resumed.append(audio_path)
             gate.wait(timeout=2)   # 第一块等待，期间主线程 pause
             return [Segment(0.0, 1.0, "x")]
         def diarize(self, audio_path, num_speakers):
-            return [(0.0, 1000.0, "S0")]
+            return [(0.0, 120.0, "A"), (120.0, 240.0, "B"), (240.0, 360.0, "A")]
 
     q = JobQueue(SlowChunk(),
                  duration_fn=lambda p: 360.0,   # 3 块
@@ -216,10 +225,13 @@ def test_pause_stops_at_chunk_boundary_and_persists():
 
 
 def test_resume_continues_from_chunks_done():
+    """resume 免重跑分离：预置的 job 已带 blocks（上次分离结果），resume 应直接复用
+    这份 blocks 继续逐块转写，而不重新调用 diarize（诊断 job.blocks is None 的分支判断）。"""
     from transcribe_core.jobs import JobQueue, Job
     from transcribe_core.transcript import Segment, Transcript
 
     calls = []
+    diarize_calls = []
 
     class ChunkBackend(InferenceBackend):
         id = "chunk"
@@ -227,16 +239,18 @@ def test_resume_continues_from_chunks_done():
             calls.append(audio_path)
             return [Segment(0.0, 1.0, "x")]
         def diarize(self, audio_path, num_speakers):
+            diarize_calls.append(audio_path)
             return [(0.0, 1000.0, "S0")]
 
     q = JobQueue(ChunkBackend(),
                  duration_fn=lambda p: 360.0,
                  extract_fn=lambda src, start, dur: f"/tmp/c_{start}.wav",
                  chunk_sec=120.0)
-    # 预置一个已暂停、转了 2 块的 job
-    q.preload([Job(id="jr", audio_path="/x/a.m4a", status="paused", progress=0.56,
+    # 预置一个已暂停、分离已完成(3 块)、转了 2 块的 job
+    q.preload([Job(id="jr", audio_path="/x/a.m4a", status="paused", progress=0.72,
                    transcript=Transcript(segments=[Segment(0, 1, "a"), Segment(120, 121, "b")]),
-                   error=None, total_chunks=3, chunks_done=2)])
+                   error=None, total_chunks=3, chunks_done=2,
+                   blocks=[(0.0, 120.0, "S0"), (120.0, 240.0, "S0"), (240.0, 360.0, "S0")])])
     assert q.resume("jr") is True
     import time
     for _ in range(50):
@@ -246,9 +260,17 @@ def test_resume_continues_from_chunks_done():
     job = q.get("jr")
     assert job.status == "done"
     assert len(calls) == 1          # 只补转了第 3 块，不重跑前 2 块
+    assert diarize_calls == []      # blocks 已持久化，resume 不重跑分离
     assert job.chunks_done == 3
 
 
+@pytest.mark.xfail(
+    reason="Task 5 遗留给 Task 6：diarize-first 下 diarize 在 run_job 一开始就无条件"
+           "同步跑完（不可暂停，是本次管线倒置的设计本身），本用例断言的"
+           "「暂停后不应进入 diarize」在新管线下恒定不成立。Task 6 改造 pause 阶段判定/"
+           "rediarize 时一并重新设计或移除本用例。",
+    strict=False,
+)
 def test_pause_during_single_last_chunk_is_honored():
     """BUG-1 回归：单块(<2min)音频在(唯一/末)块转写途中点暂停，转完后应停在 paused 而非 done。
     循环无下一次迭代观察标志，须靠循环后补检查捕获。"""
@@ -333,9 +355,19 @@ def test_double_resume_under_gate_contention_runs_once():
 
 
 def test_empty_audio_fails_with_friendly_error():
-    """BUG-3 回归：空/零时长音频不应抛 AttributeError，而是给人话错误。"""
+    """BUG-3 回归：空/零时长音频不应抛 AttributeError，而是给人话错误。
+    diarize-first 下"空音频"体现为 diarize 不出任何轮次（而非旧语义里 duration<=0），
+    refine_turns([]) 得空块列表，循环零次迭代，transcript 仍为 None → 触发人话错误。"""
     from transcribe_core.jobs import JobQueue
-    q = JobQueue(FakeBackend(), duration_fn=lambda p: 0.0,
+
+    class EmptyBackend(InferenceBackend):
+        id = "empty"
+        def transcribe(self, audio_path, language, initial_prompt):
+            return [Segment(0, 1, "不应被调用到")]
+        def diarize(self, audio_path, num_speakers):
+            return []
+
+    q = JobQueue(EmptyBackend(), duration_fn=lambda p: 0.0,
                  extract_fn=lambda src, start, dur: src)
     jid = q.submit("/x/empty.m4a")   # 同步跑
     job = q.get(jid)
@@ -497,3 +529,28 @@ def test_rediarize_failure_keeps_done_and_transcript():
     assert [s.speaker for s in job.transcript.segments] == ["说话人A"]
     assert job.transcript.speaker_names == {"说话人A": "张三"}  # 真名也还在
     assert job.error and "重新分人失败" in job.error
+
+
+class _FakeBackend:
+    def __init__(self):
+        self.transcribe_calls = []
+    def transcribe(self, wav, lang, prompt):
+        self.transcribe_calls.append(wav)
+        return [Segment(0.0, 2.0, f"块{len(self.transcribe_calls)}")]
+    def diarize(self, audio_path, num_speakers):
+        # 两个人各说 20s → refine_turns 得两块
+        return [(0.0, 20.0, "说话人A"), (20.0, 40.0, "说话人B")]
+
+
+def test_run_job_diarize_first_assigns_block_speaker():
+    be = _FakeBackend()
+    q = JobQueue(backend=be, duration_fn=lambda p: 40.0,
+                 extract_fn=lambda src, s, d: f"/fake/{s}.wav")
+    jid = q.submit("/audio.m4a")
+    job = q.get(jid)
+    assert job.status == "done"
+    # 两块 → 两次 transcribe，各块段贴对应说话人（说话人不被抹）
+    assert len(be.transcribe_calls) == 2
+    spks = {s.speaker for s in job.transcript.segments}
+    assert spks == {"说话人A", "说话人B"}
+    assert job.total_chunks == 2

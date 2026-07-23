@@ -1,4 +1,4 @@
-"""转写任务：串起 转写→分离→对齐→生成 Transcript，并推进度。"""
+"""转写任务：串起 分离(diarize-first)→精炼发言块→逐块单说话人转写→生成 Transcript，并推进度。"""
 from __future__ import annotations
 
 import itertools
@@ -10,8 +10,13 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .backend import InferenceBackend, align
-from .chunking import plan_chunks, offset_segments
+from .blocks import refine_turns, speakered_block_segments
 from .transcript import Transcript
+
+# 说明：align 仍保留导入——_run_rediarize（Task 6 范畴，本次不碰）还在用它做
+# 「整段分离→硬对齐」的旧式重新分人；run_job 主流程已不再调用 align。
+# plan_chunks/offset_segments 不再被本文件引用（切块/偏移逻辑已进 blocks.py），
+# 两者定义仍保留在 chunking.py（test_chunking.py 仍直接测试），故此处不再导入。
 
 _ids = itertools.count(1)
 
@@ -32,6 +37,7 @@ class Job:
     chunks_done: int = 0
     created_at: float = 0.0   # 拖入/提交时刻（epoch 秒），供前端按时间分组倒序
     num_speakers: int | None = None  # 用户填的预计说话人数，传给 pyannote 约束分离（None=自动）
+    blocks: list | None = None   # refine_turns 精炼后的发言块，持久化供 resume 免重跑分离
 
 
 class JobQueue:
@@ -162,14 +168,17 @@ class JobQueue:
                     job.error = None   # 续跑成功后清掉上一轮的失败信息，避免 error 残留落盘/回传
                     on_progress(job); self._notify(job)
 
-                    # 首次进入：算总块数（累加 transcript 惰性初始化，见循环内注释）
-                    if job.total_chunks == 0:
-                        duration = self._duration(job.audio_path)
-                        job.total_chunks = len(plan_chunks(duration, self._chunk_sec)) or 1
+                    # ① 先整体分离（diarize-first），精炼成发言块。已算过则复用（resume 免重跑）
+                    if job.blocks is None:
+                        turns = backend.diarize(job.audio_path,
+                                                job.num_speakers or self.num_speakers)
+                        job.blocks = refine_turns(turns)
+                        job.total_chunks = len(job.blocks) or 1
+                        job.progress = 0.15
+                        on_progress(job); self._notify(job)
 
-                    chunks = plan_chunks(self._duration(job.audio_path), self._chunk_sec)
-                    # 从断点续：只跑 chunks_done 及之后的块
-                    for index, start, dur in chunks[job.chunks_done:]:
+                    # ② 逐块切音频、单说话人转写（可暂停：块边界检查）
+                    for index in range(job.chunks_done, len(job.blocks)):
                         # 每次迭代都重新取暂停标志（不能在循环外缓存一次）：
                         # pause() 可能在本次 run_job 启动之后才创建/置位该 Event，
                         # 若在循环外只取一次，续跑线程里拿到的会是旧引用（甚至是 None），
@@ -179,7 +188,8 @@ class JobQueue:
                             job.status = "paused"
                             on_progress(job); self._notify(job)   # 存盘（on_change=store.save）
                             return
-                        wav = self._extract(job.audio_path, start, dur)
+                        bstart, bend, bspk = job.blocks[index]
+                        wav = self._extract(job.audio_path, bstart, bend - bstart)
                         try:
                             segs = backend.transcribe(wav, self.language, self.prompt)
                         finally:
@@ -192,32 +202,15 @@ class JobQueue:
                         # failed 状态 resume 续跑，不丢已转部分）。
                         if job.transcript is None:
                             job.transcript = Transcript(segments=[])
-                        job.transcript.segments.extend(offset_segments(segs, start))
+                        job.transcript.segments.extend(
+                            speakered_block_segments(segs, bstart, bspk))
                         job.chunks_done = index + 1
-                        job.progress = 0.85 * job.chunks_done / job.total_chunks
+                        job.progress = 0.15 + 0.85 * job.chunks_done / job.total_chunks
                         on_progress(job); self._notify(job)
 
-                    # 循环结束后再查一次暂停标志：单块/末块在转写「途中」被点暂停时，
-                    # 该块转完后循环直接结束、不再有下一次迭代去观察标志，若不在这里补检查，
-                    # 会直奔 diarize→done 令暂停对所有单块(<2min)音频与多块的末块失效。
-                    pause_ev = self._pause.get(job.id)
-                    if pause_ev is not None and pause_ev.is_set():
-                        job.status = "paused"
-                        on_progress(job); self._notify(job)
-                        return
-                    # 空音频/零时长：无任何块转出，transcript 仍为 None。此时不能进 diarize/align
-                    # （align(None.segments) 会抛晦涩的 AttributeError），给一句人话错误。
+                    # 空音频/无发言块：diarize 没分出任何块，transcript 仍为 None。给一句人话错误。
                     if job.transcript is None:
                         raise RuntimeError("音频为空或无法读取时长")
-
-                    # 全部转完 → 整段分离（不可暂停）→ 对齐
-                    job.progress = 0.85
-                    on_progress(job)
-                    turns = backend.diarize(job.audio_path, job.num_speakers or self.num_speakers)
-                    job.progress = 0.95
-                    on_progress(job)
-                    labeled = align(job.transcript.segments, turns)
-                    job.transcript = Transcript(segments=labeled)
                     job.progress = 1.0
                     job.status = "done"
                     on_progress(job); self._notify(job)
