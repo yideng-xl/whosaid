@@ -72,6 +72,9 @@ class JobQueue:
         # 在此之前 status 仍是 paused/failed，若不拦，闸门争用下连点两次 resume 会起两个线程
         # 把同一 job 跑两遍（重复 diarize、二次新建 Transcript 丢掉期间的改名）。持锁读写。
         self._inflight: set[str] = set()
+        # 仅供测试观察 rediarize 失败→恢复窗口（status==failed 但快照回填尚未开始）的钩子，
+        # 生产环境恒为 None、不生效。见 _run_rediarize_guarded 调用处。
+        self._test_before_restore: Callable[[Job], None] | None = None
 
     def _new_id(self) -> str:
         """跳过已存在 id（preload 历史 job 后，避免全局计数器从头产生碰撞）"""
@@ -328,6 +331,8 @@ class JobQueue:
             self.run_job(job, on_progress, manage_inflight=False)
             if job.status == "failed":
                 # 重新分人失败：绝不能丢用户已有的稿子。恢复快照并回到 done，记非阻断错误。
+                if self._test_before_restore is not None:
+                    self._test_before_restore(job)   # 测试钩子：此刻处于 failed→恢复窗口
                 old_transcript, old_blocks, old_total, old_done = snapshot
                 job.transcript = old_transcript
                 job.blocks = old_blocks
