@@ -152,7 +152,11 @@ class JobQueue:
         threading.Thread(target=self.run_job, args=(job, self._emit), daemon=True).start()
         return jid
 
-    def run_job(self, job: Job, on_progress: Callable[[Job], None]) -> None:
+    def run_job(self, job: Job, on_progress: Callable[[Job], None],
+                manage_inflight: bool = True) -> None:
+        """跑一个 job。manage_inflight=True（默认，submit/submit_async/resume 均用默认值）时，
+        本方法自己在 finally 里把 job.id 从 _inflight 摘除；传 False 时把 inflight 的摘除
+        权交还给调用方（_run_rediarize_guarded 用它独占 inflight 生命周期，见该方法注释）。"""
         try:
             with _infer_gate:  # 串行化推理段；暂停 return 即释放，CPU 真正空下来
                 try:
@@ -229,8 +233,12 @@ class JobQueue:
         finally:
             # 无论 paused-return / done / failed / 异常，线程结束即摘除 in-flight 登记，
             # 让后续 resume 能再次续跑（与 _infer_gate 释放同处一个出口）。
-            with self._lock:
-                self._inflight.discard(job.id)
+            # manage_inflight=False（仅 _run_rediarize_guarded 传入）时不在此摘除：
+            # 失败路径下 guard 还要接着用快照改写 job，摘早了会让 resume 在恢复完成前
+            # 抢到守卫、和 guard 无锁并发改同一个 Job 对象（见该方法调用处注释）。
+            if manage_inflight:
+                with self._lock:
+                    self._inflight.discard(job.id)
 
     def pause(self, job_id: str) -> bool:
         """请求暂停：仅运行中、分离已完成、逐块转写循环未跑完时有效。"""
@@ -306,21 +314,33 @@ class JobQueue:
     def _run_rediarize_guarded(self, job: Job, snapshot: tuple, on_progress: Callable[[Job], None]) -> None:
         """rediarize 全量重跑的瘦包装：跑完 run_job 后，若失败则恢复重跑前快照，
         让 job 回到 done 而不是把用户已有的稿子跟着复位的字段一起丢掉。
-        run_job 内部已处理 _infer_gate 获取/释放、异常兜底为 failed、finally 里
-        discard inflight——这里只负责失败后的补救，不重复管这两者。"""
-        self.run_job(job, on_progress)
-        if job.status == "failed":
-            # 重新分人失败：绝不能丢用户已有的稿子。恢复快照并回到 done，记非阻断错误。
-            old_transcript, old_blocks, old_total, old_done = snapshot
-            job.transcript = old_transcript
-            job.blocks = old_blocks
-            job.total_chunks = old_total
-            job.chunks_done = old_done
-            job.status = "done"
-            job.progress = 1.0
-            job.error = f"重新分人失败：{job.error}（已保留原结果）"
-            on_progress(job)
-            self._notify(job)
+
+        竞态根治：inflight 守卫的不变量是"一个线程对某 job 的所有写操作没做完之前，
+        job_id 必须一直留在 _inflight 里"（resume/rediarize 都靠 job_id not in
+        _inflight 判断能否起新线程）。旧写法里 run_job 一返回就在自己的 finally 里
+        discard inflight，而失败恢复逻辑在 run_job 返回之后才做——于是 status==failed
+        但 job_id 已不在 _inflight 的窗口里，resume() 能穿过守卫、另起一个 run_job
+        线程和这里的恢复逻辑无锁并发改写同一个 Job 对象。
+        根治法：run_job 传 manage_inflight=False，不让它自己 discard；改为本方法独占
+        inflight 整个生命周期——从 rediarize() 里 add，到这里 finally 里 discard 之间，
+        job_id 全程都在 _inflight，堵死这个窗口。"""
+        try:
+            self.run_job(job, on_progress, manage_inflight=False)
+            if job.status == "failed":
+                # 重新分人失败：绝不能丢用户已有的稿子。恢复快照并回到 done，记非阻断错误。
+                old_transcript, old_blocks, old_total, old_done = snapshot
+                job.transcript = old_transcript
+                job.blocks = old_blocks
+                job.total_chunks = old_total
+                job.chunks_done = old_done
+                job.status = "done"
+                job.progress = 1.0
+                job.error = f"重新分人失败：{job.error}（已保留原结果）"
+                on_progress(job)
+                self._notify(job)
+        finally:
+            with self._lock:
+                self._inflight.discard(job.id)
 
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)

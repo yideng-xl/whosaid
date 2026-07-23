@@ -538,6 +538,62 @@ def test_rediarize_failure_restores_old_transcript_and_stays_done():
     assert job.error and "分人炸了" in job.error and "已保留原结果" in job.error
 
 
+def test_rediarize_failure_recovery_keeps_inflight_and_blocks_resume():
+    """竞态回归（本次根治的核心契约）：从 rediarize() 把 job_id 加入 _inflight，
+    到 _run_rediarize_guarded 用快照恢复完、discard inflight 为止，job_id 必须
+    全程留在 _inflight——resume() 全程应被拒绝。
+
+    旧实现的 bug：run_job 的 finally 一返回就 discard inflight，而失败后"恢复快照
+    回 done"的逻辑在 run_job 返回之后才做，于是存在一个窗口：status==failed、
+    job_id 已不在 _inflight、但 guard 还在改 job.transcript/blocks/status——此时
+    resume() 能穿过守卫，另起一个 run_job 线程和 guard 无锁并发改写同一个 Job。
+
+    用可控阻塞的 diarize（卡在 threading.Event 上再抛异常）把"从开始重跑到恢复
+    完成"这整个窗口拉长到可观测，在阻塞期间断言 resume 被拒，而不是只测最终状态。"""
+    from transcribe_core.transcript import Transcript, Segment
+
+    block_ev = threading.Event()
+    entered_ev = threading.Event()
+
+    class BlockingBoomDiarize(InferenceBackend):
+        id = "blockboom"
+        def transcribe(self, a, l, p):
+            return [Segment(0, 2, "你好")]
+        def diarize(self, a, num_speakers):
+            entered_ev.set()        # 通知主线程：已进入 diarize、即将阻塞
+            block_ev.wait(timeout=2)
+            raise RuntimeError("分人炸了")
+
+    q = JobQueue(BlockingBoomDiarize(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda s, st, d: s)
+    old = Transcript(segments=[Segment(0, 2, "你好", "说话人A")],
+                     speaker_names={"说话人A": "张三"})
+    q.preload([Job(id="jw", audio_path="/x/a.m4a", status="done", progress=1.0,
+                   transcript=old, error=None, total_chunks=1, chunks_done=1)])
+
+    assert q.rediarize("jw", 2) is True
+    assert entered_ev.wait(timeout=2), "diarize 未在超时内被调用（阻塞点未命中）"
+    # 此刻 diarize 正阻塞（尚未失败、恢复也未开始）：job_id 应仍在 inflight，
+    # 守卫应拦住这次并发 resume——这是根治要保证的契约本身，不是终态断言。
+    assert "jw" in q._inflight
+    assert q.resume("jw") is False
+
+    # 放行：diarize 抛异常 → run_job 落 failed（manage_inflight=False，run_job 自己
+    # 不摘 inflight）→ guard 用快照恢复回 done → guard 的 finally 才摘 inflight。
+    block_ev.set()
+    for _ in range(100):
+        if "jw" not in q._inflight:
+            break
+        time.sleep(0.02)
+
+    job = q.get("jw")
+    assert job.status == "done" and job.progress == 1.0
+    assert job.transcript is old
+    assert job.transcript.speaker_names == {"说话人A": "张三"}
+    assert job.error and "分人炸了" in job.error and "已保留原结果" in job.error
+    assert "jw" not in q._inflight
+
+
 class _FakeBackend:
     def __init__(self):
         self.transcribe_calls = []
