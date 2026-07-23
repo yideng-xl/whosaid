@@ -263,21 +263,15 @@ def test_resume_continues_from_chunks_done():
     assert job.chunks_done == 3
 
 
-@pytest.mark.xfail(
-    reason="Task 5 遗留给 Task 6：diarize-first 下 diarize 在 run_job 一开始就无条件"
-           "同步跑完（不可暂停，是本次管线倒置的设计本身），本用例断言的"
-           "「暂停后不应进入 diarize」在新管线下恒定不成立。Task 6 改造 pause 阶段判定/"
-           "rediarize 时一并重新设计或移除本用例。",
-    strict=False,
-)
 def test_pause_during_single_last_chunk_is_honored():
     """BUG-1 回归：单块(<2min)音频在(唯一/末)块转写途中点暂停，转完后应停在 paused 而非 done。
-    循环无下一次迭代观察标志，须靠循环后补检查捕获。"""
+    循环无下一次迭代观察标志，须靠循环后补检查捕获。
+    diarize-first 下 diarize 在 run_job 一开始就无条件同步跑完（不可暂停，是管线倒置的
+    设计本身），因此本用例不再断言「暂停后不应进入 diarize」，只聚焦暂停是否被兑现。"""
     from transcribe_core.jobs import JobQueue
     from transcribe_core.transcript import Segment
 
     gate = threading.Event()
-    diarized = []
 
     class SlowSingle(InferenceBackend):
         id = "slowsingle"
@@ -285,14 +279,13 @@ def test_pause_during_single_last_chunk_is_honored():
             gate.wait(timeout=2)   # 唯一一块，阻塞期间主线程 pause
             return [Segment(0.0, 1.0, "x")]
         def diarize(self, audio_path, num_speakers):
-            diarized.append(audio_path)
             return [(0.0, 1000.0, "S0")]
 
     q = JobQueue(SlowSingle(), duration_fn=lambda p: 60.0,   # 单块
                  extract_fn=lambda src, start, dur: f"/tmp/s_{start}.wav",
                  chunk_sec=120.0)
     jid = q.submit_async("/x/a.m4a")
-    time.sleep(0.2)                 # 进入(唯一块的)transcribe
+    time.sleep(0.2)                 # 进入(唯一块的)transcribe（此时 diarize 早已跑完，blocks 已定）
     assert q.pause(jid) is True     # 转写阶段可暂停
     gate.set()                      # 放该块过；转完后循环结束
     for _ in range(100):
@@ -300,9 +293,8 @@ def test_pause_during_single_last_chunk_is_honored():
             break
         time.sleep(0.02)
     job = q.get(jid)
-    assert job.status == "paused"   # 修复前会是 done
+    assert job.status == "paused"   # 修复前会是 done：循环后补检查加回后应兑现暂停
     assert job.total_chunks == 1 and job.chunks_done == 1
-    assert diarized == []           # 暂停后不应进入 diarize
 
 
 def test_resume_rejects_second_call_while_inflight():
@@ -410,11 +402,22 @@ def test_set_num_speakers_rejected_when_done():
     assert q.set_num_speakers(jid, 3) is False       # 已完成走 rediarize
 
 
-def test_set_num_speakers_rejected_while_diarizing():
+def test_set_num_speakers_rejected_after_blocks_set():
+    """diarize-first 语义：分离已完成(blocks 已定)后锁定，不再依赖 progress≥0.85 魔法数字——
+    这里即使 progress 不高，只要 blocks 已定（分离已跑完，逐块转写中）也应锁定。"""
     q = JobQueue(FakeBackend())
-    q.preload([Job(id="jd", audio_path="/x/a.m4a", status="running", progress=0.9,
+    q.preload([Job(id="jd", audio_path="/x/a.m4a", status="running", progress=0.3,
+                   transcript=None, error=None, total_chunks=3, chunks_done=0,
+                   blocks=[(0.0, 1.0, "A"), (1.0, 2.0, "B"), (2.0, 3.0, "A")])])
+    assert q.set_num_speakers("jd", 3) is False
+
+
+def test_set_num_speakers_allowed_while_running_before_blocks_set():
+    """diarize-first 语义：running 但 blocks 尚未定(仍在分离中)时应仍可写入人数。"""
+    q = JobQueue(FakeBackend())
+    q.preload([Job(id="jd2", audio_path="/x/a.m4a", status="running", progress=0.05,
                    transcript=None, error=None)])
-    assert q.set_num_speakers("jd", 3) is False       # 正在分人锁定
+    assert q.set_num_speakers("jd2", 3) is True
 
 
 def test_set_num_speakers_unknown_job():

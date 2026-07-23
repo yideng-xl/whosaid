@@ -37,7 +37,7 @@ class Job:
     chunks_done: int = 0
     created_at: float = 0.0   # 拖入/提交时刻（epoch 秒），供前端按时间分组倒序
     num_speakers: int | None = None  # 用户填的预计说话人数，传给 pyannote 约束分离（None=自动）
-    blocks: list | None = None   # refine_turns 精炼后的发言块，持久化供 resume 免重跑分离
+    blocks: list[tuple[float, float, str]] | None = None   # refine_turns 精炼后的发言块，持久化供 resume 免重跑分离
 
 
 class JobQueue:
@@ -210,6 +210,14 @@ class JobQueue:
                         job.progress = 0.15 + 0.85 * job.chunks_done / job.total_chunks
                         on_progress(job); self._notify(job)
 
+                    # 循环后补检查：末块/单块在转写途中被点暂停时，该块转完后循环直接结束、
+                    # 无下一次迭代观察标志；不在此补检查会直奔 done 令暂停失效。
+                    pause_ev = self._pause.get(job.id)
+                    if pause_ev is not None and pause_ev.is_set():
+                        job.status = "paused"
+                        on_progress(job); self._notify(job)
+                        return
+
                     # 空音频/无发言块：diarize 没分出任何块，transcript 仍为 None。给一句人话错误。
                     if job.transcript is None:
                         raise RuntimeError("音频为空或无法读取时长")
@@ -227,9 +235,11 @@ class JobQueue:
                 self._inflight.discard(job.id)
 
     def pause(self, job_id: str) -> bool:
-        """请求暂停：仅对运行中且处于转写阶段(progress<0.85)有效。返回是否被接受。"""
+        """请求暂停：仅运行中、分离已完成、逐块转写循环未跑完时有效。"""
         job = self._jobs.get(job_id)
-        if job is None or job.status != "running" or job.progress >= 0.85:
+        if job is None or job.status != "running":
+            return False
+        if job.blocks is None or job.chunks_done >= job.total_chunks:
             return False
         self._pause.setdefault(job_id, threading.Event()).set()
         return True
@@ -254,13 +264,13 @@ class JobQueue:
 
     def set_num_speakers(self, job_id: str, n: int | None) -> bool:
         """分人前写入预计人数(供 diarize 约束)。仅在尚未分人时允许:
-        done 走 rediarize;正在分人(running & progress≥0.85)锁定;其余(queued/paused/
-        failed/running<0.85)可写。返回是否被接受。"""
+        done 走 rediarize;已分人(blocks已定)后锁定;其余(queued/paused/
+        failed/running 且 blocks 未定)可写。返回是否被接受。"""
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None or job.status == "done":
                 return False
-            if job.status == "running" and job.progress >= 0.85:
+            if job.blocks is not None:
                 return False
             job.num_speakers = n
         self._notify(job)   # 触发 store.save 持久化

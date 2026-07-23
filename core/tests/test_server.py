@@ -193,6 +193,39 @@ def test_get_job_includes_chunk_and_phase(tmp_path):
     assert d["phase"] == "done"
 
 
+def test_get_job_phase_diarizing_when_running_and_blocks_unset(tmp_path):
+    """diarize-first：running 且 blocks 尚未定(分离未完成)时 phase 应为 diarizing，
+    不再依赖 progress 魔法数字判断相位。"""
+    from transcribe_core.jobs import Job, JobQueue
+    from transcribe_core.models import ModelRegistry
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: True, download_fn=lambda repo: None)
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda src, start, dur: src)
+    c = TestClient(create_app(q, reg))
+    jid = "job_diarizing"
+    q._jobs[jid] = Job(id=jid, audio_path="/x/a.m4a", status="running", progress=0.05,
+                        transcript=None, error=None)
+    assert c.get(f"/jobs/{jid}").json()["phase"] == "diarizing"
+
+
+def test_get_job_phase_transcribing_when_blocks_set_mid_run(tmp_path):
+    """diarize-first：running 且 blocks 已定(分离已完成，逐块转写循环未跑完)时 phase 应为
+    transcribing，即使 progress 远低于旧的 0.85 魔法数字。"""
+    from transcribe_core.jobs import Job, JobQueue
+    from transcribe_core.models import ModelRegistry
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: True, download_fn=lambda repo: None)
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda src, start, dur: src)
+    c = TestClient(create_app(q, reg))
+    jid = "job_transcribing"
+    q._jobs[jid] = Job(id=jid, audio_path="/x/a.m4a", status="running", progress=0.2,
+                        transcript=None, error=None, total_chunks=3, chunks_done=1,
+                        blocks=[(0.0, 1.0, "A"), (1.0, 2.0, "B"), (2.0, 3.0, "A")])
+    assert c.get(f"/jobs/{jid}").json()["phase"] == "transcribing"
+
+
 def test_speaker_sample_returns_audio(tmp_path):
     import os, pytest
     clip = os.path.expanduser("~/Workspace/develop/oneworkspace/local-ai/radio/测试短音频-8秒.m4a")
