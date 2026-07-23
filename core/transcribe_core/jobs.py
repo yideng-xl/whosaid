@@ -9,13 +9,11 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from .backend import InferenceBackend, align
+from .backend import InferenceBackend
 from .blocks import refine_turns, relabel_blocks, speakered_block_segments
 from .transcript import Transcript
 
-# 说明：align 仍保留导入——_run_rediarize（Task 6 范畴，本次不碰）还在用它做
-# 「整段分离→硬对齐」的旧式重新分人；run_job 主流程已不再调用 align。
-# plan_chunks/offset_segments 不再被本文件引用（切块/偏移逻辑已进 blocks.py），
+# 说明：plan_chunks/offset_segments 不再被本文件引用（切块/偏移逻辑已进 blocks.py），
 # 两者定义仍保留在 chunking.py（test_chunking.py 仍直接测试），故此处不再导入。
 
 _ids = itertools.count(1)
@@ -277,61 +275,29 @@ class JobQueue:
         return True
 
     def rediarize(self, job_id: str, n: int | None) -> bool:
-        """已完成任务用新人数只重跑「拆分人声」(diarize+align),不重听。
-        要求 status==done 且有文字稿;in-flight 则幂等拒绝。返回是否被接受。"""
+        """已完成任务用新人数重新分人。分离优先(diarize-first)管线下，逐块转写的切块
+        边界本就由分离结果决定，改人数必然导致重切重转——不再是"只重跑 diarize+align"
+        的局部重跑，而是复位关键字段后走标准 run_job 全量重来一遍。
+        要求 status==done;in-flight 则幂等拒绝。返回是否被接受。"""
         with self._lock:
             job = self._jobs.get(job_id)
-            if job is None or job.status != "done" or job.transcript is None:
+            if job is None or job.status != "done":
                 return False
             if job_id in self._inflight:
                 return False
             self._inflight.add(job_id)
             job.num_speakers = n
+            job.blocks = None
+            job.transcript = None
+            job.chunks_done = 0
+            job.total_chunks = 0
             # 同步翻状态:让 POST 返回时即 running,避免前端重订阅 WS 读到旧 done 帧后
             # 关连接、界面卡在旧的分人结果(worker 可能阻塞在 _infer_gate 前迟迟未翻)。
             job.status = "running"
-            job.progress = 0.85
+            job.progress = 0.0
             job.error = None
-        threading.Thread(target=self._run_rediarize, args=(job, self._emit),
-                         daemon=True).start()
+        threading.Thread(target=self.run_job, args=(job, self._emit), daemon=True).start()
         return True
-
-    def _run_rediarize(self, job: Job, on_progress: Callable[[Job], None]) -> None:
-        """重跑分人:拿已存文字段 → diarize(新人数) → align(生成全新 说话人A/B,
-        旧真名随旧 transcript 丢弃)。走单并发闸门,与普通任务串行。"""
-        try:
-            with _infer_gate:
-                try:
-                    backend = self.backend
-                    if self._backend_factory is not None and self._registry is not None:
-                        backend = self._backend_factory(
-                            self._registry.active_repo("transcribe"),
-                            self._registry.active_repo("diarize"),
-                        )
-                    job.status = "running"
-                    job.error = None
-                    job.progress = 0.85           # 进入分人阶段(phase=diarizing)
-                    on_progress(job); self._notify(job)
-                    segments = job.transcript.segments
-                    turns = backend.diarize(job.audio_path,
-                                            job.num_speakers or self.num_speakers)
-                    job.progress = 0.95
-                    on_progress(job)
-                    labeled = align(segments, turns)
-                    job.transcript = Transcript(segments=labeled)  # 新稿,真名清空
-                    job.progress = 1.0
-                    job.status = "done"
-                    on_progress(job); self._notify(job)
-                except Exception as e:
-                    # 重新分人失败:旧 transcript 完好,绝不能降级为 failed
-                    #(那会藏起完好稿子并放开删除按钮,可能致用户误删)。恢复 done,记非阻断错误。
-                    job.status = "done"
-                    job.progress = 1.0
-                    job.error = f"重新分人失败：{e}（已保留原结果）"
-                    on_progress(job); self._notify(job)
-        finally:
-            with self._lock:
-                self._inflight.discard(job.id)
 
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)

@@ -474,8 +474,9 @@ def test_rediarize_rejects_when_inflight():
 
 
 def test_rediarize_flips_status_synchronously():
-    """终审 Important-1 回归:rediarize 返回 True 后应立即 running/0.85(不等 worker),
-    否则前端重订阅 WS 会读到旧 done 帧、界面卡在旧结果。"""
+    """终审 Important-1 回归（新契约）:rediarize 返回 True 后应立即 running/0.0(不等
+    worker)——全量重跑从头开始，进度归零而非停在旧的"仅分人阶段"0.85 标记；否则前端重订阅
+    WS 会读到旧 done 帧、界面卡在旧结果。"""
     from transcribe_core.transcript import Transcript, Segment
     gate = threading.Event()
 
@@ -494,7 +495,8 @@ def test_rediarize_flips_status_synchronously():
                    error=None, total_chunks=1, chunks_done=1)])
     assert q.rediarize("jf", 2) is True
     job = q.get("jf")
-    assert job.status == "running" and job.progress == 0.85   # 同步已翻,不等 worker
+    assert job.status == "running" and job.progress == 0.0   # 同步已翻,不等 worker
+    assert job.transcript is None and job.blocks is None     # 全量重跑：旧稿/旧块同步清空
     gate.set()
     for _ in range(100):
         if q.get("jf").status == "done" and "jf" not in q._inflight:
@@ -503,8 +505,11 @@ def test_rediarize_flips_status_synchronously():
     assert q.get("jf").status == "done"
 
 
-def test_rediarize_failure_keeps_done_and_transcript():
-    """终审 Important-2 回归:分人失败绝不能降级 failed / 丢稿子,应恢复 done 保留旧稿。"""
+def test_rediarize_failure_marks_failed_and_clears_old_transcript():
+    """新契约:全量重跑语义下 rediarize 不再是"只重跑 diarize+align"的局部操作，而是
+    复位后完整走一遍 run_job；旧 transcript 已在复位时清空，diarize 失败与普通任务失败
+    走同一条异常处理路径——job 降级为 failed，旧稿不再可恢复（与 test_run_job_failure_
+    sets_error 的失败契约一致）。这是本任务明确要求的行为变化，不是遗留 bug。"""
     from transcribe_core.transcript import Transcript, Segment
 
     class BoomDiarize(InferenceBackend):
@@ -526,11 +531,9 @@ def test_rediarize_failure_keeps_done_and_transcript():
             break
         time.sleep(0.02)
     job = q.get("jb")
-    assert job.status == "done"                    # 未降级
-    assert job.transcript is old                   # 旧稿对象完好保留
-    assert [s.speaker for s in job.transcript.segments] == ["说话人A"]
-    assert job.transcript.speaker_names == {"说话人A": "张三"}  # 真名也还在
-    assert job.error and "重新分人失败" in job.error
+    assert job.status == "failed"                   # 全量重跑失败即普通失败，不再特殊恢复
+    assert job.transcript is None                    # 旧稿已在复位阶段清空，未被保留
+    assert job.error and "分人炸了" in job.error
 
 
 class _FakeBackend:
@@ -556,3 +559,23 @@ def test_run_job_diarize_first_assigns_block_speaker():
     spks = {s.speaker for s in job.transcript.segments}
     assert spks == {"说话人A", "说话人B"}
     assert job.total_chunks == 2
+
+
+def test_rediarize_full_rerun_with_new_count():
+    """rediarize 新契约：全量重跑——改人数会重新走一遍 diarize-first 主流程，
+    因此逐块 transcribe 会被再次调用（不再是"只重跑 diarize+align，不重听"）。"""
+    be = _FakeBackend()
+    q = JobQueue(backend=be, duration_fn=lambda p: 40.0,
+                 extract_fn=lambda src, s, d: f"/fake/{s}.wav")
+    jid = q.submit("/audio.m4a")
+    before = len(be.transcribe_calls)
+    ok = q.rediarize(jid, 3)   # 改人数 → 全量重跑，会再次逐块转写
+    # rediarize 起后台线程，等它跑完
+    import time as _t
+    for _ in range(50):
+        if q.get(jid).status == "done" and len(be.transcribe_calls) > before:
+            break
+        _t.sleep(0.05)
+    assert ok is True
+    assert len(be.transcribe_calls) > before  # 确实重转了
+    assert q.get(jid).num_speakers == 3
