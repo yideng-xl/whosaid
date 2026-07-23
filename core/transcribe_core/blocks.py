@@ -61,6 +61,19 @@ def refine_turns(turns: list[Turn], interj: float = 2.5, target: float = 15.0) -
     return [(b[0], b[1], b[2]) for b in merged]
 
 
+def relabel_blocks(blocks: list[Turn]) -> list[Turn]:
+    """把发言块的原始说话人标签（SPEAKER_00/01…）按首次出现顺序映射为 说话人A/B…。
+    时间边界不变。原为 align() 里 label_map 的归一化逻辑，diarize-first 改造后
+    移到这里，在块级贴 speaker 前调用，避免用户看到未归一化的原始标签。"""
+    label_map: dict[str, str] = {}
+    out: list[Turn] = []
+    for s, e, raw in blocks:
+        if raw not in label_map:
+            label_map[raw] = f"说话人{chr(ord('A') + len(label_map))}"
+        out.append((s, e, label_map[raw]))
+    return out
+
+
 def speakered_block_segments(segs: list[Segment], offset: float, speaker: str) -> list[Segment]:
     """某发言块转写出的段：整体偏移 offset 到全局时间轴，并统一贴该块主导说话人。"""
     from .chunking import offset_segments

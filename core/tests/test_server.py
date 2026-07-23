@@ -54,9 +54,8 @@ def test_submit_and_fetch_job(tmp_path):
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
     job = _wait_done(c, jid)
     assert job["status"] == "done"
-    # diarize-first：align() 退休后说话人标签即 diarize 原始输出（人名统一映射为
-    # 「说话人A/B」的美化步骤属独立后续计划，见 2026-07-2x-name-replace-and-sherpa.md）
-    assert "SPEAKER_00：你好" in job["txt"]
+    # diarize-first：relabel_blocks 把 diarize 原始标签按首次出现顺序归一化为 说话人A/B…
+    assert "说话人A：你好" in job["txt"]
 
 
 def test_get_job_returns_plain_txt_without_speaker_prefix(tmp_path):
@@ -72,7 +71,7 @@ def test_rename_then_export(tmp_path):
     c = make_client(tmp_path)
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
     _wait_done(c, jid)
-    c.post(f"/jobs/{jid}/rename", json={"orig": "SPEAKER_00", "name": "张三"})
+    c.post(f"/jobs/{jid}/rename", json={"orig": "说话人A", "name": "张三"})
     txt = c.get(f"/jobs/{jid}/export", params={"fmt": "txt"}).text
     assert txt.startswith("张三：你好")
 
@@ -101,14 +100,14 @@ def test_get_job_returns_speakers_with_orig_and_display(tmp_path):
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
     _wait_done(c, jid)
     # 改名前：speakers 用原始标签，name 等于原始标签
-    # diarize-first：align() 退休，原始标签即 diarize 输出（本例即 FakeBackend 的 SPEAKER_00/01）
+    # diarize-first：relabel_blocks 把 diarize 原始标签归一化为 说话人A/B（即此处的"原始标签"）
     spk = c.get(f"/jobs/{jid}").json()["speakers"]
-    assert {s["orig"] for s in spk} == {"SPEAKER_00", "SPEAKER_01"}
+    assert {s["orig"] for s in spk} == {"说话人A", "说话人B"}
     assert all(s["orig"] == s["name"] for s in spk)
     # 改名后：orig 不变（仍是原始标签），name 变为真名，保证可反复改名
-    c.post(f"/jobs/{jid}/rename", json={"orig": "SPEAKER_00", "name": "张三"})
+    c.post(f"/jobs/{jid}/rename", json={"orig": "说话人A", "name": "张三"})
     spk2 = {s["orig"]: s["name"] for s in c.get(f"/jobs/{jid}").json()["speakers"]}
-    assert spk2["SPEAKER_00"] == "张三"
+    assert spk2["说话人A"] == "张三"
 
 
 def test_rename_export_409_when_transcript_none(tmp_path):
@@ -232,7 +231,7 @@ def test_rename_persists_via_store(tmp_path):
     c = TestClient(create_app(q, reg, store))
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
     _wait_done(c, jid)
-    c.post(f"/jobs/{jid}/rename", json={"orig": "SPEAKER_00", "name": "李四"})
+    c.post(f"/jobs/{jid}/rename", json={"orig": "说话人A", "name": "李四"})
     # 重新加载存储中的 job，验证修改已持久化
     reloaded = {j.id: j for j in JobStore(str(tmp_path / "data")).load_all()}
     assert "李四" in reloaded[jid].transcript.to_txt()

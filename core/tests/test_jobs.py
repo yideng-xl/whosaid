@@ -34,12 +34,11 @@ def test_run_job_success_produces_labeled_transcript():
     job = q.get(jid)
     assert job.status == "done"
     assert job.progress == 1.0
-    # diarize-first：两块分别转写、各自贴上块的（原始）说话人标签。
-    # 人名统一映射为「说话人A/B」的美化步骤已随 align() 一起退休，属后续独立计划
-    # （2026-07-2x-name-replace-and-sherpa.md），本任务范围内标签即 diarize 原始输出。
+    # diarize-first：两块分别转写，relabel_blocks 把块的原始说话人标签按首次出现
+    # 顺序归一化为 说话人A/B 后再贴到段上。
     assert [s.speaker for s in job.transcript.segments] == \
-        ["SPEAKER_00", "SPEAKER_00", "SPEAKER_01", "SPEAKER_01"]
-    assert job.transcript.to_txt() == "SPEAKER_00：你好在吗\n\nSPEAKER_01：你好在吗\n\n"
+        ["说话人A", "说话人A", "说话人B", "说话人B"]
+    assert job.transcript.to_txt() == "说话人A：你好在吗\n\n说话人B：你好在吗\n\n"
 
 
 def test_run_job_failure_sets_error():

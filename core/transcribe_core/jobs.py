@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .backend import InferenceBackend, align
-from .blocks import refine_turns, speakered_block_segments
+from .blocks import refine_turns, relabel_blocks, speakered_block_segments
 from .transcript import Transcript
 
 # 说明：align 仍保留导入——_run_rediarize（Task 6 范畴，本次不碰）还在用它做
@@ -172,7 +172,9 @@ class JobQueue:
                     if job.blocks is None:
                         turns = backend.diarize(job.audio_path,
                                                 job.num_speakers or self.num_speakers)
-                        job.blocks = refine_turns(turns)
+                        # relabel_blocks：把 diarize 原始标签 SPEAKER_00/01… 按首次出现顺序
+                        # 归一化为 说话人A/B…（Task5 退休 align 时漏带的归一化步骤，此处补回）
+                        job.blocks = relabel_blocks(refine_turns(turns))
                         job.total_chunks = len(job.blocks) or 1
                         job.progress = 0.15
                         on_progress(job); self._notify(job)

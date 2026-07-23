@@ -1,4 +1,4 @@
-from transcribe_core.blocks import refine_turns, speakered_block_segments
+from transcribe_core.blocks import refine_turns, relabel_blocks, speakered_block_segments
 from transcribe_core.transcript import Segment
 
 
@@ -42,3 +42,15 @@ def test_no_micro_blocks_remain():
 
 def test_empty_input():
     assert refine_turns([]) == []
+
+
+def test_relabel_blocks_maps_raw_to_friendly_by_first_appearance():
+    blocks = [(0.0, 20.0, "SPEAKER_01"), (20.0, 40.0, "SPEAKER_00"), (40.0, 50.0, "SPEAKER_01")]
+    out = relabel_blocks(blocks)
+    # SPEAKER_01 先出现 → 说话人A；SPEAKER_00 后出现 → 说话人B；再次 SPEAKER_01 → 仍说话人A
+    assert [b[2] for b in out] == ["说话人A", "说话人B", "说话人A"]
+    assert [(b[0], b[1]) for b in out] == [(0.0, 20.0), (20.0, 40.0), (40.0, 50.0)]  # 时间不变
+
+
+def test_relabel_blocks_empty():
+    assert relabel_blocks([]) == []
