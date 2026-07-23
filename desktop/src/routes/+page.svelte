@@ -257,7 +257,8 @@
               return;
             }
             // 乐观置为运行态并重订阅：恢复侧栏实时进度 + 面板轮询（原 done 任务的 WS 已摘除）
-            jobs = jobs.map((jb) => (jb.id === id ? { ...jb, status: "running", progress: 0.85 } : jb));
+            // rediarize 现在是全量重跑，从分人阶段重新开始，故乐观进度复位为 0（而非旧管线的 0.85）
+            jobs = jobs.map((jb) => (jb.id === id ? { ...jb, status: "running", progress: 0 } : jb));
             watching.delete(id);
             const jb = jobs.find((x) => x.id === id);
             if (jb) subscribe(jb);

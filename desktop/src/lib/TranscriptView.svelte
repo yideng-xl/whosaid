@@ -289,7 +289,7 @@
         <input type="number" min="1" max="20" placeholder="自动"
                bind:value={countDraft} oninput={onCountInput} disabled={!editable} />
       </label>
-      {#if detail.status === "running" && detail.progress >= 0.85}
+      {#if detail.status === "running" && detail.phase === "diarizing"}
         <span class="count-hint">重新分人中…</span>
       {:else if showRediarize}
         <button class="rediarize" onclick={clickRediarize}><Icon name="refresh" size={13} /> 重新分人</button>
