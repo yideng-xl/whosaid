@@ -13,3 +13,9 @@ test('分离阶段显示分离中而非块数', () => {
   const { getByText } = render(BlockProgress, { total: 0, done: 0, phase: 'diarizing' });
   expect(getByText(/分离中/)).toBeTruthy();
 });
+
+test('done > total 时 clamp 百分比到 100%，防 repeat 负数崩溃', () => {
+  const { getByText } = render(BlockProgress, { total: 10, done: 15, phase: 'transcribing' });
+  // 15/10 > 100% 会被 clamp 到 100%
+  expect(getByText(/100%/)).toBeTruthy();
+});

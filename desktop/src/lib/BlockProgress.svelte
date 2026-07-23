@@ -1,13 +1,13 @@
 <!-- 块状分段进度条：用 ▰(实心)/▱(空心) 字符渲染分段进度，配合百分比与「已完成/总数」文案。
-     分离阶段(diarizing)不可中断且粒度粗，不显示块数/百分比，只提示「正在分离说话人…」；
+     分离阶段(diarizing)不可中断且粒度粗，不显示块数/百分比，只提示「说话人分离中…」；
      转写阶段(transcribing)按发言块数逐段推进，用本组件展示。 -->
 <script lang="ts">
   let { total = 0, done = 0, phase = 'transcribing' }:
     { total: number; done: number; phase: 'diarizing' | 'transcribing' } = $props();
 
   const CELLS = 24;
-  let pct = $derived(total > 0 ? Math.round((done / total) * 100) : 0);
-  let filled = $derived(Math.round((pct / 100) * CELLS));
+  let pct = $derived(total > 0 ? Math.min(100, Math.max(0, Math.round((done / total) * 100))) : 0);
+  let filled = $derived(Math.min(CELLS, Math.max(0, Math.round((pct / 100) * CELLS))));
   let bar = $derived('▰'.repeat(filled) + '▱'.repeat(CELLS - filled));
 </script>
 
