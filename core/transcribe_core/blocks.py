@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+from .transcript import Segment
+
 Turn = tuple[float, float, str]
 
 
@@ -59,7 +61,7 @@ def refine_turns(turns: list[Turn], interj: float = 2.5, target: float = 15.0) -
     return [(b[0], b[1], b[2]) for b in merged]
 
 
-def speakered_block_segments(segs, offset, speaker):
+def speakered_block_segments(segs: list[Segment], offset: float, speaker: str) -> list[Segment]:
     """某发言块转写出的段：整体偏移 offset 到全局时间轴，并统一贴该块主导说话人。"""
     from .chunking import offset_segments
     out = offset_segments(segs, offset)

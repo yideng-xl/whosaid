@@ -8,6 +8,7 @@ def test_speakered_block_segments_offsets_and_labels():
     assert [s.speaker for s in out] == ["说话人A", "说话人A"]
     assert out[0].start == 100.0 and out[1].end == 104.0
     assert out[0].text == "你好"
+    assert segs[0].speaker is None  # 原对象未被污染（offset_segments 返回新对象）
 
 
 def test_merges_consecutive_same_speaker():
