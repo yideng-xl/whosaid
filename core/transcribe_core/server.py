@@ -173,6 +173,8 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
             raise HTTPException(409, "转写未完成")
         if fmt == "srt":
             return j.transcript.to_srt()
+        if fmt == "plain":
+            return j.transcript.to_plain_ts()
         return j.transcript.to_txt()
 
     @app.get("/jobs/{job_id}/speaker_sample")

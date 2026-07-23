@@ -73,6 +73,16 @@ def test_rename_then_export(tmp_path):
     assert txt.startswith("张三：你好")
 
 
+def test_export_plain_returns_verbatim(tmp_path):
+    """export?fmt=plain 返回逐字稿纯文本（不带人名前缀），以 [00: 时间戳开头。"""
+    c = make_client(tmp_path)
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+    r = c.get(f"/jobs/{jid}/export", params={"fmt": "plain"})
+    assert r.status_code == 200
+    assert r.text.startswith("[00:")  # 逐字稿以时间戳开头
+
+
 def test_models_list_and_switch(tmp_path):
     c = make_client(tmp_path)
     models = c.get("/models").json()
