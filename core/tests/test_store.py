@@ -41,6 +41,7 @@ def test_paused_job_roundtrip_keeps_paused_and_chunks(tmp_path):
     j = JobStore(str(tmp_path)).load_all()[0]
     assert j.status == "paused"  # 暂停跨重启保留
     assert j.total_chunks == 5 and j.chunks_done == 2
+    assert j.transcript.plain_text() == "半句"
 
 
 def test_store_roundtrips_blocks(tmp_path):
