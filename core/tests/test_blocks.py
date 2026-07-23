@@ -1,4 +1,13 @@
-from transcribe_core.blocks import refine_turns
+from transcribe_core.blocks import refine_turns, speakered_block_segments
+from transcribe_core.transcript import Segment
+
+
+def test_speakered_block_segments_offsets_and_labels():
+    segs = [Segment(0.0, 2.0, "你好"), Segment(2.0, 4.0, "在的")]
+    out = speakered_block_segments(segs, offset=100.0, speaker="说话人A")
+    assert [s.speaker for s in out] == ["说话人A", "说话人A"]
+    assert out[0].start == 100.0 and out[1].end == 104.0
+    assert out[0].text == "你好"
 
 
 def test_merges_consecutive_same_speaker():
