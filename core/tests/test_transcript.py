@@ -37,3 +37,24 @@ def test_roundtrip_dict():
 def test_plain_text_joins_without_speaker():
     t = Transcript(segments=[Segment(0, 1, "你好"), Segment(1, 2, "在吗")])
     assert t.plain_text() == "你好\n在吗"
+
+
+def test_to_plain_ts_timestamps_no_speaker_names():
+    t = Transcript(segments=[
+        Segment(0.0, 5.0, "大家好", speaker="说话人A"),
+        Segment(5.0, 9.0, "今天开会", speaker="说话人A"),
+        Segment(65.0, 70.0, "下一个议题", speaker="说话人B"),
+    ], speaker_names={"说话人A": "张三"})
+    out = t.to_plain_ts()
+    assert "张三" not in out and "说话人A" not in out  # 不带人名
+    assert out.startswith("[00:00]")
+    assert "[01:05]" in out  # 65s → 01:05
+
+
+def test_to_plain_ts_hours_prefix():
+    t = Transcript(segments=[Segment(3661.0, 3665.0, "很久以后")])
+    assert "[01:01:01]" in t.to_plain_ts()
+
+
+def test_to_plain_ts_empty():
+    assert Transcript(segments=[]).to_plain_ts() == ""
