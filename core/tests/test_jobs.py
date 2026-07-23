@@ -505,11 +505,11 @@ def test_rediarize_flips_status_synchronously():
     assert q.get("jf").status == "done"
 
 
-def test_rediarize_failure_marks_failed_and_clears_old_transcript():
-    """新契约:全量重跑语义下 rediarize 不再是"只重跑 diarize+align"的局部操作，而是
-    复位后完整走一遍 run_job；旧 transcript 已在复位时清空，diarize 失败与普通任务失败
-    走同一条异常处理路径——job 降级为 failed，旧稿不再可恢复（与 test_run_job_failure_
-    sets_error 的失败契约一致）。这是本任务明确要求的行为变化，不是遗留 bug。"""
+def test_rediarize_failure_restores_old_transcript_and_stays_done():
+    """安全网回归:全量重跑虽然会先复位 transcript/blocks 等字段，但复位前已在持锁段内
+    快照旧结果——重跑中途失败（diarize 抛异常）时，_run_rediarize_guarded 用快照恢复
+    job，回到 done 而不是把用户已完成的稿子跟着复位字段一起丢掉、job 也不该降级为
+    failed。这是对旧 `_run_rediarize` 安全网行为的补回。"""
     from transcribe_core.transcript import Transcript, Segment
 
     class BoomDiarize(InferenceBackend):
@@ -531,9 +531,11 @@ def test_rediarize_failure_marks_failed_and_clears_old_transcript():
             break
         time.sleep(0.02)
     job = q.get("jb")
-    assert job.status == "failed"                   # 全量重跑失败即普通失败，不再特殊恢复
-    assert job.transcript is None                    # 旧稿已在复位阶段清空，未被保留
-    assert job.error and "分人炸了" in job.error
+    assert job.status == "done" and job.progress == 1.0   # 回到 done，而非降级 failed
+    assert job.transcript is old                          # 旧稿原样恢复（快照对象）
+    assert job.transcript.segments[0].text == "你好"
+    assert job.transcript.speaker_names == {"说话人A": "张三"}
+    assert job.error and "分人炸了" in job.error and "已保留原结果" in job.error
 
 
 class _FakeBackend:

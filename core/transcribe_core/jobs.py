@@ -286,6 +286,9 @@ class JobQueue:
             if job_id in self._inflight:
                 return False
             self._inflight.add(job_id)
+            # 复位前先快照旧结果：重跑中途失败（diarize/transcribe 抛异常）时，
+            # 用户已完成的稿子不能跟着复位的字段一起丢——见 _run_rediarize_guarded。
+            snapshot = (job.transcript, job.blocks, job.total_chunks, job.chunks_done)
             job.num_speakers = n
             job.blocks = None
             job.transcript = None
@@ -296,8 +299,28 @@ class JobQueue:
             job.status = "running"
             job.progress = 0.0
             job.error = None
-        threading.Thread(target=self.run_job, args=(job, self._emit), daemon=True).start()
+        threading.Thread(target=self._run_rediarize_guarded,
+                          args=(job, snapshot, self._emit), daemon=True).start()
         return True
+
+    def _run_rediarize_guarded(self, job: Job, snapshot: tuple, on_progress: Callable[[Job], None]) -> None:
+        """rediarize 全量重跑的瘦包装：跑完 run_job 后，若失败则恢复重跑前快照，
+        让 job 回到 done 而不是把用户已有的稿子跟着复位的字段一起丢掉。
+        run_job 内部已处理 _infer_gate 获取/释放、异常兜底为 failed、finally 里
+        discard inflight——这里只负责失败后的补救，不重复管这两者。"""
+        self.run_job(job, on_progress)
+        if job.status == "failed":
+            # 重新分人失败：绝不能丢用户已有的稿子。恢复快照并回到 done，记非阻断错误。
+            old_transcript, old_blocks, old_total, old_done = snapshot
+            job.transcript = old_transcript
+            job.blocks = old_blocks
+            job.total_chunks = old_total
+            job.chunks_done = old_done
+            job.status = "done"
+            job.progress = 1.0
+            job.error = f"重新分人失败：{job.error}（已保留原结果）"
+            on_progress(job)
+            self._notify(job)
 
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
