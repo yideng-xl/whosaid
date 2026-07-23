@@ -185,28 +185,31 @@
     return PALETTE[h % PALETTE.length];
   }
 
-  // 人数框是否可编辑：分人进行中(running & progress≥0.85)锁定
+  // 人数框是否可编辑：镜像后端契约——done 恒可填；未 done 时分离已完成
+  // (total_chunks>0，发言块已生成)即锁定，分离进行中(total_chunks==0)才可改
   const editable = $derived(
-    !!detail && canEditSpeakerCount(detail.status, detail.progress)
+    !!detail && canEditSpeakerCount(detail.status, detail.total_chunks)
   );
   // done 态下，草稿人数与「上次分人所用值」不同才出现「重新分人」按钮
   const baselineCount = $derived(detail?.num_speakers != null ? String(detail.num_speakers) : "");
   const showRediarize = $derived(!!detail && detail.status === "done" && countDraft !== baselineCount);
 
-  // 两阶段状态（供顶部 StageSwitcher）：
-  // ①转文字——done 或 progress≥0.85（分人阶段代表转写早已完成）视为完成；
-  // running 且 progress<0.85 为进行中；其余（queued，以及未到 0.85 的 paused/failed）为待处理。
+  // 两阶段状态（供顶部 StageSwitcher）：管线已倒置为「先分人、后转文字」，
+  // 用 status/total_chunks 判定真实相位，不再依赖旧管线遗留的 progress≥0.85 魔法数。
+  // ①转文字——逐块转写发生在分人之后：done 视为完成；分离已完成(total_chunks>0)
+  // 且 running/paused（含重新分人期间）为进行中；其余（分离尚未完成前）待处理。
   const stage1State = $derived.by((): "active" | "done" | "pending" => {
     if (!detail) return "pending";
-    if (detail.status === "done" || detail.progress >= 0.85) return "done";
-    if (detail.status === "running" && detail.progress < 0.85) return "active";
+    if (detail.status === "done") return "done";
+    if ((detail.status === "running" || detail.status === "paused") && detail.total_chunks > 0) return "active";
     return "pending";
   });
-  // ②分人——仅 done 才算完成；running 且 progress≥0.85（含重新分人）为分离中；其余待处理。
+  // ②分人——先发生：done 或分离已完成(total_chunks>0)即视为完成；
+  // running 且发言块尚未生成(total_chunks==0)为分离中；其余待处理。
   const stage2State = $derived.by((): "active" | "done" | "pending" => {
     if (!detail) return "pending";
-    if (detail.status === "done") return "done";
-    if (detail.status === "running" && detail.progress >= 0.85) return "active";
+    if (detail.status === "done" || detail.total_chunks > 0) return "done";
+    if (detail.status === "running") return "active";
     return "pending";
   });
 
