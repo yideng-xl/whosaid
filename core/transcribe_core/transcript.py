@@ -59,6 +59,37 @@ class Transcript:
         """无说话人的纯文本预览（转写进行中用）。"""
         return "\n".join(s.text for s in self.segments)
 
+    def to_plain_ts(self) -> str:
+        """逐字稿导出：[MM:SS] 文本（≥1小时用 [HH:MM:SS]），不含人名。
+
+        以说话人变化为分段信号，相邻同一说话人的段合并成大段。
+        旧数据 speaker 全为 None 时合并为连续大段。
+        """
+        if not self.segments:
+            return ""
+
+        def stamp(sec: float) -> str:
+            """秒 → [MM:SS] 或 [HH:MM:SS]"""
+            total = int(sec)
+            h, rem = divmod(total, 3600)
+            m, s = divmod(rem, 60)
+            return f"[{h:02d}:{m:02d}:{s:02d}]" if h else f"[{m:02d}:{s:02d}]"
+
+        blocks: list[tuple[float, str]] = []  # (start_time, text)
+        prev_key = None
+
+        for seg in self.segments:
+            key = seg.speaker
+            # 如果说话人与上一段相同，则合并到上一段
+            if blocks and key == prev_key:
+                blocks[-1] = (blocks[-1][0], blocks[-1][1] + seg.text)
+            else:
+                # 说话人变化，开始新段
+                blocks.append((seg.start, seg.text))
+            prev_key = key
+
+        return "".join(f"{stamp(start)} {text}\n\n" for start, text in blocks)
+
     def to_dict(self) -> dict:
         return {
             "segments": [asdict(s) for s in self.segments],

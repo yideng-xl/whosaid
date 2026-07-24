@@ -42,8 +42,8 @@
   }
 
   function badgeFor(job: JobSummary) {
-    // 分人阶段（running 且进度进入 0.85+）显示「分人中」，避免与听写混淆
-    if (job.status === "running" && job.progress >= 0.85)
+    // 分人在流程最前，running 且进度尚未越过 0.15 即为分人阶段，显示「分人中」，避免与听写混淆
+    if (job.status === "running" && job.progress < 0.15)
       return { label: "分人中", cls: "running" };
     return statusOf(job.status);
   }
@@ -110,9 +110,9 @@
             {/if}
           </div>
           {#if job.status === "running" || job.status === "queued"}
-            {#if job.status === "running" && job.progress >= 0.85}
-              <!-- 分人阶段无细粒度进度、可能耗时数分钟：用不确定态流动条，
-                   避免进度条死停在 85% 让用户误以为卡死 -->
+            {#if job.status === "running" && job.progress < 0.15}
+              <!-- 分人阶段无细粒度进度、可能耗时数分钟，且处于低进度段（<0.15）：
+                   用不确定态流动条，避免进度条看起来像是刚起步就卡死 -->
               <div class="bar indeterminate"><div class="stripe"></div></div>
             {:else}
               <div class="bar"><div class="fill" style="width:{Math.round(job.progress * 100)}%"></div></div>

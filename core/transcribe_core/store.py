@@ -23,6 +23,7 @@ class JobStore:
             "total_chunks": job.total_chunks, "chunks_done": job.chunks_done,
             "created_at": job.created_at, "num_speakers": job.num_speakers,
             "transcript": job.transcript.to_dict() if job.transcript else None,
+            "blocks": job.blocks,
         }
         self._path(job.id).write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
 
@@ -45,5 +46,6 @@ class JobStore:
                             total_chunks=d.get("total_chunks", 0),
                             chunks_done=d.get("chunks_done", 0),
                             created_at=created_at,
-                            num_speakers=d.get("num_speakers")))
+                            num_speakers=d.get("num_speakers"),
+                            blocks=d.get("blocks")))
         return jobs

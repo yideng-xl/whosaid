@@ -1,4 +1,4 @@
-"""转写任务：串起 转写→分离→对齐→生成 Transcript，并推进度。"""
+"""转写任务：串起 分离(diarize-first)→精炼发言块→逐块单说话人转写→生成 Transcript，并推进度。"""
 from __future__ import annotations
 
 import itertools
@@ -9,9 +9,12 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from .backend import InferenceBackend, align
-from .chunking import plan_chunks, offset_segments
+from .backend import InferenceBackend
+from .blocks import refine_turns, relabel_blocks, speakered_block_segments
 from .transcript import Transcript
+
+# 说明：plan_chunks/offset_segments 不再被本文件引用（切块/偏移逻辑已进 blocks.py），
+# 两者定义仍保留在 chunking.py（test_chunking.py 仍直接测试），故此处不再导入。
 
 _ids = itertools.count(1)
 
@@ -32,6 +35,7 @@ class Job:
     chunks_done: int = 0
     created_at: float = 0.0   # 拖入/提交时刻（epoch 秒），供前端按时间分组倒序
     num_speakers: int | None = None  # 用户填的预计说话人数，传给 pyannote 约束分离（None=自动）
+    blocks: list[tuple[float, float, str]] | None = None   # refine_turns 精炼后的发言块，持久化供 resume 免重跑分离
 
 
 class JobQueue:
@@ -68,6 +72,9 @@ class JobQueue:
         # 在此之前 status 仍是 paused/failed，若不拦，闸门争用下连点两次 resume 会起两个线程
         # 把同一 job 跑两遍（重复 diarize、二次新建 Transcript 丢掉期间的改名）。持锁读写。
         self._inflight: set[str] = set()
+        # 仅供测试观察 rediarize 失败→恢复窗口（status==failed 但快照回填尚未开始）的钩子，
+        # 生产环境恒为 None、不生效。见 _run_rediarize_guarded 调用处。
+        self._test_before_restore: Callable[[Job], None] | None = None
 
     def _new_id(self) -> str:
         """跳过已存在 id（preload 历史 job 后，避免全局计数器从头产生碰撞）"""
@@ -148,7 +155,11 @@ class JobQueue:
         threading.Thread(target=self.run_job, args=(job, self._emit), daemon=True).start()
         return jid
 
-    def run_job(self, job: Job, on_progress: Callable[[Job], None]) -> None:
+    def run_job(self, job: Job, on_progress: Callable[[Job], None],
+                manage_inflight: bool = True) -> None:
+        """跑一个 job。manage_inflight=True（默认，submit/submit_async/resume 均用默认值）时，
+        本方法自己在 finally 里把 job.id 从 _inflight 摘除；传 False 时把 inflight 的摘除
+        权交还给调用方（_run_rediarize_guarded 用它独占 inflight 生命周期，见该方法注释）。"""
         try:
             with _infer_gate:  # 串行化推理段；暂停 return 即释放，CPU 真正空下来
                 try:
@@ -162,14 +173,27 @@ class JobQueue:
                     job.error = None   # 续跑成功后清掉上一轮的失败信息，避免 error 残留落盘/回传
                     on_progress(job); self._notify(job)
 
-                    # 首次进入：算总块数（累加 transcript 惰性初始化，见循环内注释）
-                    if job.total_chunks == 0:
-                        duration = self._duration(job.audio_path)
-                        job.total_chunks = len(plan_chunks(duration, self._chunk_sec)) or 1
+                    # ① 先整体分离（diarize-first），精炼成发言块。已算过则复用（resume 免重跑）
+                    if job.blocks is None:
+                        # 新分离会产生全新发言块，旧的 chunks_done（可能是旧管线 120s 块语义的
+                        # 断点）与旧部分 transcript 都作废——不复位会导致跨版本 resume 用陈旧起点
+                        # 跳过新块、旧残稿混接，产生静默损坏稿。
+                        job.chunks_done = 0
+                        job.transcript = None
+                        turns = backend.diarize(job.audio_path,
+                                                job.num_speakers or self.num_speakers)
+                        # relabel_blocks：把 diarize 原始标签 SPEAKER_00/01… 按首次出现顺序
+                        # 归一化为 说话人A/B…（Task5 退休 align 时漏带的归一化步骤，此处补回）
+                        # total_chunks 先于 blocks 赋值：避免 blocks 已置位但 total_chunks 仍是 0
+                        # 的一 tick 窗口，被前端读到出现 detail(0/0) 与 stage2State(分离中) 自打架的闪烁。
+                        _blocks = relabel_blocks(refine_turns(turns))
+                        job.total_chunks = len(_blocks) or 1
+                        job.blocks = _blocks
+                        job.progress = 0.15
+                        on_progress(job); self._notify(job)
 
-                    chunks = plan_chunks(self._duration(job.audio_path), self._chunk_sec)
-                    # 从断点续：只跑 chunks_done 及之后的块
-                    for index, start, dur in chunks[job.chunks_done:]:
+                    # ② 逐块切音频、单说话人转写（可暂停：块边界检查）
+                    for index in range(job.chunks_done, len(job.blocks)):
                         # 每次迭代都重新取暂停标志（不能在循环外缓存一次）：
                         # pause() 可能在本次 run_job 启动之后才创建/置位该 Event，
                         # 若在循环外只取一次，续跑线程里拿到的会是旧引用（甚至是 None），
@@ -179,7 +203,8 @@ class JobQueue:
                             job.status = "paused"
                             on_progress(job); self._notify(job)   # 存盘（on_change=store.save）
                             return
-                        wav = self._extract(job.audio_path, start, dur)
+                        bstart, bend, bspk = job.blocks[index]
+                        wav = self._extract(job.audio_path, bstart, bend - bstart)
                         try:
                             segs = backend.transcribe(wav, self.language, self.prompt)
                         finally:
@@ -192,32 +217,23 @@ class JobQueue:
                         # failed 状态 resume 续跑，不丢已转部分）。
                         if job.transcript is None:
                             job.transcript = Transcript(segments=[])
-                        job.transcript.segments.extend(offset_segments(segs, start))
+                        job.transcript.segments.extend(
+                            speakered_block_segments(segs, bstart, bspk))
                         job.chunks_done = index + 1
-                        job.progress = 0.85 * job.chunks_done / job.total_chunks
+                        job.progress = 0.15 + 0.85 * job.chunks_done / job.total_chunks
                         on_progress(job); self._notify(job)
 
-                    # 循环结束后再查一次暂停标志：单块/末块在转写「途中」被点暂停时，
-                    # 该块转完后循环直接结束、不再有下一次迭代去观察标志，若不在这里补检查，
-                    # 会直奔 diarize→done 令暂停对所有单块(<2min)音频与多块的末块失效。
+                    # 循环后补检查：末块/单块在转写途中被点暂停时，该块转完后循环直接结束、
+                    # 无下一次迭代观察标志；不在此补检查会直奔 done 令暂停失效。
                     pause_ev = self._pause.get(job.id)
                     if pause_ev is not None and pause_ev.is_set():
                         job.status = "paused"
                         on_progress(job); self._notify(job)
                         return
-                    # 空音频/零时长：无任何块转出，transcript 仍为 None。此时不能进 diarize/align
-                    # （align(None.segments) 会抛晦涩的 AttributeError），给一句人话错误。
+
+                    # 空音频/无发言块：diarize 没分出任何块，transcript 仍为 None。给一句人话错误。
                     if job.transcript is None:
                         raise RuntimeError("音频为空或无法读取时长")
-
-                    # 全部转完 → 整段分离（不可暂停）→ 对齐
-                    job.progress = 0.85
-                    on_progress(job)
-                    turns = backend.diarize(job.audio_path, job.num_speakers or self.num_speakers)
-                    job.progress = 0.95
-                    on_progress(job)
-                    labeled = align(job.transcript.segments, turns)
-                    job.transcript = Transcript(segments=labeled)
                     job.progress = 1.0
                     job.status = "done"
                     on_progress(job); self._notify(job)
@@ -228,13 +244,19 @@ class JobQueue:
         finally:
             # 无论 paused-return / done / failed / 异常，线程结束即摘除 in-flight 登记，
             # 让后续 resume 能再次续跑（与 _infer_gate 释放同处一个出口）。
-            with self._lock:
-                self._inflight.discard(job.id)
+            # manage_inflight=False（仅 _run_rediarize_guarded 传入）时不在此摘除：
+            # 失败路径下 guard 还要接着用快照改写 job，摘早了会让 resume 在恢复完成前
+            # 抢到守卫、和 guard 无锁并发改同一个 Job 对象（见该方法调用处注释）。
+            if manage_inflight:
+                with self._lock:
+                    self._inflight.discard(job.id)
 
     def pause(self, job_id: str) -> bool:
-        """请求暂停：仅对运行中且处于转写阶段(progress<0.85)有效。返回是否被接受。"""
+        """请求暂停：仅运行中、分离已完成、逐块转写循环未跑完时有效。"""
         job = self._jobs.get(job_id)
-        if job is None or job.status != "running" or job.progress >= 0.85:
+        if job is None or job.status != "running":
+            return False
+        if job.blocks is None or job.chunks_done >= job.total_chunks:
             return False
         self._pause.setdefault(job_id, threading.Event()).set()
         return True
@@ -259,71 +281,76 @@ class JobQueue:
 
     def set_num_speakers(self, job_id: str, n: int | None) -> bool:
         """分人前写入预计人数(供 diarize 约束)。仅在尚未分人时允许:
-        done 走 rediarize;正在分人(running & progress≥0.85)锁定;其余(queued/paused/
-        failed/running<0.85)可写。返回是否被接受。"""
+        done 走 rediarize;已分人(blocks已定)后锁定;其余(queued/paused/
+        failed/running 且 blocks 未定)可写。返回是否被接受。"""
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None or job.status == "done":
                 return False
-            if job.status == "running" and job.progress >= 0.85:
+            if job.blocks is not None:
                 return False
             job.num_speakers = n
         self._notify(job)   # 触发 store.save 持久化
         return True
 
     def rediarize(self, job_id: str, n: int | None) -> bool:
-        """已完成任务用新人数只重跑「拆分人声」(diarize+align),不重听。
-        要求 status==done 且有文字稿;in-flight 则幂等拒绝。返回是否被接受。"""
+        """已完成任务用新人数重新分人。分离优先(diarize-first)管线下，逐块转写的切块
+        边界本就由分离结果决定，改人数必然导致重切重转——不再是"只重跑 diarize+align"
+        的局部重跑，而是复位关键字段后走标准 run_job 全量重来一遍。
+        要求 status==done;in-flight 则幂等拒绝。返回是否被接受。"""
         with self._lock:
             job = self._jobs.get(job_id)
-            if job is None or job.status != "done" or job.transcript is None:
+            if job is None or job.status != "done":
                 return False
             if job_id in self._inflight:
                 return False
             self._inflight.add(job_id)
+            # 复位前先快照旧结果：重跑中途失败（diarize/transcribe 抛异常）时，
+            # 用户已完成的稿子不能跟着复位的字段一起丢——见 _run_rediarize_guarded。
+            snapshot = (job.transcript, job.blocks, job.total_chunks, job.chunks_done)
             job.num_speakers = n
+            job.blocks = None
+            job.transcript = None
+            job.chunks_done = 0
+            job.total_chunks = 0
             # 同步翻状态:让 POST 返回时即 running,避免前端重订阅 WS 读到旧 done 帧后
             # 关连接、界面卡在旧的分人结果(worker 可能阻塞在 _infer_gate 前迟迟未翻)。
             job.status = "running"
-            job.progress = 0.85
+            job.progress = 0.0
             job.error = None
-        threading.Thread(target=self._run_rediarize, args=(job, self._emit),
-                         daemon=True).start()
+        threading.Thread(target=self._run_rediarize_guarded,
+                          args=(job, snapshot, self._emit), daemon=True).start()
         return True
 
-    def _run_rediarize(self, job: Job, on_progress: Callable[[Job], None]) -> None:
-        """重跑分人:拿已存文字段 → diarize(新人数) → align(生成全新 说话人A/B,
-        旧真名随旧 transcript 丢弃)。走单并发闸门,与普通任务串行。"""
+    def _run_rediarize_guarded(self, job: Job, snapshot: tuple, on_progress: Callable[[Job], None]) -> None:
+        """rediarize 全量重跑的瘦包装：跑完 run_job 后，若失败则恢复重跑前快照，
+        让 job 回到 done 而不是把用户已有的稿子跟着复位的字段一起丢掉。
+
+        竞态根治：inflight 守卫的不变量是"一个线程对某 job 的所有写操作没做完之前，
+        job_id 必须一直留在 _inflight 里"（resume/rediarize 都靠 job_id not in
+        _inflight 判断能否起新线程）。旧写法里 run_job 一返回就在自己的 finally 里
+        discard inflight，而失败恢复逻辑在 run_job 返回之后才做——于是 status==failed
+        但 job_id 已不在 _inflight 的窗口里，resume() 能穿过守卫、另起一个 run_job
+        线程和这里的恢复逻辑无锁并发改写同一个 Job 对象。
+        根治法：run_job 传 manage_inflight=False，不让它自己 discard；改为本方法独占
+        inflight 整个生命周期——从 rediarize() 里 add，到这里 finally 里 discard 之间，
+        job_id 全程都在 _inflight，堵死这个窗口。"""
         try:
-            with _infer_gate:
-                try:
-                    backend = self.backend
-                    if self._backend_factory is not None and self._registry is not None:
-                        backend = self._backend_factory(
-                            self._registry.active_repo("transcribe"),
-                            self._registry.active_repo("diarize"),
-                        )
-                    job.status = "running"
-                    job.error = None
-                    job.progress = 0.85           # 进入分人阶段(phase=diarizing)
-                    on_progress(job); self._notify(job)
-                    segments = job.transcript.segments
-                    turns = backend.diarize(job.audio_path,
-                                            job.num_speakers or self.num_speakers)
-                    job.progress = 0.95
-                    on_progress(job)
-                    labeled = align(segments, turns)
-                    job.transcript = Transcript(segments=labeled)  # 新稿,真名清空
-                    job.progress = 1.0
-                    job.status = "done"
-                    on_progress(job); self._notify(job)
-                except Exception as e:
-                    # 重新分人失败:旧 transcript 完好,绝不能降级为 failed
-                    #(那会藏起完好稿子并放开删除按钮,可能致用户误删)。恢复 done,记非阻断错误。
-                    job.status = "done"
-                    job.progress = 1.0
-                    job.error = f"重新分人失败：{e}（已保留原结果）"
-                    on_progress(job); self._notify(job)
+            self.run_job(job, on_progress, manage_inflight=False)
+            if job.status == "failed":
+                # 重新分人失败：绝不能丢用户已有的稿子。恢复快照并回到 done，记非阻断错误。
+                if self._test_before_restore is not None:
+                    self._test_before_restore(job)   # 测试钩子：此刻处于 failed→恢复窗口
+                old_transcript, old_blocks, old_total, old_done = snapshot
+                job.transcript = old_transcript
+                job.blocks = old_blocks
+                job.total_chunks = old_total
+                job.chunks_done = old_done
+                job.status = "done"
+                job.progress = 1.0
+                job.error = f"重新分人失败：{job.error}（已保留原结果）"
+                on_progress(job)
+                self._notify(job)
         finally:
             with self._lock:
                 self._inflight.discard(job.id)

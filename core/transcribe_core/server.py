@@ -100,8 +100,8 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
                 speakers.append({"orig": orig, "name": j.transcript.display_speaker(seg)})
         if j.status in ("done", "failed", "paused", "queued"):
             phase = j.status
-        else:  # running
-            phase = "diarizing" if j.progress >= 0.85 else "transcribing"
+        else:  # running：diarize-first——分离(blocks)未定为 diarizing，已定则进入逐块转写
+            phase = "diarizing" if j.blocks is None else "transcribing"
         txt = ""
         if j.transcript is not None:
             txt = j.transcript.to_txt() if done else j.transcript.plain_text()
@@ -173,6 +173,8 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
             raise HTTPException(409, "转写未完成")
         if fmt == "srt":
             return j.transcript.to_srt()
+        if fmt == "plain":
+            return j.transcript.to_plain_ts()
         return j.transcript.to_txt()
 
     @app.get("/jobs/{job_id}/speaker_sample")

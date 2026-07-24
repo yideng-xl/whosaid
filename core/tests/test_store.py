@@ -42,3 +42,25 @@ def test_paused_job_roundtrip_keeps_paused_and_chunks(tmp_path):
     assert j.status == "paused"  # 暂停跨重启保留
     assert j.total_chunks == 5 and j.chunks_done == 2
     assert j.transcript.plain_text() == "半句"
+
+
+def test_store_roundtrips_blocks(tmp_path):
+    """blocks 落盘+读回：resume 免重跑分离依赖此字段跨重启存活。
+    JSON 会把 tuple 变 list，消费端（run_job）只做下标解包不依赖 tuple 身份，
+    故断言按读回的实际类型（list）比较，load 端无需转回 tuple。"""
+    store = JobStore(str(tmp_path))
+    store.save(Job(id="jobX", audio_path="/a.m4a", status="done", progress=1.0,
+                   transcript=None, error=None, blocks=[(0.0, 20.0, "说话人A")]))
+    loaded = {j.id: j for j in JobStore(str(tmp_path)).load_all()}
+    assert loaded["jobX"].blocks == [[0.0, 20.0, "说话人A"]]
+
+
+def test_store_old_job_without_blocks_loads_as_none(tmp_path):
+    import json
+    store = JobStore(str(tmp_path))  # 建好 data_dir/jobs/ 目录
+    (store.dir / "jobOld.json").write_text(json.dumps({
+        "id": "jobOld", "audio_path": "/a.m4a", "status": "done",
+        "progress": 1.0, "error": None, "transcript": None,
+    }), encoding="utf-8")
+    loaded = {j.id: j for j in JobStore(str(tmp_path)).load_all()}
+    assert loaded["jobOld"].blocks is None

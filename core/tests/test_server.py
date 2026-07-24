@@ -23,7 +23,8 @@ class FakeBackend(InferenceBackend):
     def transcribe(self, audio_path, language, initial_prompt):
         return [Segment(0, 2, "你好"), Segment(2, 4, "在吗")]
     def diarize(self, audio_path, num_speakers):
-        return [(0.0, 2.0, "SPEAKER_00"), (2.0, 4.0, "SPEAKER_01")]
+        # 各 3s（>= interj 默认 2.5s）：diarize-first 下两个人都不会被当作短插话折并
+        return [(0.0, 3.0, "SPEAKER_00"), (3.0, 6.0, "SPEAKER_01")]
 
 
 class FailingBackend(InferenceBackend):
@@ -32,8 +33,9 @@ class FailingBackend(InferenceBackend):
     def transcribe(self, audio_path, language, initial_prompt):
         raise RuntimeError("模型未下载")
     def diarize(self, audio_path, num_speakers):
-        # 转写已失败，diarize 不会被调用到
-        return []
+        # diarize-first：需给非空轮次才能让 transcribe 被调用到（从而暴露待测异常），
+        # 空轮次会在进入 transcribe 前就被判为「音频为空」的另一条错误路径。
+        return [(0.0, 5.0, "SPEAKER_00")]
 
 
 def make_client(tmp_path, backend=None):
@@ -52,6 +54,7 @@ def test_submit_and_fetch_job(tmp_path):
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
     job = _wait_done(c, jid)
     assert job["status"] == "done"
+    # diarize-first：relabel_blocks 把 diarize 原始标签按首次出现顺序归一化为 说话人A/B…
     assert "说话人A：你好" in job["txt"]
 
 
@@ -73,6 +76,16 @@ def test_rename_then_export(tmp_path):
     assert txt.startswith("张三：你好")
 
 
+def test_export_plain_returns_verbatim(tmp_path):
+    """export?fmt=plain 返回逐字稿纯文本（不带人名前缀），以 [00: 时间戳开头。"""
+    c = make_client(tmp_path)
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+    r = c.get(f"/jobs/{jid}/export", params={"fmt": "plain"})
+    assert r.status_code == 200
+    assert r.text.startswith("[00:")  # 逐字稿以时间戳开头
+
+
 def test_models_list_and_switch(tmp_path):
     c = make_client(tmp_path)
     models = c.get("/models").json()
@@ -87,6 +100,7 @@ def test_get_job_returns_speakers_with_orig_and_display(tmp_path):
     jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
     _wait_done(c, jid)
     # 改名前：speakers 用原始标签，name 等于原始标签
+    # diarize-first：relabel_blocks 把 diarize 原始标签归一化为 说话人A/B（即此处的"原始标签"）
     spk = c.get(f"/jobs/{jid}").json()["speakers"]
     assert {s["orig"] for s in spk} == {"说话人A", "说话人B"}
     assert all(s["orig"] == s["name"] for s in spk)
@@ -177,6 +191,39 @@ def test_get_job_includes_chunk_and_phase(tmp_path):
     d = c.get(f"/jobs/{jid}").json()
     assert "total_chunks" in d and "chunks_done" in d
     assert d["phase"] == "done"
+
+
+def test_get_job_phase_diarizing_when_running_and_blocks_unset(tmp_path):
+    """diarize-first：running 且 blocks 尚未定(分离未完成)时 phase 应为 diarizing，
+    不再依赖 progress 魔法数字判断相位。"""
+    from transcribe_core.jobs import Job, JobQueue
+    from transcribe_core.models import ModelRegistry
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: True, download_fn=lambda repo: None)
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda src, start, dur: src)
+    c = TestClient(create_app(q, reg))
+    jid = "job_diarizing"
+    q._jobs[jid] = Job(id=jid, audio_path="/x/a.m4a", status="running", progress=0.05,
+                        transcript=None, error=None)
+    assert c.get(f"/jobs/{jid}").json()["phase"] == "diarizing"
+
+
+def test_get_job_phase_transcribing_when_blocks_set_mid_run(tmp_path):
+    """diarize-first：running 且 blocks 已定(分离已完成，逐块转写循环未跑完)时 phase 应为
+    transcribing，即使 progress 远低于旧的 0.85 魔法数字。"""
+    from transcribe_core.jobs import Job, JobQueue
+    from transcribe_core.models import ModelRegistry
+    reg = ModelRegistry(str(tmp_path / "config.json"),
+                        is_downloaded_fn=lambda repo: True, download_fn=lambda repo: None)
+    q = JobQueue(FakeBackend(), duration_fn=lambda p: 1.0,
+                 extract_fn=lambda src, start, dur: src)
+    c = TestClient(create_app(q, reg))
+    jid = "job_transcribing"
+    q._jobs[jid] = Job(id=jid, audio_path="/x/a.m4a", status="running", progress=0.2,
+                        transcript=None, error=None, total_chunks=3, chunks_done=1,
+                        blocks=[(0.0, 1.0, "A"), (1.0, 2.0, "B"), (2.0, 3.0, "A")])
+    assert c.get(f"/jobs/{jid}").json()["phase"] == "transcribing"
 
 
 def test_speaker_sample_returns_audio(tmp_path):

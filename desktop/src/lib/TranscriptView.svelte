@@ -3,6 +3,7 @@
   import SpeakerRename from "./SpeakerRename.svelte";
   import StageSwitcher from "./StageSwitcher.svelte";
   import Icon from "./Icon.svelte";
+  import BlockProgress from "./BlockProgress.svelte";
   import type { createApi, JobDetail } from "./api";
   import { canEditSpeakerCount, isRenamed, parseCount } from "./jobState";
 
@@ -184,28 +185,31 @@
     return PALETTE[h % PALETTE.length];
   }
 
-  // 人数框是否可编辑：分人进行中(running & progress≥0.85)锁定
+  // 人数框是否可编辑：镜像后端契约——done 恒可填；未 done 时分离已完成
+  // (total_chunks>0，发言块已生成)即锁定，分离进行中(total_chunks==0)才可改
   const editable = $derived(
-    !!detail && canEditSpeakerCount(detail.status, detail.progress)
+    !!detail && canEditSpeakerCount(detail.status, detail.total_chunks)
   );
   // done 态下，草稿人数与「上次分人所用值」不同才出现「重新分人」按钮
   const baselineCount = $derived(detail?.num_speakers != null ? String(detail.num_speakers) : "");
   const showRediarize = $derived(!!detail && detail.status === "done" && countDraft !== baselineCount);
 
-  // 两阶段状态（供顶部 StageSwitcher）：
-  // ①转文字——done 或 progress≥0.85（分人阶段代表转写早已完成）视为完成；
-  // running 且 progress<0.85 为进行中；其余（queued，以及未到 0.85 的 paused/failed）为待处理。
+  // 两阶段状态（供顶部 StageSwitcher）：管线已倒置为「先分人、后转文字」，
+  // 用 status/total_chunks 判定真实相位，不再依赖旧管线遗留的 progress≥0.85 魔法数。
+  // ①转文字——逐块转写发生在分人之后：done 视为完成；分离已完成(total_chunks>0)
+  // 且 running/paused（含重新分人期间）为进行中；其余（分离尚未完成前）待处理。
   const stage1State = $derived.by((): "active" | "done" | "pending" => {
     if (!detail) return "pending";
-    if (detail.status === "done" || detail.progress >= 0.85) return "done";
-    if (detail.status === "running" && detail.progress < 0.85) return "active";
+    if (detail.status === "done") return "done";
+    if ((detail.status === "running" || detail.status === "paused") && detail.total_chunks > 0) return "active";
     return "pending";
   });
-  // ②分人——仅 done 才算完成；running 且 progress≥0.85（含重新分人）为分离中；其余待处理。
+  // ②分人——先发生：done 或分离已完成(total_chunks>0)即视为完成；
+  // running 且发言块尚未生成(total_chunks==0)为分离中；其余待处理。
   const stage2State = $derived.by((): "active" | "done" | "pending" => {
     if (!detail) return "pending";
-    if (detail.status === "done") return "done";
-    if (detail.status === "running" && detail.progress >= 0.85) return "active";
+    if (detail.status === "done" || detail.total_chunks > 0) return "done";
+    if (detail.status === "running") return "active";
     return "pending";
   });
 
@@ -243,11 +247,16 @@
     await load(); // 刷新稿子与说话人列表
   }
 
-  async function exportAs(fmt: "txt" | "srt") {
+  async function exportAs(fmt: "txt" | "srt" | "plain") {
     exporting = true;
     try {
       const text = await (await fetch(api.exportUrl(jobId, fmt))).text();
-      const defaultName = `${basename(audioPath)}.${fmt}`;
+      // plain（逐字稿）本质也是纯文本，落盘后缀仍用 .txt；文件名加「-逐字稿」
+      // 区分于「导出文字稿」的默认名，避免同一任务两种稿子建议同名覆盖。
+      const defaultName =
+        fmt === "plain"
+          ? `${basename(audioPath)}-逐字稿.txt`
+          : `${basename(audioPath)}.${fmt}`;
       const path = await invoke<string | null>("pick_save_path", { defaultName });
       if (path) await invoke("write_file", { path, content: text });
     } catch (e) {
@@ -285,8 +294,8 @@
         <input type="number" min="1" max="20" placeholder="自动"
                bind:value={countDraft} oninput={onCountInput} disabled={!editable} />
       </label>
-      {#if detail.status === "running" && detail.progress >= 0.85}
-        <span class="count-hint">重新分人中…</span>
+      {#if detail.status === "running" && detail.phase === "diarizing"}
+        <span class="count-hint">分人中…</span>
       {:else if showRediarize}
         <button class="rediarize" onclick={clickRediarize}><Icon name="refresh" size={13} /> 重新分人</button>
       {/if}
@@ -341,8 +350,9 @@
     <div class="panel">
       <div class="fname">{basename(audioPath)}</div>
       <div class="prog">
-        <span>{detail.status === "paused" ? "已暂停" : "转写中"} {detail.chunks_done}/{detail.total_chunks} 块</span>
-        <div class="bar"><div class="fill" style="width:{Math.round(detail.progress * 100)}%"></div></div>
+        <span>{detail.status === "paused" ? "已暂停" : "转写中"}</span>
+        <!-- 转写阶段按发言块数逐段推进，块状进度条比连续填充条更贴合「分段」语义 -->
+        <BlockProgress total={detail.total_chunks} done={detail.chunks_done} phase="transcribing" />
       </div>
       {#if transitioning === "pausing"}
         <button class="ctl" disabled>暂停中…</button>
@@ -367,6 +377,8 @@
           onclick={() => exportAs("txt")}>导出文字稿</button>
         <button disabled={exporting} title="带时间轴字幕(SRT)：适合配录像字幕、按时间定位"
           onclick={() => exportAs("srt")}>导出字幕稿</button>
+        <button disabled={exporting} title="逐字稿：带时间戳、不分说话人，适合快速通读/校对"
+          onclick={() => exportAs("plain")}>导出逐字稿</button>
       </div>
     </div>
 
@@ -527,11 +539,6 @@
     border-radius: 3px;
     background: var(--hairline);
     overflow: hidden;
-  }
-  .fill {
-    height: 100%;
-    background: var(--accent);
-    transition: width 0.3s ease;
   }
   /* 暂停/继续 = Apple 主按钮：实心 accent、白字、圆角 6、按压缩放 */
   .ctl {
