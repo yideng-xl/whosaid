@@ -17,9 +17,10 @@
 ```
 
 - 🔒 **本地私有**：转写与说话人分离全在本机推理，内容不上传云端
-- 🗣️ **分清谁在说**：不只是转文字，还区分 2–10 位说话人
-- 🇨🇳 **中文优先**：针对中文会议场景
-- 🔧 **模型可换**：转写模型（whisper 各尺寸）与说话人分离模型可下载/切换
+- 🗣️ **分清谁在说**：先做说话人分离、再按「发言块」逐块单说话人转写，每段归属**按构造正确**——不会把一段话里的多个说话人混成一个、也不会把少数说话人整段抹掉
+- 📄 **三种导出**：会话稿（说话人＋内容）、字幕稿（SRT）、逐字稿（带时间戳 `[MM:SS]`、不带人名，适合快速通读/校对）
+- 🇨🇳 **中文优先**：针对中文会议场景（转写默认 Belle 中文微调模型）
+- 🔧 **模型可换**：转写模型（whisper 各尺寸 / Belle 中文微调）与说话人分离引擎可下载/切换
 
 底层：[mlx-whisper](https://github.com/ml-explore/mlx-examples)（转写）+ [pyannote.audio](https://github.com/pyannote/pyannote-audio)（说话人分离），Apple Silicon 原生加速。
 
@@ -57,7 +58,8 @@ HF_ENDPOINT=https://hf-mirror.com venv/bin/python -m transcribe_core.server
 curl -X POST localhost:<PORT>/jobs \
   -H 'content-type: application/json' \
   -d '{"audio_path":"/abs/path/录音.m4a"}'
-# 轮询 GET /jobs/<id> 到 done，再 GET /jobs/<id>/export?fmt=txt 取稿
+# 轮询 GET /jobs/<id> 到 done，再取稿：
+#   fmt=txt 会话稿（说话人＋内容）   fmt=srt 字幕稿   fmt=plain 逐字稿（时间戳，无人名）
 ```
 
 更多接口与开发说明见 [`core/README.md`](core/README.md)。
@@ -66,14 +68,17 @@ curl -X POST localhost:<PORT>/jobs \
 
 ```
 Tauri 外壳(二期) ──HTTP/WS──► Python 服务(transcribe_core)
-                                  ├─ InferenceBackend 抽象  ← 可插拔
-                                  │    └─ MlxBackend（一期唯一实现）
-                                  ├─ 任务队列（单并发 + 进度推送）
+                                  ├─ 转写管线：先分离 → 精炼成「发言块」→ 逐块单说话人转写
+                                  │              （归属按构造正确，不再事后硬对齐）
+                                  ├─ InferenceBackend 抽象  ← 可插拔（转写后端）
+                                  │    └─ MlxBackend（mlx-whisper + Belle 中文微调）
+                                  ├─ diarize/ 分离引擎      ← 可插拔（pyannote，预留 sherpa 等）
+                                  ├─ 任务队列（单并发 + 进度推送 + 断点续跑）
                                   ├─ 模型注册表（下载/切换）
-                                  └─ 转写稿模型（说话人标注 / 导出 txt·srt）
+                                  └─ 转写稿模型（说话人标注 / 导出 txt·srt·逐字稿）
 ```
 
-推理全部藏在 `InferenceBackend` 接口后，扩展 Intel/Windows 只需新增一个后端实现，上层不改。
+转写后端藏在 `InferenceBackend` 接口后（扩展 Intel/Windows 只需新增实现），说话人分离藏在 `diarize/` 子包后（换引擎只需实现 `DiarizeEngine`），上层均不改。
 
 ## 许可
 
