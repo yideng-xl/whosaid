@@ -263,6 +263,55 @@ def test_resume_continues_from_chunks_done():
     assert job.chunks_done == 3
 
 
+def test_resume_cross_version_legacy_paused_resets_stale_progress():
+    """跨版本回归：旧管线（本分支之前）遗留的 paused job —— blocks=None、chunks_done 是
+    旧 120s 块语义的断点、transcript 是旧部分残稿。resume 走 `blocks is None` 分支重新
+    分离得到全新发言块，此时必须先复位 chunks_done/transcript 再进入逐块循环，否则会用
+    陈旧的 chunks_done 当新块循环起点（跳过前几个新块）、旧残稿不清直接 append（混合损坏），
+    产生静默损坏稿而非报错。"""
+    from transcribe_core.jobs import JobQueue, Job
+    from transcribe_core.transcript import Segment, Transcript
+
+    extract_starts = []
+
+    class LegacyBackend(InferenceBackend):
+        id = "legacy"
+        def transcribe(self, audio_path, language, initial_prompt):
+            return [Segment(0.0, 1.0, f"新块-{audio_path}")]
+        def diarize(self, audio_path, num_speakers):
+            # 精炼后应得 3 个交替发言块（各 120s，足够长不被 refine_turns 合并）
+            return [(0.0, 120.0, "S0"), (120.0, 240.0, "S1"), (240.0, 360.0, "S0")]
+
+    def fake_extract(src, start, dur):
+        extract_starts.append(start)
+        return f"/tmp/c_{start}.wav"
+
+    q = JobQueue(LegacyBackend(),
+                 duration_fn=lambda p: 360.0,
+                 extract_fn=fake_extract,
+                 chunk_sec=120.0)
+    # 模拟旧管线遗留态：blocks=None（新语义分离结果未持久化），chunks_done=2 是旧
+    # 120s 块语义下的断点，transcript 是旧两段残稿。
+    q.preload([Job(id="legacy1", audio_path="/x/old.m4a", status="paused", progress=0.5,
+                   transcript=Transcript(segments=[Segment(0, 1, "旧残段1"),
+                                                    Segment(120, 121, "旧残段2")]),
+                   error=None, total_chunks=0, chunks_done=2, blocks=None)])
+    assert q.resume("legacy1") is True
+    import time
+    for _ in range(50):
+        if q.get("legacy1").status == "done":
+            break
+        time.sleep(0.02)
+    job = q.get("legacy1")
+    assert job.status == "done"
+    texts = [s.text for s in job.transcript.segments]
+    assert "旧残段1" not in texts and "旧残段2" not in texts   # 旧残稿被清，未混接
+    assert extract_starts == [0.0, 120.0, 240.0]   # 从新块 0 开始，全部 3 个新块都转了（未被陈旧 chunks_done 跳过）
+    assert job.chunks_done == 3 and job.total_chunks == 3
+    speakers = {s.speaker for s in job.transcript.segments}
+    assert speakers == {"说话人A", "说话人B"}   # 说话人未丢
+
+
 def test_pause_during_single_last_chunk_is_honored():
     """BUG-1 回归：单块(<2min)音频在(唯一/末)块转写途中点暂停，转完后应停在 paused 而非 done。
     循环无下一次迭代观察标志，须靠循环后补检查捕获。

@@ -175,12 +175,20 @@ class JobQueue:
 
                     # ① 先整体分离（diarize-first），精炼成发言块。已算过则复用（resume 免重跑）
                     if job.blocks is None:
+                        # 新分离会产生全新发言块，旧的 chunks_done（可能是旧管线 120s 块语义的
+                        # 断点）与旧部分 transcript 都作废——不复位会导致跨版本 resume 用陈旧起点
+                        # 跳过新块、旧残稿混接，产生静默损坏稿。
+                        job.chunks_done = 0
+                        job.transcript = None
                         turns = backend.diarize(job.audio_path,
                                                 job.num_speakers or self.num_speakers)
                         # relabel_blocks：把 diarize 原始标签 SPEAKER_00/01… 按首次出现顺序
                         # 归一化为 说话人A/B…（Task5 退休 align 时漏带的归一化步骤，此处补回）
-                        job.blocks = relabel_blocks(refine_turns(turns))
-                        job.total_chunks = len(job.blocks) or 1
+                        # total_chunks 先于 blocks 赋值：避免 blocks 已置位但 total_chunks 仍是 0
+                        # 的一 tick 窗口，被前端读到出现 detail(0/0) 与 stage2State(分离中) 自打架的闪烁。
+                        _blocks = relabel_blocks(refine_turns(turns))
+                        job.total_chunks = len(_blocks) or 1
+                        job.blocks = _blocks
                         job.progress = 0.15
                         on_progress(job); self._notify(job)
 
