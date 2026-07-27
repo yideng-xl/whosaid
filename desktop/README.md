@@ -85,10 +85,22 @@ WHOSAID_PYTHON=$(pwd)/../core/venv/bin/python npm run tauri dev
   场景由 Python 内核自身的父进程看门狗兜底（`server.py` 检测父进程消失
   后自我了断），防止孤儿进程常驻。
 
-## 本期不含打包
+## Apple Silicon 打包
 
-当前仅支持 `npm run tauri dev` 跑开发模式，尚未提供可分发的 `.app`
-产物（DMG/签名/自动更新等）留待后续计划。
+先组装包内 Python、core 与 ffmpeg，再构建 `.app` 和 DMG：
+
+```bash
+./scripts/build-runtime.sh
+npm run tauri build
+```
+
+运行时产物位于 `src-tauri/python/`、`src-tauri/core/` 和
+`src-tauri/ffmpeg/`，均为本地构建产物，不进入 Git。模型权重不随安装包
+分发，首次运行时由用户填写 Hugging Face 配置后下载。
+
+当前安装包未做 Apple 签名与公证，首次打开需配合
+`scripts/首次打开.command` 去除隔离属性。正式发布、自动更新与 Windows
+打包留到后续阶段。
 
 ## 已知约束
 
