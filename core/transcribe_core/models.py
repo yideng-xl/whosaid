@@ -16,7 +16,7 @@ class ModelInfo:
     size_mb: int
 
 
-AVAILABLE: list[ModelInfo] = [
+MLX_AVAILABLE: list[ModelInfo] = [
     ModelInfo("whisper-tiny", "transcribe", "Whisper Tiny（最快/最糙）", "mlx-community/whisper-tiny-mlx", 75),
     ModelInfo("whisper-base", "transcribe", "Whisper Base", "mlx-community/whisper-base-mlx", 145),
     ModelInfo("whisper-small", "transcribe", "Whisper Small", "mlx-community/whisper-small-mlx", 484),
@@ -28,6 +28,27 @@ AVAILABLE: list[ModelInfo] = [
     ModelInfo("pyannote-community-1", "diarize", "pyannote 说话人分离 community-1", "pyannote/speaker-diarization-community-1", 90),
 ]
 
+FASTER_WHISPER_AVAILABLE: list[ModelInfo] = [
+    ModelInfo("whisper-tiny", "transcribe", "Whisper Tiny（最快/最糙）", "Systran/faster-whisper-tiny", 75),
+    ModelInfo("whisper-base", "transcribe", "Whisper Base", "Systran/faster-whisper-base", 145),
+    ModelInfo("whisper-small", "transcribe", "Whisper Small", "Systran/faster-whisper-small", 484),
+    ModelInfo("whisper-medium", "transcribe", "Whisper Medium", "Systran/faster-whisper-medium", 1530),
+    ModelInfo("whisper-large-v3", "transcribe", "Whisper Large v3（通用·最准/最慢）", "Systran/faster-whisper-large-v3", 3100),
+    ModelInfo("pyannote-community-1", "diarize", "pyannote 说话人分离 community-1", "pyannote/speaker-diarization-community-1", 90),
+]
+
+# 保持原有导入和 macOS 测试兼容；平台入口应使用 models_for_backend。
+AVAILABLE = MLX_AVAILABLE
+
+
+def models_for_backend(backend_id: str) -> list[ModelInfo]:
+    if backend_id == "mlx":
+        return MLX_AVAILABLE
+    if backend_id == "faster-whisper":
+        return FASTER_WHISPER_AVAILABLE
+    raise ValueError(f"不支持的推理后端：{backend_id}")
+
+
 _DEFAULT_ACTIVE = {"transcribe": "whisper-large-v3", "diarize": "pyannote-community-1"}
 
 
@@ -35,12 +56,14 @@ class ModelRegistry:
     def __init__(self, config_path: str,
                  is_downloaded_fn: Callable[[str], bool],
                  download_fn: Callable[[str], None],
-                 delete_fn: Callable[[str], None] | None = None):
+                 delete_fn: Callable[[str], None] | None = None,
+                 available: list[ModelInfo] | None = None):
         self.config_path = Path(config_path)
         self._is_downloaded = is_downloaded_fn
         self._download = download_fn
         self._delete = delete_fn  # 可选：不传时 delete() 直接报错，不静默跳过
-        self._by_id = {m.id: m for m in AVAILABLE}
+        self._available = available or AVAILABLE
+        self._by_id = {m.id: m for m in self._available}
         self._state = {
             "active": dict(_DEFAULT_ACTIVE), "downloaded": [],
             "hf_token": None, "hf_endpoint": None,
@@ -51,6 +74,11 @@ class ModelRegistry:
             self._state["downloaded"] = saved.get("downloaded", [])
             self._state["hf_token"] = saved.get("hf_token")
             self._state["hf_endpoint"] = saved.get("hf_endpoint")
+        # 同一配置目录从另一平台迁移过来时，当前模型可能不在本平台目录中
+        # （例如 Windows 首版不提供 Belle）；自动回到该类别默认模型。
+        for kind, default_id in _DEFAULT_ACTIVE.items():
+            if self._state["active"].get(kind) not in self._by_id:
+                self._state["active"][kind] = default_id
 
     def _save(self) -> None:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -80,7 +108,7 @@ class ModelRegistry:
 
     def list_models(self) -> list[dict]:
         out = []
-        for m in AVAILABLE:
+        for m in self._available:
             out.append({
                 "id": m.id, "kind": m.kind, "display_name": m.display_name,
                 "repo": m.repo, "size_mb": m.size_mb,

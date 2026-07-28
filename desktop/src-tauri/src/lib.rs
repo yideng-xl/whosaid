@@ -52,17 +52,42 @@ fn core_root(resource_dir: Option<PathBuf>) -> PathBuf {
     })
 }
 
+fn python_relative_path(windows: bool) -> PathBuf {
+    if windows {
+        PathBuf::from("python").join("python.exe")
+    } else {
+        PathBuf::from("python").join("bin").join("python3")
+    }
+}
+
+fn dev_python_relative_path(windows: bool) -> PathBuf {
+    if windows {
+        PathBuf::from("venv").join("Scripts").join("python.exe")
+    } else {
+        PathBuf::from("venv").join("bin").join("python")
+    }
+}
+
+fn ffmpeg_binary_names(windows: bool) -> (&'static str, &'static str) {
+    if windows {
+        ("ffmpeg.exe", "ffprobe.exe")
+    } else {
+        ("ffmpeg", "ffprobe")
+    }
+}
+
 /// python 解释器三态解析，语义与 core_root 对称：
 /// ① WHOSAID_PYTHON 环境变量
-/// ② 打包态：resource_dir/python/bin/python3（Task 2 的 build-runtime.sh 组装的可重定位
-///    CPython，仅当该文件确实存在才采用）
-/// ③ dev 相对路径：core_root 的 dev 分支下的 venv/bin/python
+/// ② 打包态：macOS 为 resource_dir/python/bin/python3，Windows 为
+///    resource_dir/python/python.exe
+/// ③ dev 相对路径：macOS 为 venv/bin/python，Windows 为 venv/Scripts/python.exe
 fn dev_python(resource_dir: Option<PathBuf>) -> String {
     let env_override = std::env::var("WHOSAID_PYTHON").ok().map(PathBuf::from);
     let candidate = resource_dir
         .clone()
-        .map(|rd| rd.join("python").join("bin").join("python3"));
-    let dev_fallback = core_root(resource_dir).join("venv/bin/python");
+        .map(|rd| rd.join(python_relative_path(cfg!(target_os = "windows"))));
+    let dev_fallback =
+        core_root(resource_dir).join(dev_python_relative_path(cfg!(target_os = "windows")));
     pick_path(env_override, candidate, dev_fallback, |p| p.is_file())
         .to_string_lossy()
         .into_owned()
@@ -73,19 +98,12 @@ fn dev_python(resource_dir: Option<PathBuf>) -> String {
 /// dev 态资源不存在 → None → 不动 PATH，走系统 brew ffmpeg。
 fn ffmpeg_dir(resource_dir: Option<PathBuf>) -> Option<String> {
     let dir = resource_dir?.join("ffmpeg");
-    if dir.join("ffmpeg").is_file() && dir.join("ffprobe").is_file() {
+    let (ffmpeg, ffprobe) = ffmpeg_binary_names(cfg!(target_os = "windows"));
+    if dir.join(ffmpeg).is_file() && dir.join(ffprobe).is_file() {
         Some(dir.to_string_lossy().into_owned())
     } else {
         None
     }
-}
-
-/// 数据目录：~/Library/Application Support/whosaid（内核在此落 config.json 与持久化数据）。
-fn data_dir() -> String {
-    let mut base = std::env::var("HOME").unwrap_or_default();
-    base.push_str("/Library/Application Support/whosaid");
-    std::fs::create_dir_all(&base).ok();
-    base
 }
 
 #[tauri::command]
@@ -127,10 +145,16 @@ pub fn run() {
             // python/core（Task 2 的构建脚本没跑过），resolve_* 里的 exists 判定会自然落回 dev 分支。
             let resource_dir = app.path().resource_dir().ok();
             let python = dev_python(resource_dir.clone());
-            let cwd = data_dir();
+            // 由 Tauri 统一解析平台数据目录：
+            // macOS 为 ~/Library/Application Support，Windows 为 %APPDATA%。
+            let data_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&data_dir)?;
+            let cwd = data_dir.to_string_lossy().into_owned();
             // transcribe_core 未 pip 安装进 venv，只能从 core 根目录导入；
             // 故 cwd 用数据目录（config.json/持久化落此），PYTHONPATH 指向 core 根让 import 生效
-            let pythonpath = core_root(resource_dir.clone()).to_string_lossy().into_owned();
+            let pythonpath = core_root(resource_dir.clone())
+                .to_string_lossy()
+                .into_owned();
             let ffmpeg = ffmpeg_dir(resource_dir);
             match sidecar::spawn_service(&python, &cwd, &pythonpath, ffmpeg.as_deref()) {
                 Ok((child, port)) => {
@@ -228,6 +252,36 @@ mod path_tests {
     #[test]
     fn ffmpeg_dir_none_when_no_resource_dir() {
         assert_eq!(ffmpeg_dir(None), None);
+    }
+
+    #[test]
+    fn packaged_python_path_is_platform_specific() {
+        assert_eq!(
+            python_relative_path(false),
+            PathBuf::from("python/bin/python3")
+        );
+        assert_eq!(
+            python_relative_path(true),
+            PathBuf::from("python").join("python.exe")
+        );
+    }
+
+    #[test]
+    fn dev_python_path_is_platform_specific() {
+        assert_eq!(
+            dev_python_relative_path(false),
+            PathBuf::from("venv/bin/python")
+        );
+        assert_eq!(
+            dev_python_relative_path(true),
+            PathBuf::from("venv").join("Scripts").join("python.exe")
+        );
+    }
+
+    #[test]
+    fn ffmpeg_names_are_platform_specific() {
+        assert_eq!(ffmpeg_binary_names(false), ("ffmpeg", "ffprobe"));
+        assert_eq!(ffmpeg_binary_names(true), ("ffmpeg.exe", "ffprobe.exe"));
     }
 
     #[test]

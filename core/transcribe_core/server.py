@@ -301,12 +301,15 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
     return app
 
 
-def main() -> None:  # 生产入口：注入真实 MlxBackend，随机端口，端口号打到 stdout 供外壳读取
+def main() -> None:  # 生产入口：按平台注入推理后端，随机端口，端口号打到 stdout 供外壳读取
     import os
+    import platform
     import socket
+    import sys
     import uvicorn
 
-    from .mlx_backend import MlxBackend
+    from .backend_selection import choose_backend_id, create_backend
+    from .models import models_for_backend
     from .store import JobStore
     from huggingface_hub import try_to_load_from_cache  # 判断模型是否已在本地缓存
 
@@ -335,7 +338,18 @@ def main() -> None:  # 生产入口：注入真实 MlxBackend，随机端口，�
         if cache_dir.is_dir():
             shutil.rmtree(cache_dir)
 
-    registry = ModelRegistry("config.json", is_downloaded, download, delete)
+    backend_id = choose_backend_id(
+        sys.platform,
+        platform.machine(),
+        os.environ.get("WHOSAID_BACKEND"),
+    )
+    registry = ModelRegistry(
+        "config.json",
+        is_downloaded,
+        download,
+        delete,
+        available=models_for_backend(backend_id),
+    )
     # 应用重启后自动把上次保存的 token/镜像地址重新注入 env（/settings/hf 只在用户当次
     # 会话主动保存时注入，重启后要靠这里补一次，否则重启后 diarize()/download() 又拿不到）
     _saved = registry.get_settings()
@@ -347,7 +361,9 @@ def main() -> None:  # 生产入口：注入真实 MlxBackend，随机端口，�
     # 注入 backend_factory + registry：每个任务开跑前按"当前启用模型"现构后端，
     # 使 /models/active 切换的模型能在下一个任务真正生效（而非固定在启动时的 large-v3）
     queue = JobQueue(
-        backend_factory=lambda whisper_repo, diarize_repo: MlxBackend(whisper_repo, diarize_repo),
+        backend_factory=lambda whisper_repo, diarize_repo: create_backend(
+            backend_id, whisper_repo, diarize_repo
+        ),
         registry=registry,
         on_change=store.save,
     )

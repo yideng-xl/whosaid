@@ -1,0 +1,112 @@
+name: Package Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-windows
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Build Windows x64 installer
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v5
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: 配置 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装前端依赖
+        working-directory: desktop
+        run: npm ci
+
+      - name: 组装 Windows 自包含运行时
+        shell: pwsh
+        run: desktop/scripts/build-runtime-windows.ps1
+
+      - name: 验证包内依赖与平台选择
+        shell: pwsh
+        env:
+          PYTHONPATH: ${{ github.workspace }}\desktop\src-tauri\core
+        run: |
+          $Python = "desktop/src-tauri/python/python.exe"
+          & $Python -c "import fastapi, faster_whisper, pyannote.audio; print('bundled imports: ok')"
+          & $Python -c "from transcribe_core.backend_selection import choose_backend_id; assert choose_backend_id('win32', 'AMD64', None) == 'faster-whisper'"
+          & "desktop/src-tauri/ffmpeg/ffmpeg.exe" -version
+          & "desktop/src-tauri/ffmpeg/ffprobe.exe" -version
+
+      - name: 后端测试
+        shell: pwsh
+        env:
+          PYTHONPATH: ${{ github.workspace }}\core
+        run: >-
+          desktop/src-tauri/python/python.exe -m pytest
+          core/tests -q -m "not slow"
+
+      - name: 前端测试
+        working-directory: desktop
+        run: npm test
+
+      - name: Svelte 检查
+        working-directory: desktop
+        run: npm run check
+
+      - name: Rust 测试
+        working-directory: desktop/src-tauri
+        run: cargo test
+
+      - name: 清理 Rust 测试产物
+        working-directory: desktop/src-tauri
+        run: cargo clean
+
+      - name: 构建 NSIS 安装包
+        working-directory: desktop
+        run: npm run tauri -- build --ci --bundles nsis
+
+      - name: 检查并整理安装包
+        id: installer
+        shell: pwsh
+        run: |
+          $Installers = @(Get-ChildItem "desktop/src-tauri/target/release/bundle/nsis" -File -Filter "*-setup.exe")
+          if ($Installers.Count -ne 1) {
+            Get-ChildItem "desktop/src-tauri/target/release/bundle" -File -Recurse
+            throw "应生成一个 NSIS 安装包，实际为 $($Installers.Count) 个"
+          }
+          $Installer = $Installers[0]
+          if ($Installer.Length -lt 100MB) {
+            throw "安装包体积异常：$($Installer.Length) bytes"
+          }
+          $Hash = (Get-FileHash $Installer.FullName -Algorithm SHA256).Hash.ToLower()
+          $OutDir = Join-Path $env:RUNNER_TEMP "whosaid-windows"
+          New-Item -ItemType Directory -Path $OutDir | Out-Null
+          $Version = (Get-Content "desktop/src-tauri/tauri.conf.json" | ConvertFrom-Json).version
+          $OutName = "whosaid_${Version}_windows_x64_setup.exe"
+          Copy-Item $Installer.FullName (Join-Path $OutDir $OutName)
+          "$Hash  $OutName" | Set-Content (Join-Path $OutDir "SHA256SUMS.txt") -Encoding ascii
+          "artifact_dir=$OutDir" >> $env:GITHUB_OUTPUT
+          Write-Host "installer=$OutName"
+          Write-Host "size=$($Installer.Length)"
+          Write-Host "sha256=$Hash"
+
+      - name: 上传 Windows 安装包
+        uses: actions/upload-artifact@v7
+        with:
+          name: whosaid-windows-x64
+          path: ${{ steps.installer.outputs.artifact_dir }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

@@ -59,8 +59,13 @@ pub fn spawn_service_with_timeout(
         // 镜像地址不硬编码，交给用户在「模型管理」页配置（/settings/hf）。
         .stdout(Stdio::piped());
     if let Some(extra) = extra_path {
-        let base = std::env::var("PATH").unwrap_or_default();
-        cmd.env("PATH", format!("{extra}:{base}"));
+        let mut paths = vec![std::path::PathBuf::from(extra)];
+        if let Some(base) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&base));
+        }
+        let joined = std::env::join_paths(paths)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        cmd.env("PATH", joined);
     }
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("stdout piped");
@@ -113,6 +118,7 @@ mod tests {
         assert_eq!(parse_port("PORT=abc"), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn spawn_times_out_when_no_port() {
         // sleep 5 秒且不打印 PORT 的假服务：用极短超时应返回 Err

@@ -1,5 +1,5 @@
 # tests/test_models.py
-from transcribe_core.models import ModelRegistry, AVAILABLE
+from transcribe_core.models import ModelRegistry, AVAILABLE, models_for_backend
 
 
 def test_defaults_and_active(tmp_path):
@@ -59,6 +59,19 @@ def test_available_has_transcribe_and_one_pyannote():
     assert kinds.count("diarize") == 1
     ids = {m.id for m in AVAILABLE}
     assert {"belle-v3-zh-punct", "belle-v3-turbo-zh"} <= ids  # 中文微调已登记
+
+
+def test_faster_whisper_catalog_uses_converted_models_and_hides_belle():
+    models = models_for_backend("faster-whisper")
+    ids = {m.id for m in models}
+    repos = {m.id: m.repo for m in models}
+
+    assert "whisper-small" in ids
+    assert "belle-v3-zh-punct" not in ids
+    assert "belle-v3-turbo-zh" not in ids
+    assert repos["whisper-small"] == "Systran/faster-whisper-small"
+    assert repos["whisper-large-v3"] == "Systran/faster-whisper-large-v3"
+    assert "pyannote-community-1" in ids
 
 
 def test_active_repo_returns_current_active_models_repo(tmp_path):

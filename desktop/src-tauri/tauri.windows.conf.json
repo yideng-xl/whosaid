@@ -1,0 +1,24 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "whosaid",
+        "width": 960,
+        "height": 680,
+        "dragDropEnabled": true,
+        "transparent": false
+      }
+    ],
+    "macOSPrivateApi": false
+  },
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
+  }
+}

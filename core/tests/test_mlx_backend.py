@@ -54,6 +54,6 @@ def test_hf_config_to_mlx_dims_translates_belle_config():
         "n_text_head": 20, "n_text_layer": 32,
     }
     # 结果只含 ModelDimensions 认的字段，绝无 activation_dropout 之类
-    from mlx_whisper import whisper
+    whisper = pytest.importorskip("mlx_whisper.whisper")
     import dataclasses
     assert set(dims) == {f.name for f in dataclasses.fields(whisper.ModelDimensions)}
