@@ -58,12 +58,19 @@ jobs:
       - name: 验证安装目录并启动包内服务
         shell: pwsh
         run: |
-          $AppExe = Get-ChildItem $env:LOCALAPPDATA -File -Recurse -Filter "whosaid.exe" -ErrorAction SilentlyContinue |
+          $ServerPy = Get-ChildItem $env:LOCALAPPDATA -File -Recurse -Filter "server.py" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like "*\core\transcribe_core\server.py" } |
+            Select-Object -First 1
+          if ($null -eq $ServerPy) {
+            throw "安装后未在 LOCALAPPDATA 找到 core/transcribe_core/server.py"
+          }
+          $InstallDir = $ServerPy.Directory.Parent.Parent.FullName
+          $AppExe = Get-ChildItem $InstallDir -File -Filter "*.exe" |
+            Where-Object { $_.Name -notin @("uninstall.exe", "ffmpeg.exe", "ffprobe.exe", "python.exe") } |
             Select-Object -First 1
           if ($null -eq $AppExe) {
-            throw "安装后未在 LOCALAPPDATA 找到 whosaid.exe"
+            throw "安装目录未找到桌面主程序：$InstallDir"
           }
-          $InstallDir = $AppExe.Directory.FullName
           $Python = Join-Path $InstallDir "python/python.exe"
           $CoreDir = Join-Path $InstallDir "core"
           $FfmpegDir = Join-Path $InstallDir "ffmpeg"
