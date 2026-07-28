@@ -1,0 +1,124 @@
+name: Smoke Windows Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 产生 whosaid-windows-x64 Artifact 的 Package Windows Run ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  smoke:
+    name: Install and start bundled service
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 下载待验收安装包
+        uses: actions/download-artifact@v7
+        with:
+          name: whosaid-windows-x64
+          path: ${{ runner.temp }}\whosaid-installer
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.run_id }}
+
+      - name: 校验安装包哈希
+        shell: pwsh
+        run: |
+          $Dir = Join-Path $env:RUNNER_TEMP "whosaid-installer"
+          $Installer = @(Get-ChildItem $Dir -File -Filter "*_setup.exe")
+          if ($Installer.Count -ne 1) {
+            throw "应下载一个安装包，实际为 $($Installer.Count) 个"
+          }
+          $ExpectedLine = Get-Content (Join-Path $Dir "SHA256SUMS.txt")
+          $Expected = ($ExpectedLine -split "\s+")[0]
+          $Actual = (Get-FileHash $Installer[0].FullName -Algorithm SHA256).Hash.ToLower()
+          if ($Actual -ne $Expected) {
+            throw "安装包哈希不一致：expected=$Expected actual=$Actual"
+          }
+          Write-Host "installer=$($Installer[0].Name)"
+          Write-Host "sha256=$Actual"
+
+      - name: 静默安装
+        shell: pwsh
+        run: |
+          $Installer = Get-ChildItem (Join-Path $env:RUNNER_TEMP "whosaid-installer") -File -Filter "*_setup.exe" |
+            Select-Object -First 1
+          $Process = Start-Process -FilePath $Installer.FullName -ArgumentList "/S" -Wait -PassThru
+          if ($Process.ExitCode -ne 0) {
+            throw "NSIS 静默安装失败：exit=$($Process.ExitCode)"
+          }
+
+      - name: 验证安装目录并启动包内服务
+        shell: pwsh
+        run: |
+          $AppExe = Get-ChildItem $env:LOCALAPPDATA -File -Recurse -Filter "whosaid.exe" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($null -eq $AppExe) {
+            throw "安装后未在 LOCALAPPDATA 找到 whosaid.exe"
+          }
+          $InstallDir = $AppExe.Directory.FullName
+          $Python = Join-Path $InstallDir "python/python.exe"
+          $CoreDir = Join-Path $InstallDir "core"
+          $FfmpegDir = Join-Path $InstallDir "ffmpeg"
+          foreach ($Required in @(
+            $Python,
+            (Join-Path $CoreDir "transcribe_core/server.py"),
+            (Join-Path $FfmpegDir "ffmpeg.exe"),
+            (Join-Path $FfmpegDir "ffprobe.exe")
+          )) {
+            if (-not (Test-Path $Required -PathType Leaf)) {
+              throw "安装目录缺少资源：$Required"
+            }
+          }
+
+          $env:PYTHONPATH = $CoreDir
+          $env:WHOSAID_BACKEND = "faster-whisper"
+          $env:WHOSAID_DATA_DIR = Join-Path $env:RUNNER_TEMP "whosaid-data"
+          $env:PATH = "$FfmpegDir;$env:PATH"
+          New-Item -ItemType Directory -Path $env:WHOSAID_DATA_DIR | Out-Null
+
+          & $Python -c "import fastapi, faster_whisper, pyannote.audio; print('installed imports: ok')"
+          $Stdout = Join-Path $env:RUNNER_TEMP "whosaid-service.stdout.log"
+          $Stderr = Join-Path $env:RUNNER_TEMP "whosaid-service.stderr.log"
+          $Service = Start-Process -FilePath $Python `
+            -ArgumentList "-m", "transcribe_core.server" `
+            -WorkingDirectory $env:WHOSAID_DATA_DIR `
+            -RedirectStandardOutput $Stdout `
+            -RedirectStandardError $Stderr `
+            -PassThru
+          try {
+            $PortLine = $null
+            for ($Attempt = 0; $Attempt -lt 60; $Attempt++) {
+              Start-Sleep -Milliseconds 500
+              if (Test-Path $Stdout) {
+                $PortLine = Get-Content $Stdout |
+                  Where-Object { $_ -match "^PORT=\d+$" } |
+                  Select-Object -First 1
+              }
+              if ($null -ne $PortLine) {
+                break
+              }
+              if ($Service.HasExited) {
+                break
+              }
+            }
+            if ($null -eq $PortLine) {
+              if (Test-Path $Stdout) { Get-Content $Stdout }
+              if (Test-Path $Stderr) { Get-Content $Stderr }
+              throw "安装后的 Python 服务未在 30 秒内启动"
+            }
+            Write-Host "app=$($AppExe.FullName)"
+            Write-Host "service=$PortLine"
+          }
+          finally {
+            if (-not $Service.HasExited) {
+              Stop-Process -Id $Service.Id -Force
+            }
+          }
