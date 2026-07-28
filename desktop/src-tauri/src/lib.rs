@@ -76,6 +76,20 @@ fn ffmpeg_binary_names(windows: bool) -> (&'static str, &'static str) {
     }
 }
 
+fn resolve_data_dir(app_data_dir: PathBuf, home_dir: Option<PathBuf>, macos: bool) -> PathBuf {
+    // v0.1.0 已把 macOS 数据写到这个历史目录；继续沿用，避免升级后任务和配置
+    // 看起来“消失”。Windows 首版没有历史包，直接使用 Tauri 标准应用数据目录。
+    if macos {
+        if let Some(home) = home_dir {
+            return home
+                .join("Library")
+                .join("Application Support")
+                .join("whosaid");
+        }
+    }
+    app_data_dir
+}
+
 /// python 解释器三态解析，语义与 core_root 对称：
 /// ① WHOSAID_PYTHON 环境变量
 /// ② 打包态：macOS 为 resource_dir/python/bin/python3，Windows 为
@@ -145,9 +159,9 @@ pub fn run() {
             // python/core（Task 2 的构建脚本没跑过），resolve_* 里的 exists 判定会自然落回 dev 分支。
             let resource_dir = app.path().resource_dir().ok();
             let python = dev_python(resource_dir.clone());
-            // 由 Tauri 统一解析平台数据目录：
-            // macOS 为 ~/Library/Application Support，Windows 为 %APPDATA%。
-            let data_dir = app.path().app_data_dir()?;
+            let app_data_dir = app.path().app_data_dir()?;
+            let home_dir = std::env::var_os("HOME").map(PathBuf::from);
+            let data_dir = resolve_data_dir(app_data_dir, home_dir, cfg!(target_os = "macos"));
             std::fs::create_dir_all(&data_dir)?;
             let cwd = data_dir.to_string_lossy().into_owned();
             // transcribe_core 未 pip 安装进 venv，只能从 core 根目录导入；
@@ -282,6 +296,32 @@ mod path_tests {
     fn ffmpeg_names_are_platform_specific() {
         assert_eq!(ffmpeg_binary_names(false), ("ffmpeg", "ffprobe"));
         assert_eq!(ffmpeg_binary_names(true), ("ffmpeg.exe", "ffprobe.exe"));
+    }
+
+    #[test]
+    fn macos_keeps_legacy_data_directory() {
+        let got = resolve_data_dir(
+            PathBuf::from("/new/com.yideng.whosaid"),
+            Some(PathBuf::from("/Users/test")),
+            true,
+        );
+        assert_eq!(
+            got,
+            PathBuf::from("/Users/test/Library/Application Support/whosaid")
+        );
+    }
+
+    #[test]
+    fn windows_uses_tauri_app_data_directory() {
+        let got = resolve_data_dir(
+            PathBuf::from(r"C:\Users\test\AppData\Roaming\com.yideng.whosaid"),
+            None,
+            false,
+        );
+        assert_eq!(
+            got,
+            PathBuf::from(r"C:\Users\test\AppData\Roaming\com.yideng.whosaid")
+        );
     }
 
     #[test]
