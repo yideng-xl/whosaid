@@ -87,3 +87,16 @@ Release 公开，并用它发布 `v0.1.0`。
 - Release 有 DMG、首次打开压缩包、SHA256SUMS 三个附件。
 - DMG 由本次 GitHub 工作流从当前源码构建。
 - 本地已有的三份未跟踪设计/计划文档未被误提交。
+
+## 实施结果
+
+2026-07-28 已完成：
+
+- 工作流运行成功：
+  <https://github.com/yideng-xl/whosaid/actions/runs/30325324108>
+- `v0.1.0` 已公开发布：
+  <https://github.com/yideng-xl/whosaid/releases/tag/v0.1.0>
+- Release 包含 DMG、首次打开压缩包和 `SHA256SUMS.txt`。
+- Tag 指向工作流提交 `99f690d3ed53a5aab5d87f3b2f1b8df56447e66c`。
+- 云端 DMG SHA-256：
+  `6957145f1f4c0df91b2ea32c549a1f0968eae84ecbb803324df4cc0eb416d6d4`。

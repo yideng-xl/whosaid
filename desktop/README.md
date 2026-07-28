@@ -99,8 +99,9 @@ npm run tauri build
 分发，首次运行时由用户填写 Hugging Face 配置后下载。
 
 当前安装包未做 Apple 签名与公证，首次打开需配合
-`scripts/首次打开.command` 去除隔离属性。正式发布、自动更新与 Windows
-打包留到后续阶段。
+`scripts/首次打开.command` 去除隔离属性。Apple Silicon `v0.1.0` 已通过
+GitHub Release 发布；Apple 正式签名、公证、自动更新与 Windows 打包留到
+后续阶段。
 
 ## 已知约束
 
