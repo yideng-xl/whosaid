@@ -50,6 +50,9 @@ pub fn spawn_service_with_timeout(
         .current_dir(cwd)
         .env("PYTHONPATH", pythonpath)
         .env("WHOSAID_DATA_DIR", cwd)
+        // 分发态 Python 位于已签名的 .app 内。禁止运行时写 __pycache__/*.pyc，
+        // 否则首次启动就会修改包内容，破坏 macOS 的资源封印与签名完整性。
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         // 刻意不注入 HF_HOME：模型缓存走 huggingface_hub 默认的 ~/.cache/huggingface。
         // 曾把它改指到 App 数据目录下的 hf-cache，结果是本机/同事机上已有的几 GB 模型
         // 全部「看不见」要重下，且换应用目录就再丢一次。默认缓存与其他 HF 工具共享、
@@ -131,5 +134,24 @@ mod tests {
             &["2"],
         );
         assert!(r.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_python_cannot_write_bytecode_into_signed_app() {
+        let (mut child, port) = spawn_service_with_timeout(
+            "/bin/sh",
+            ".",
+            ".",
+            None,
+            Duration::from_secs(2),
+            &[
+                "-c",
+                "test \"$PYTHONDONTWRITEBYTECODE\" = 1 && echo PORT=4321",
+            ],
+        )
+        .expect("子进程应收到禁止写 pyc 的环境变量");
+        assert_eq!(port, 4321);
+        child.wait().ok();
     }
 }
