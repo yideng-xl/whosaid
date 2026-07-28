@@ -1,0 +1,236 @@
+name: Release macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release Tag，例如 v0.1.0
+        required: true
+        default: v0.1.0
+        type: string
+      publish:
+        description: 附件校验通过后公开 Release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-macos
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and release Apple Silicon DMG
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+
+    steps:
+      - name: 校验输入与 Runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+            echo "非法 Release Tag：$RELEASE_TAG" >&2
+            exit 1
+          fi
+          arch="$(uname -m)"
+          echo "runner_arch=$arch"
+          if [[ "$arch" != "arm64" ]]; then
+            echo "需要 Apple Silicon runner，实际为 $arch" >&2
+            exit 1
+          fi
+
+      - name: 检出源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: 配置 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装前端依赖
+        working-directory: desktop
+        run: npm ci
+
+      - name: 组装自包含运行时
+        run: desktop/scripts/build-runtime.sh
+
+      - name: 验证包内依赖
+        run: |
+          set -euo pipefail
+          desktop/src-tauri/python/bin/python3 -c \
+            'import fastapi, mlx_whisper, pyannote.audio; print("bundled imports: ok")'
+          desktop/src-tauri/ffmpeg/ffmpeg -version | sed -n '1p'
+          desktop/src-tauri/ffmpeg/ffprobe -version | sed -n '1p'
+
+      - name: 后端测试
+        env:
+          PYTHONPATH: ${{ github.workspace }}/core
+        run: >-
+          desktop/src-tauri/python/bin/python3 -m pytest
+          core/tests -q -m "not slow"
+
+      - name: 前端测试
+        working-directory: desktop
+        run: npm test
+
+      - name: Svelte 检查
+        working-directory: desktop
+        run: npm run check
+
+      - name: Rust 测试
+        working-directory: desktop/src-tauri
+        run: cargo test
+
+      - name: 清理 Rust 测试产物
+        working-directory: desktop/src-tauri
+        run: cargo clean
+
+      - name: 构建 Apple Silicon 安装包
+        working-directory: desktop
+        run: npm run tauri -- build --ci --bundles app,dmg
+
+      - name: 准备 Release 资产
+        id: assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")"
+          expected_dmg="whosaid_${version}_aarch64.dmg"
+          dmg_path="desktop/src-tauri/target/release/bundle/dmg/$expected_dmg"
+          if [[ ! -f "$dmg_path" ]]; then
+            echo "未找到 $dmg_path" >&2
+            find desktop/src-tauri/target/release/bundle -maxdepth 4 -type f -print >&2
+            exit 1
+          fi
+
+          dmg_size="$(stat -f '%z' "$dmg_path")"
+          if (( dmg_size <= 400 * 1024 * 1024 )); then
+            echo "DMG 体积异常：$dmg_size bytes" >&2
+            exit 1
+          fi
+
+          asset_dir="$RUNNER_TEMP/whosaid-release"
+          mkdir -p "$asset_dir"
+          cp "$dmg_path" "$asset_dir/$expected_dmg"
+
+          first_open_zip="whosaid_${version}_first-open.zip"
+          (
+            cd desktop/scripts
+            /usr/bin/zip -j "$asset_dir/$first_open_zip" "首次打开.command"
+          )
+
+          (
+            cd "$asset_dir"
+            shasum -a 256 "$expected_dmg" "$first_open_zip" > SHA256SUMS.txt
+          )
+
+          echo "asset_dir=$asset_dir" >> "$GITHUB_OUTPUT"
+          echo "dmg_name=$expected_dmg" >> "$GITHUB_OUTPUT"
+          echo "first_open_name=$first_open_zip" >> "$GITHUB_OUTPUT"
+          echo "Release 资产："
+          stat -f '%z bytes %N' "$asset_dir/$expected_dmg"
+          stat -f '%z bytes %N' "$asset_dir/$first_open_zip"
+          cat "$asset_dir/SHA256SUMS.txt"
+
+      - name: 确保草稿 Release 存在
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "复用现有 Release：$RELEASE_TAG"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "whosaid $RELEASE_TAG" \
+              --generate-notes \
+              --draft
+          fi
+
+      - name: 上传 Release 资产
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
+            "${{ steps.assets.outputs.asset_dir }}/${{ steps.assets.outputs.dmg_name }}" \
+            "${{ steps.assets.outputs.asset_dir }}/${{ steps.assets.outputs.first_open_name }}" \
+            "${{ steps.assets.outputs.asset_dir }}/SHA256SUMS.txt" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+      - name: 核对远端资产
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_id="$(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json databaseId \
+              --jq '.databaseId'
+          )"
+          if [[ ! "$release_id" =~ ^[0-9]+$ ]]; then
+            echo "Release ID 异常：$release_id" >&2
+            exit 1
+          fi
+
+          assets_file="$RUNNER_TEMP/release-assets.tsv"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" \
+            --paginate \
+            --jq '.[] | [.name, .size, .state] | @tsv' > "$assets_file"
+          cat "$assets_file"
+
+          verify_asset() {
+            local name="$1"
+            local minimum_size="$2"
+            local row
+            row="$(awk -F $'\t' -v target="$name" '$1 == target { print; exit }' "$assets_file")"
+            if [[ -z "$row" ]]; then
+              echo "远端缺少附件：$name" >&2
+              exit 1
+            fi
+
+            local remote_name remote_size remote_state
+            IFS=$'\t' read -r remote_name remote_size remote_state <<< "$row"
+            if [[ "$remote_state" != "uploaded" ]]; then
+              echo "附件状态异常：$remote_name $remote_state" >&2
+              exit 1
+            fi
+            if (( remote_size <= minimum_size )); then
+              echo "附件体积异常：$remote_name $remote_size" >&2
+              exit 1
+            fi
+          }
+
+          verify_asset "${{ steps.assets.outputs.dmg_name }}" $((400 * 1024 * 1024))
+          verify_asset "${{ steps.assets.outputs.first_open_name }}" 0
+          verify_asset "SHA256SUMS.txt" 0
+
+      - name: 公开 Release
+        if: ${{ inputs.publish }}
+        run: >-
+          gh release edit "$RELEASE_TAG"
+          --repo "$GITHUB_REPOSITORY"
+          --target "$GITHUB_SHA"
+          --draft=false
+          --latest
+
+      - name: 输出 Release 状态
+        if: ${{ always() }}
+        run: >-
+          gh release view "$RELEASE_TAG"
+          --repo "$GITHUB_REPOSITORY"
+          --json tagName,isDraft,isPrerelease,url,assets
