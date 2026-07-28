@@ -8,10 +8,9 @@ REST + WebSocket 接口。一期仅在本目录内独立运行、可用 curl/web
 ## 环境要求
 
 - Python 3.13+
-- **仅支持 Apple Silicon（M 系列）**：转写/说话人分离依赖 `mlx` /
-  `mlx-whisper`，构建在 Metal 之上，Intel Mac 或其他平台无法运行推理相关
-  测试与真实服务（纯逻辑模块如 `transcript.py`/`backend.py` 的对齐算法
-  不受此限制）。
+- Apple Silicon 使用 `mlx-whisper`，通过 Metal 加速。
+- Windows 10/11 x64 使用 `faster-whisper` CPU `int8`。
+- 说话人分离统一使用 `pyannote.audio`；Windows 首版在 CPU 上运行。
 
 ## 建 venv 与装依赖
 
@@ -72,6 +71,8 @@ HF_ENDPOINT=https://hf-mirror.com venv/bin/pytest -q -m slow
 | `transcript.py` | 转写稿数据模型（`Segment`/`Transcript`）：说话人重命名、导出 txt/srt |
 | `backend.py` | 推理后端抽象接口 `InferenceBackend` + 与推理框架无关的纯对齐/去重逻辑 |
 | `mlx_backend.py` | `InferenceBackend` 的 Apple Silicon 实现：mlx-whisper 转写 + pyannote 说话人分离 |
+| `faster_whisper_backend.py` | `InferenceBackend` 的 Windows/CPU 实现：faster-whisper `int8` 转写 + pyannote 说话人分离 |
+| `backend_selection.py` | 按操作系统或 `WHOSAID_BACKEND` 选择并创建推理后端 |
 | `models.py` | 模型注册表：内置模型清单、下载状态、当前启用模型，持久化到 `config.json` |
 | `jobs.py` | 转写任务队列：串联 转写→分离→对齐→生成 Transcript，推进度，全局信号量保证单并发 |
 | `server.py` | FastAPI 服务：REST + WebSocket，把上述组件装配成可被外壳调用的接口 |
@@ -85,9 +86,7 @@ HF_ENDPOINT=https://hf-mirror.com venv/bin/pytest -q -m slow
 
 ## 扩展平台
 
-一期 `InferenceBackend` 只有 `MlxBackend`（Apple Silicon）一个实现。
-要支持其他平台（如 Windows + CUDA、Linux 等），在 `backend.py` 中新增
-一个实现 `InferenceBackend.transcribe` / `InferenceBackend.diarize` 的
-子类（参考 `mlx_backend.py` 的写法），在 `server.py` 的 `main()`（或调用方
-的组装代码）里按运行平台注入对应实现即可，`JobQueue`/`server.py` 的其余
-逻辑无需改动。
+当前提供 `MlxBackend`（Apple Silicon）和 `FasterWhisperBackend`
+（Windows x64 CPU）。后续 CUDA 或 Linux 后端继续实现
+`InferenceBackend.transcribe` / `InferenceBackend.diarize`，并在
+`backend_selection.py` 注册即可；`JobQueue` 和 API 层无需改动。

@@ -22,7 +22,9 @@
 - 🇨🇳 **中文优先**：针对中文会议场景（转写默认 Belle 中文微调模型）
 - 🔧 **模型可换**：转写模型（whisper 各尺寸 / Belle 中文微调）与说话人分离引擎可下载/切换
 
-底层：[mlx-whisper](https://github.com/ml-explore/mlx-examples)（转写）+ [pyannote.audio](https://github.com/pyannote/pyannote-audio)（说话人分离），Apple Silicon 原生加速。
+底层：macOS 使用 [mlx-whisper](https://github.com/ml-explore/mlx-examples)，
+Windows 使用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)，
+说话人分离统一使用 [pyannote.audio](https://github.com/pyannote/pyannote-audio)。
 
 ## 现状与路线
 
@@ -31,11 +33,12 @@
 | **一期 · 内核** | 转写 + 说话人标注 + 模型管理 + 任务队列 + 本地 HTTP 服务（REST/WebSocket） | ✅ 可用 |
 | **二期 · 桌面界面** | Tauri 外壳 + 前端：拖拽转写、两阶段（逐字稿/会话稿）、改说话人名、试听、导出、模型管理、深浅主题、真 macOS 磨砂 | ✅ 基本完成（Apple Silicon 本机可双击用） |
 | **二期尾 · Apple Silicon 打包** | 自包含 Python 运行时与 ffmpeg；模型首次运行下载 | ✅ v0.1.0 已发布 |
-| **三期 · Windows 版本** | 接入 Windows 推理后端，复用任务、稿件和桌面交互 | ⏭️ 下一阶段 |
+| **三期 · Windows 版本** | faster-whisper CPU 后端 + 自包含运行时 + NSIS 安装包 | 🧪 首个候选包已生成，待实机转写验收 |
 | 后续 · 人名统一替换 | 候选词提取、人工确认、一键统一替换 | 🔭 后置 |
 | 后续 · 直接录音 | app 内直接录电脑系统声/麦克风并转写 | 🔭 计划 |
 
-> 当前版本先完成 Apple Silicon 安装包与分发验收，不包含「人名统一替换」。下一个开发阶段为 Windows 版本。
+> Windows 首版支持 Windows 10/11 x64，默认使用 CPU；NVIDIA CUDA 加速和
+> 「人名统一替换」放在后续阶段。
 
 下载：[whosaid v0.1.0](https://github.com/yideng-xl/whosaid/releases/tag/v0.1.0)
 

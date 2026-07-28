@@ -20,8 +20,8 @@ REST/WS 与内核通信。本目录不含任何转写/说话人分离逻辑，�
       huggingface_hub pytest
   ```
 
-- 仅支持 Apple Silicon（M 系列）：内核的转写/说话人分离依赖 `mlx` /
-  `mlx-whisper`，构建在 Metal 之上，Intel Mac 无法跑真实转写。
+- Apple Silicon 开发环境使用 MLX；Windows 10/11 x64 使用 faster-whisper
+  CPU 后端。
 
 ## 安装依赖
 
@@ -46,12 +46,12 @@ WHOSAID_PYTHON=$(pwd)/../core/venv/bin/python npm run tauri dev
 
 内核的 `config.json` 与持久化数据落在：
 
-```
-~/Library/Application Support/whosaid
-```
+- macOS：`~/Library/Application Support/whosaid`
+- Windows：Tauri 返回的 `%APPDATA%` 应用数据目录
 
-该目录在外壳启动时自动创建（`src-tauri/src/lib.rs` 的 `data_dir()`），
-同时作为子进程的 `cwd` 与 `WHOSAID_DATA_DIR` 环境变量传给内核。
+该目录在外壳启动时自动创建，同时作为子进程的 `cwd` 与
+`WHOSAID_DATA_DIR` 环境变量传给内核。macOS 保留 v0.1.0 的历史目录，
+避免升级后已有任务和配置丢失。
 
 ## 架构
 
@@ -100,8 +100,20 @@ npm run tauri build
 
 当前安装包未做 Apple 签名与公证，首次打开需配合
 `scripts/首次打开.command` 去除隔离属性。Apple Silicon `v0.1.0` 已通过
-GitHub Release 发布；Apple 正式签名、公证、自动更新与 Windows 打包留到
-后续阶段。
+GitHub Release 发布；Apple 正式签名、公证与自动更新留到后续阶段。
+
+## Windows x64 打包
+
+Windows Runner 上执行：
+
+```powershell
+./scripts/build-runtime-windows.ps1
+npm run tauri -- build --ci --bundles nsis
+```
+
+运行时使用 Python 3.13、faster-whisper CPU `int8`、pyannote CPU 和
+ffmpeg。GitHub Actions 会先跑完整回归，再生成 NSIS 安装包；模型仍在
+首次使用时下载，不随安装包分发。
 
 ## 已知约束
 
