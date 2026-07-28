@@ -34,6 +34,11 @@ export interface Speaker {
   name: string; // 当前显示名（改名后为真名）
 }
 
+export interface NameCandidate {
+  term: string;
+  count: number;
+}
+
 export interface JobDetail {
   id: string;
   status: string;
@@ -46,6 +51,7 @@ export interface JobDetail {
   chunks_done: number;
   phase: string;
   num_speakers: number | null;
+  name_candidates: NameCandidate[];
 }
 
 interface ProgressMessage {
@@ -92,6 +98,15 @@ export function createApi(port: number) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ orig, name }),
       }));
+    },
+
+    async replaceTerms(id: string, mapping: Record<string, string>): Promise<number> {
+      const result = await j(await fetch(`${base}/jobs/${id}/replace_terms`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mapping }),
+      }));
+      return result.replaced;
     },
 
     exportUrl(id: string, fmt: "txt" | "srt" | "plain"): string {

@@ -58,3 +58,50 @@ def test_to_plain_ts_hours_prefix():
 
 def test_to_plain_ts_empty():
     assert Transcript(segments=[]).to_plain_ts() == ""
+
+
+def test_name_candidates_include_context_repeat_and_speaker_display_name():
+    t = Transcript(
+        segments=[
+            Segment(0, 1, "张山说这个方案可以，请张三再确认。", "说话人A"),
+            Segment(1, 2, "张山稍后回复，李小明负责记录。", "说话人B"),
+            Segment(2, 3, "李小明已经收到。", "说话人A"),
+        ],
+        speaker_names={"说话人A": "王小华"},
+    )
+
+    got = {item["term"]: item["count"] for item in t.name_candidates()}
+
+    assert got["张山"] == 2
+    assert got["张三"] == 1
+    assert got["李小明"] == 2
+    assert got["王小华"] == 1
+    assert "李小" not in got  # 同频的完整三字名存在时，不重复推荐其前缀
+
+
+def test_replace_terms_updates_text_and_speaker_names_without_cascading():
+    t = Transcript(
+        segments=[
+            Segment(0, 1, "张山请张三确认。", "说话人A"),
+            Segment(1, 2, "张山收到。", "说话人B"),
+        ],
+        speaker_names={"说话人A": "张山", "说话人B": "李四"},
+    )
+
+    replaced = t.replace_terms({"张山": "张三", "张三": "张珊"})
+
+    assert replaced == 4
+    assert t.segments[0].text == "张三请张珊确认。"
+    assert t.segments[1].text == "张三收到。"
+    assert t.speaker_names == {"说话人A": "张三", "说话人B": "李四"}
+
+
+def test_replace_terms_rejects_blank_source_or_target():
+    t = Transcript(segments=[Segment(0, 1, "张山")])
+
+    import pytest
+
+    with pytest.raises(ValueError, match="不能为空"):
+        t.replace_terms({"": "张三"})
+    with pytest.raises(ValueError, match="不能为空"):
+        t.replace_terms({"张山": "  "})

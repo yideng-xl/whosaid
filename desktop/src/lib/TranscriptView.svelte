@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import SpeakerRename from "./SpeakerRename.svelte";
+  import NameReplace from "./NameReplace.svelte";
   import StageSwitcher from "./StageSwitcher.svelte";
   import Icon from "./Icon.svelte";
   import BlockProgress from "./BlockProgress.svelte";
@@ -247,6 +248,12 @@
     await load(); // 刷新稿子与说话人列表
   }
 
+  async function onReplace(mapping: Record<string, string>): Promise<number> {
+    const replaced = await api.replaceTerms(jobId, mapping);
+    await load(); // 正文、说话人显示名和候选都来自同一份持久化后的稿子
+    return replaced;
+  }
+
   async function exportAs(fmt: "txt" | "srt" | "plain") {
     exporting = true;
     try {
@@ -388,6 +395,7 @@
         {onRename}
         sampleUrl={(orig) => api.speakerSampleUrl(jobId, orig)}
       />
+      <NameReplace candidates={detail.name_candidates ?? []} {onReplace} />
 
       <div class="transcript">
         {#each blocks as b}

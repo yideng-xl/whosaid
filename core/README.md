@@ -48,7 +48,8 @@ PORT=<端口号>
 
 调用方（如 Tauri 外壳）读取这一行拿到实际端口。REST 接口：`POST /jobs`
 提交任务、`GET /jobs` / `GET /jobs/{id}` 查询、`POST /jobs/{id}/rename`
-改说话人名、`GET /jobs/{id}/export?fmt=txt|srt` 导出、`GET /models` /
+改说话人名、`POST /jobs/{id}/replace_terms` 统一替换人名、
+`GET /jobs/{id}/export?fmt=txt|srt|plain` 导出、`GET /models` /
 `POST /models/{id}/download` / `POST /models/active` 管理模型；
 `WS /ws/jobs/{id}` 订阅单个任务的实时进度推送。
 
@@ -68,7 +69,7 @@ HF_ENDPOINT=https://hf-mirror.com venv/bin/pytest -q -m slow
 
 | 模块 | 职责 |
 |---|---|
-| `transcript.py` | 转写稿数据模型（`Segment`/`Transcript`）：说话人重命名、导出 txt/srt |
+| `transcript.py` | 转写稿数据模型：说话人重命名、人名候选与统一替换、导出 txt/srt/逐字稿 |
 | `backend.py` | 推理后端抽象接口 `InferenceBackend` + 与推理框架无关的纯对齐/去重逻辑 |
 | `mlx_backend.py` | `InferenceBackend` 的 Apple Silicon 实现：mlx-whisper 转写 + pyannote 说话人分离 |
 | `faster_whisper_backend.py` | `InferenceBackend` 的 Windows/CPU 实现：faster-whisper `int8` 转写 + pyannote 说话人分离 |

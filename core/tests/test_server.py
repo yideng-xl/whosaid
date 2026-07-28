@@ -38,14 +38,14 @@ class FailingBackend(InferenceBackend):
         return [(0.0, 5.0, "SPEAKER_00")]
 
 
-def make_client(tmp_path, backend=None):
+def make_client(tmp_path, backend=None, store=None):
     if backend is None:
         backend = FakeBackend()
     reg = ModelRegistry(str(tmp_path / "config.json"),
                         is_downloaded_fn=lambda repo: True,
                         download_fn=lambda repo: None)
     app = create_app(JobQueue(backend, duration_fn=lambda p: 1.0,
-                               extract_fn=lambda src, start, dur: src), reg)
+                               extract_fn=lambda src, start, dur: src), reg, store=store)
     return TestClient(app)
 
 
@@ -74,6 +74,56 @@ def test_rename_then_export(tmp_path):
     c.post(f"/jobs/{jid}/rename", json={"orig": "说话人A", "name": "张三"})
     txt = c.get(f"/jobs/{jid}/export", params={"fmt": "txt"}).text
     assert txt.startswith("张三：你好")
+
+
+def test_replace_terms_updates_job_and_persists(tmp_path):
+    class SpyStore:
+        def __init__(self):
+            self.saved = []
+
+        def save(self, job):
+            self.saved.append(job.transcript.to_dict())
+
+    store = SpyStore()
+    c = make_client(tmp_path, store=store)
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+    c.post(f"/jobs/{jid}/rename", json={"orig": "说话人A", "name": "你好"})
+    store.saved.clear()
+
+    r = c.post(
+        f"/jobs/{jid}/replace_terms",
+        json={"mapping": {"你好": "您好", "在吗": "在么"}},
+    )
+
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "replaced": 5}
+    detail = c.get(f"/jobs/{jid}").json()
+    assert "您好" in detail["txt"]
+    assert "在么" in detail["txt"]
+    assert detail["speakers"][0]["name"] == "您好"
+    assert len(store.saved) == 1
+
+
+def test_get_job_returns_name_candidates(tmp_path):
+    c = make_client(tmp_path)
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+    c.post(f"/jobs/{jid}/rename", json={"orig": "说话人A", "name": "张三"})
+
+    candidates = c.get(f"/jobs/{jid}").json()["name_candidates"]
+
+    assert {"term": "张三", "count": 1} in candidates
+
+
+def test_replace_terms_rejects_unfinished_job(tmp_path):
+    c = make_client(tmp_path, backend=FailingBackend())
+    jid = c.post("/jobs", json={"audio_path": "/x/a.m4a"}).json()["job_id"]
+    _wait_done(c, jid)
+
+    r = c.post(f"/jobs/{jid}/replace_terms", json={"mapping": {"张山": "张三"}})
+
+    assert r.status_code == 409
 
 
 def test_export_plain_returns_verbatim(tmp_path):

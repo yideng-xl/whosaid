@@ -89,6 +89,26 @@ describe("api", () => {
     );
   });
 
+  it("replaceTerms POSTs mapping and returns replacement count", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, replaced: 4 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(2222);
+
+    const replaced = await api.replaceTerms("job7", { 张山: "张三" });
+
+    expect(replaced).toBe(4);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:2222/jobs/job7/replace_terms",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ mapping: { 张山: "张三" } }),
+      }),
+    );
+  });
+
   it("getHfSettings fetches settings", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

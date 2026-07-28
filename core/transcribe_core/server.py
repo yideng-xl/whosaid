@@ -21,6 +21,10 @@ class RenameReq(BaseModel):
     name: str
 
 
+class ReplaceTermsReq(BaseModel):
+    mapping: dict[str, str]
+
+
 class NumSpeakersReq(BaseModel):
     num_speakers: int | None = None  # 预计说话人数;None=自动
 
@@ -108,11 +112,16 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
         # plain_txt：始终为无说话人分组的纯文字稿，供详情面板"①转文字"视图用；
         # 与 txt（done 时切换为分人稿 to_txt）语义独立，不随 done 变化。
         plain = j.transcript.plain_text() if j.transcript is not None else ""
+        name_candidates = (
+            j.transcript.name_candidates()
+            if j.transcript is not None and done
+            else []
+        )
         return {
             "id": j.id, "status": j.status, "progress": j.progress, "error": j.error,
             "total_chunks": j.total_chunks, "chunks_done": j.chunks_done,
             "phase": phase, "txt": txt, "plain_txt": plain, "speakers": speakers,
-            "num_speakers": j.num_speakers,
+            "num_speakers": j.num_speakers, "name_candidates": name_candidates,
         }
 
     @app.post("/jobs/{job_id}/pause")
@@ -151,6 +160,19 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
         if store is not None:
             store.save(j)
         return {"ok": True}
+
+    @app.post("/jobs/{job_id}/replace_terms")
+    def replace_terms(job_id: str, req: ReplaceTermsReq):
+        j = _job_or_404(job_id)
+        if j.status != "done" or j.transcript is None:
+            raise HTTPException(409, "仅已完成的任务可统一替换人名")
+        try:
+            replaced = j.transcript.replace_terms(req.mapping)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if store is not None:
+            store.save(j)
+        return {"ok": True, "replaced": replaced}
 
     @app.post("/jobs/{job_id}/num_speakers")
     def set_num_speakers(job_id: str, req: NumSpeakersReq):
