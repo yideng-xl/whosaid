@@ -92,6 +92,16 @@ jobs:
           New-Item -ItemType Directory -Path $env:WHOSAID_DATA_DIR | Out-Null
 
           & $Python -c "import fastapi, faster_whisper, pyannote.audio; print('installed imports: ok')"
+          $TestWav = Join-Path $env:RUNNER_TEMP "whosaid-smoke.wav"
+          & (Join-Path $FfmpegDir "ffmpeg.exe") -f lavfi -i "sine=frequency=440:duration=0.1" `
+            -ar 16000 -ac 1 -c:a pcm_s16le $TestWav -y -loglevel error
+          if ($LASTEXITCODE -ne 0) {
+            throw "包内 ffmpeg 生成测试 WAV 失败"
+          }
+          & $Python -c "import sys; from transcribe_core.diarize.pyannote_engine import _load_pcm16_wav; w, r = _load_pcm16_wav(sys.argv[1]); assert r == 16000 and tuple(w.shape) == (1, 1600); print('installed PCM WAV load: ok')" $TestWav
+          if ($LASTEXITCODE -ne 0) {
+            throw "包内 PCM WAV 读取失败"
+          }
           $Stdout = Join-Path $env:RUNNER_TEMP "whosaid-service.stdout.log"
           $Stderr = Join-Path $env:RUNNER_TEMP "whosaid-service.stderr.log"
           $Service = Start-Process -FilePath $Python `

@@ -4,8 +4,31 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import wave
+from os import PathLike
 
 from .base import DiarizeEngine, Turn
+
+
+def _load_pcm16_wav(path: str | PathLike[str]):
+    """读取 ffmpeg 产出的 PCM16 WAV，绕开 TorchCodec/系统 FFmpeg 动态库。"""
+    import torch
+
+    with wave.open(str(path), "rb") as wav:
+        channels = wav.getnchannels()
+        sample_width = wav.getsampwidth()
+        sample_rate = wav.getframerate()
+        compression = wav.getcomptype()
+        frames = wav.readframes(wav.getnframes())
+
+    if sample_width != 2 or compression != "NONE":
+        raise ValueError(
+            f"只支持未压缩 PCM16 WAV，实际 sample_width={sample_width}, compression={compression}"
+        )
+
+    samples = torch.frombuffer(bytearray(frames), dtype=torch.int16)
+    waveform = samples.reshape(-1, channels).transpose(0, 1).to(torch.float32)
+    return waveform / 32_768.0, sample_rate
 
 
 class PyannoteEngine(DiarizeEngine):
@@ -17,7 +40,6 @@ class PyannoteEngine(DiarizeEngine):
         # 保证测试环境无预热也能跑（见 tests/test_diarize.py）。
         from pyannote.audio import Pipeline
         import torch
-        import torchaudio
 
         token = os.environ.get("HF_TOKEN")  # None → 用 huggingface-cli 缓存 token
         pipeline = Pipeline.from_pretrained(self.repo, token=token)
@@ -30,12 +52,26 @@ class PyannoteEngine(DiarizeEngine):
         os.close(fd)  # 关闭文件描述符，让 ffmpeg 可写
         try:
             subprocess.run(
-                ["ffmpeg", "-i", audio_path, "-ar", "16000", "-ac", "1", tmp_wav, "-y", "-loglevel", "error"],
+                [
+                    "ffmpeg",
+                    "-i",
+                    audio_path,
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
+                    "-c:a",
+                    "pcm_s16le",
+                    tmp_wav,
+                    "-y",
+                    "-loglevel",
+                    "error",
+                ],
                 check=True,
             )
-            waveform, sample_rate = torchaudio.load(tmp_wav)
+            waveform, sample_rate = _load_pcm16_wav(tmp_wav)
         finally:
-            # 确保任何路径都清理临时文件（即使 ffmpeg 或 torchaudio.load 抛异常）
+            # 确保任何路径都清理临时文件（即使 ffmpeg 或 WAV 读取抛异常）
             os.remove(tmp_wav)
 
         kw = {"num_speakers": num_speakers} if num_speakers else {}
