@@ -60,14 +60,14 @@ def test_to_plain_ts_empty():
     assert Transcript(segments=[]).to_plain_ts() == ""
 
 
-def test_name_candidates_include_context_repeat_and_speaker_display_name():
+def test_name_candidates_include_context_and_speaker_display_name():
     t = Transcript(
         segments=[
-            Segment(0, 1, "张山说这个方案可以，请张三再确认。", "说话人A"),
-            Segment(1, 2, "张山稍后回复，李小明负责记录。", "说话人B"),
-            Segment(2, 3, "李小明已经收到。", "说话人A"),
+            Segment(0, 1, "我叫张山，这位是张三。", "说话人A"),
+            Segment(1, 2, "张山稍后回复，有请李小明。", "说话人B"),
+            Segment(2, 3, "李小明已经收到，江辉也确认了。", "说话人A"),
         ],
-        speaker_names={"说话人A": "王小华"},
+        speaker_names={"说话人A": "王小华", "说话人B": "许江辉"},
     )
 
     got = {item["term"]: item["count"] for item in t.name_candidates()}
@@ -76,7 +76,25 @@ def test_name_candidates_include_context_repeat_and_speaker_display_name():
     assert got["张三"] == 1
     assert got["李小明"] == 2
     assert got["王小华"] == 1
+    assert got["许江辉"] == 1
+    assert got["江辉"] == 2  # 已认领全名后，正文里的去姓称呼也可统一
     assert "李小" not in got  # 同频的完整三字名存在时，不重复推荐其前缀
+
+
+def test_name_candidates_do_not_treat_repeated_surname_words_as_people():
+    """常见词首字碰巧是姓氏时不能入选；这是实稿里候选杂项的回归用例。"""
+    t = Transcript(segments=[
+        Segment(
+            0,
+            1,
+            "别别别，那个那个，终端终端，平面平面，管理管理，"
+            "关地址关地址，全区全区，安全区安全区，应该应该，路线路线。",
+        )
+    ])
+
+    terms = {item["term"] for item in t.name_candidates()}
+
+    assert terms == set()
 
 
 def test_replace_terms_updates_text_and_speaker_names_without_cascading():

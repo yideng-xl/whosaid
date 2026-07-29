@@ -1,7 +1,6 @@
 """转写稿数据模型：片段、说话人重命名、导出 txt/srt、持久化。"""
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass, field, asdict
 import re
 
@@ -24,12 +23,16 @@ _SINGLE_SURNAMES = (
 )
 _COMPOUND_SURNAMES = ("欧阳", "司马", "上官", "诸葛", "东方", "皇甫", "尉迟", "公孙")
 _SURNAME_RE = "(?:" + "|".join(_COMPOUND_SURNAMES) + f"|[{_SINGLE_SURNAMES}])"
-_CONTEXT_NAME_RE = re.compile(
-    rf"(?:^|[，。！？；：、\s]|请|让|由|跟|问|找|通知|感谢|谢谢|欢迎|有请|我是|我叫|这位是)"
+_INTRO_NAME_RE = re.compile(
+    rf"(?:我是|我叫|这位是|他叫|她叫|他是|她是|有请)"
     rf"(?P<name>{_SURNAME_RE}[\u4e00-\u9fff]{{1,2}})"
-    rf"(?=老师|先生|女士|经理|主任|同学|博士|总|说|表示|提到|认为|回答|负责|再|来|去|已|稍|[，。！？；：、\s]|$)"
+    rf"(?=老师|先生|女士|经理|主任|同学|博士|总|[，。！？；：、\s]|$)"
 )
-_NAME_STOP_CHARS = set("的了是我你他她它们这那在和与及就也都要把被让给说看来去有没不很能请再已稍")
+_TITLE_NAME_RE = re.compile(
+    rf"(?:^|[，。！？；：、\s])"
+    rf"(?P<name>{_SURNAME_RE}[\u4e00-\u9fff]{{1,2}})"
+    rf"(?=老师|先生|女士|经理|主任|同学|博士|总)"
+)
 
 
 def fmt_ts(seconds: float) -> str:
@@ -64,39 +67,27 @@ class Transcript:
         candidates: set[str] = set()
 
         # 用户已经认领过的说话人显示名是最高置信候选；原始“说话人A”标签不算人名。
+        # 三字及以上全名如果在正文里出现去姓称呼，也把该称呼列入候选（如许江辉→江辉）。
         for orig, display in self.speaker_names.items():
             name = display.strip()
             if name and name != orig and not name.startswith("说话人"):
                 candidates.add(name)
+                surname_len = next(
+                    (len(s) for s in _COMPOUND_SURNAMES if name.startswith(s)),
+                    1,
+                )
+                alias = name[surname_len:]
+                if len(alias) >= 2 and full_text.count(alias) > 0:
+                    candidates.add(alias)
 
-        # 称呼、发言和任务分配位置。上下文只负责缩小范围，最终仍由用户确认。
-        candidates.update(m.group("name") for m in _CONTEXT_NAME_RE.finditer(full_text))
-
-        # 补充全文重复出现的常见姓氏词。保留 2–4 字，并过滤明显的虚词/动词片段。
-        surname_counts: Counter[str] = Counter()
-        for i in range(len(full_text)):
-            surname = next(
-                (s for s in _COMPOUND_SURNAMES if full_text.startswith(s, i)),
-                full_text[i] if full_text[i] in _SINGLE_SURNAMES else "",
-            )
-            if not surname:
-                continue
-            for given_len in (1, 2):
-                term = full_text[i:i + len(surname) + given_len]
-                given = term[len(surname):]
-                if (
-                    len(term) == len(surname) + given_len
-                    and all("\u4e00" <= ch <= "\u9fff" for ch in term)
-                    and not any(ch in _NAME_STOP_CHARS for ch in given)
-                ):
-                    surname_counts[term] += 1
-        candidates.update(term for term, count in surname_counts.items() if count >= 2)
+        # 只接受“我是/我叫/有请”等身份介绍和“张老师/李主任”等明确称谓。
+        # 不再扫描任意高频姓氏词：中文常用字中大量字也是姓氏，会把“终端/管理/应该”
+        # 这类普通词误报成人名。规则宁可漏报，用户仍可手动补充。
+        candidates.update(m.group("name") for m in _INTRO_NAME_RE.finditer(full_text))
+        candidates.update(m.group("name") for m in _TITLE_NAME_RE.finditer(full_text))
 
         def occurrences(term: str) -> int:
-            text_count = surname_counts.get(term)
-            if text_count is None:
-                text_count = full_text.count(term)
-            return text_count + sum(
+            return full_text.count(term) + sum(
                 display.count(term) for display in self.speaker_names.values()
             )
 
