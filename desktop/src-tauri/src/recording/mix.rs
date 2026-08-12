@@ -124,6 +124,9 @@ pub fn mix_recording(
         super::storage::RetryRecording::Pending(current) => current,
         super::storage::RetryRecording::Complete(final_path) => {
             probe_recording(tools, &final_path)?;
+            store
+                .reconcile_completed_session(&recording.session_id, &final_path)
+                .map_err(|error| MixError::new(error.to_string()))?;
             return Ok(final_path);
         }
     };

@@ -267,16 +267,9 @@ impl RecordingManager {
             };
             inner.state.apply(event)?;
             if let Some(active) = &terminal_session {
-                if let Ok(recording) = self.store.recoverable_by_id(&active.session_id) {
-                    if PathBuf::from(&recording.session_dir) == active.session_dir {
-                        inner.state.set_recoverable_paths(
-                            std::iter::once(recording.session_dir)
-                                .chain(std::iter::once(recording.system_track))
-                                .chain(recording.microphone_track)
-                                .collect(),
-                        );
-                    }
-                }
+                inner
+                    .state
+                    .set_recoverable_paths(self.validate_recoverable_paths(active));
             }
             let snapshot = inner.state.snapshot();
             let waiter = if is_terminal {
@@ -356,16 +349,9 @@ impl RecordingManager {
             }
             let active = inner.active.take();
             if let Some(active) = &active {
-                if let Ok(recording) = self.store.recoverable_by_id(&active.session_id) {
-                    if PathBuf::from(&recording.session_dir) == active.session_dir {
-                        inner.state.set_recoverable_paths(
-                            std::iter::once(recording.session_dir)
-                                .chain(std::iter::once(recording.system_track))
-                                .chain(recording.microphone_track)
-                                .collect(),
-                        );
-                    }
-                }
+                inner
+                    .state
+                    .set_recoverable_paths(self.validate_recoverable_paths(active));
             }
             let waiter = active.and_then(|active| active.stop_waiter);
             if inner.state.snapshot().phase != RecordingPhase::Failed {
@@ -387,6 +373,19 @@ impl RecordingManager {
             .active
             .as_ref()
             .is_some_and(|active| active.generation == generation)
+    }
+
+    fn validate_recoverable_paths(&self, active: &ActiveSession) -> Vec<String> {
+        let Ok(recording) = self.store.recoverable_by_id(&active.session_id) else {
+            return Vec::new();
+        };
+        if PathBuf::from(&recording.session_dir) != active.session_dir {
+            return Vec::new();
+        }
+        std::iter::once(recording.session_dir)
+            .chain(std::iter::once(recording.system_track))
+            .chain(recording.microphone_track)
+            .collect()
     }
 
     fn begin_mixing(&self, sink: &dyn StateEventSink) -> Result<RecordingSnapshot, RecordingError> {
@@ -466,6 +465,9 @@ impl RecordingManager {
                 final_path: {
                     probe_recording(&self.tools, &final_path)
                         .map_err(|error| format!("已完成录音校验失败：{error}"))?;
+                    self.store
+                        .reconcile_completed_session(session_id, &final_path)
+                        .map_err(|error| format!("已完成录音对账失败：{error}"))?;
                     final_path.to_string_lossy().into_owned()
                 },
             }),
@@ -482,9 +484,40 @@ impl RecordingManager {
             .active
             .as_ref()
             .map(|active| active.session_id.clone());
-        let mut recordings = self.store.recoverable()?;
-        recordings.retain(|recording| Some(&recording.session_id) != active_id.as_ref());
-        Ok(recordings)
+        let recordings = self.store.recoverable()?;
+        let mut pending = Vec::new();
+        for recording in recordings {
+            if Some(&recording.session_id) == active_id.as_ref() {
+                continue;
+            }
+            match self.store.completed_path(&recording.session_id) {
+                Ok(Some(final_path)) => {
+                    let reconciled = probe_recording(&self.tools, &final_path)
+                        .map_err(|error| error.to_string())
+                        .and_then(|_| {
+                            self.store
+                                .reconcile_completed_session(&recording.session_id, &final_path)
+                                .map_err(|error| error.to_string())
+                        });
+                    if let Err(error) = reconciled {
+                        eprintln!(
+                            "[whosaid] 无法对账已完成录音会话 {}：{error}",
+                            recording.session_id
+                        );
+                        pending.push(recording);
+                    }
+                }
+                Ok(None) => pending.push(recording),
+                Err(error) => {
+                    eprintln!(
+                        "[whosaid] 无法校验录音完成凭据 {}：{error}",
+                        recording.session_id
+                    );
+                    pending.push(recording);
+                }
+            }
+        }
+        Ok(pending)
     }
 
     fn mix_recording(
@@ -577,6 +610,10 @@ mod tests {
 
     use super::*;
     use crate::recording::state::{PermissionSnapshot, PermissionStatus, SourceStatus};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use tempfile::TempDir;
 
     struct MockNative {
         stop_calls: AtomicUsize,
@@ -687,6 +724,96 @@ mod tests {
         )
         .unwrap();
         (active.session_id, active.session_dir)
+    }
+
+    #[cfg(unix)]
+    fn receipt_crash_fixture() -> (TempDir, RecordingManager, String, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let recordings_root = root.path().join("recordings");
+        let probe = root.path().join("ffprobe");
+        std::fs::write(&probe, "#!/bin/sh\nprintf '1.0\\n'\n").unwrap();
+        let mut permissions = std::fs::metadata(&probe).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&probe, permissions).unwrap();
+
+        let native = Arc::new(MockNative::new());
+        let manager = RecordingManager::with_native_and_tools(
+            recordings_root.clone(),
+            native,
+            FfmpegTools::new("/usr/bin/false".into(), probe),
+        );
+        let session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned();
+        let session_dir = recordings_root.join(".incomplete").join(&session_id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("system.caf"), b"source audio").unwrap();
+        let manifest = serde_json::json!({
+            "schemaVersion": 1,
+            "sessionId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "startedAt": 1786492215.0,
+            "systemTrack": "system.caf",
+            "microphoneTrack": null,
+            "systemStatus": "stopped",
+            "microphoneStatus": "unavailable",
+            "complete": false
+        });
+        std::fs::write(session_dir.join("session.json"), manifest.to_string()).unwrap();
+        let recording = manager.store.recoverable_by_id(&session_id).unwrap();
+        let final_path = recordings_root.join("finished.m4a");
+        std::fs::write(&final_path, b"verified final audio").unwrap();
+        manager
+            .store
+            .complete_with_receipt(&recording, &final_path)
+            .unwrap();
+        // 模拟 receipt 已持久化、manifest complete 尚未持久化时进程被强杀。
+        std::fs::write(session_dir.join("session.json"), manifest.to_string()).unwrap();
+        (root, manager, session_id, session_dir, final_path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recoverable_scan_reconciles_receipt_crash_and_removes_session() {
+        let (_root, manager, _session_id, session_dir, _final_path) = receipt_crash_fixture();
+
+        assert!(manager.list_recoverable().unwrap().is_empty());
+        assert!(!session_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retry_reconciles_receipt_crash_and_remains_idempotent() {
+        let (_root, manager, session_id, session_dir, final_path) = receipt_crash_fixture();
+        let canonical_final = std::fs::canonicalize(final_path)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(
+            manager.retry_mix(&session_id).unwrap().final_path,
+            canonical_final
+        );
+        assert!(!session_dir.exists());
+        assert_eq!(
+            manager.retry_mix(&session_id).unwrap().final_path,
+            canonical_final
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn receipt_reconciliation_failure_keeps_sources_and_session() {
+        let (_root, manager, session_id, session_dir, _) = receipt_crash_fixture();
+        let mut permissions = std::fs::metadata(&session_dir).unwrap().permissions();
+        permissions.set_mode(0o555);
+        std::fs::set_permissions(&session_dir, permissions).unwrap();
+
+        assert_eq!(manager.list_recoverable().unwrap().len(), 1);
+        assert!(manager.retry_mix(&session_id).is_err());
+        assert!(session_dir.join("system.caf").is_file());
+        assert!(session_dir.join("session.json").is_file());
+
+        let mut permissions = std::fs::metadata(&session_dir).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&session_dir, permissions).unwrap();
     }
 
     #[test]
@@ -809,6 +936,39 @@ mod tests {
             receiver.recv().unwrap().unwrap_err(),
             RecordingError::InvalidNativeEvent("坏 JSON".into())
         );
+    }
+
+    #[test]
+    fn protocol_terminal_with_corrupt_manifest_exposes_no_raw_paths() {
+        let (manager, _, sink) = manager();
+        let generation = activate(&manager, &sink);
+        let (_, session_dir) = persist_active_manifest(&manager);
+        let receiver = manager.stop(&sink).unwrap();
+        manager
+            .handle_native_event(
+                generation,
+                &sink,
+                NativeEvent::ProtocolError {
+                    message: "坏 JSON".into(),
+                },
+            )
+            .unwrap();
+        std::fs::write(session_dir.join("session.json"), "{broken").unwrap();
+
+        manager
+            .handle_native_event(
+                generation,
+                &sink,
+                NativeEvent::Stopped {
+                    session_dir: "/attacker".into(),
+                    system_track: "/attacker/system.caf".into(),
+                    microphone_track: Some("/attacker/microphone.caf".into()),
+                },
+            )
+            .unwrap();
+
+        assert!(manager.snapshot().recoverable_paths.is_empty());
+        assert!(receiver.recv().unwrap().is_err());
     }
 
     #[test]

@@ -163,6 +163,48 @@ impl RecordingStore {
         }
     }
 
+    pub(crate) fn completed_path(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<PathBuf>, RecordingError> {
+        validate_session_id(session_id)?;
+        self.load_receipt(session_id)
+    }
+
+    pub(crate) fn reconcile_completed_session(
+        &self,
+        session_id: &str,
+        final_path: &Path,
+    ) -> Result<(), RecordingError> {
+        validate_session_id(session_id)?;
+        let receipt_path = self
+            .load_receipt(session_id)?
+            .ok_or_else(|| RecordingError::Io("录音完成凭据不存在".into()))?;
+        if receipt_path != self.validate_final_path(final_path)? {
+            return Err(RecordingError::Io("录音完成凭据路径不一致".into()));
+        }
+
+        let (_, incomplete_root) = match self.secure_roots(false) {
+            Ok(roots) => roots,
+            Err(RecordingError::Io(message)) if message.contains("不存在") => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let session_dir = incomplete_root.join(session_id);
+        match fs::symlink_metadata(&session_dir) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(io_error(error)),
+            Ok(_) => validate_plain_directory(&session_dir, "待对账录音会话目录")?,
+        }
+
+        // 先把 receipt 中已校验的结果补回清单；只有这一步持久化成功，才允许删除
+        // 原始音轨。清单写失败时调用方会保留恢复条目和全部素材。
+        let recording = self
+            .load_recording(session_id, true)?
+            .ok_or_else(|| RecordingError::Io("待对账录音会话缺少清单".into()))?;
+        self.complete_with_receipt(&recording, &receipt_path)?;
+        self.remove_completed_session(&recording)
+    }
+
     pub fn recording_from_native_paths(
         &self,
         session_dir: &str,

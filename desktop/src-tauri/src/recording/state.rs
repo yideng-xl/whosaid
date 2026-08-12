@@ -297,7 +297,7 @@ impl RecordingState {
             NativeEvent::Stopped {
                 session_dir,
                 system_track,
-                microphone_track,
+                microphone_track: _,
             } => {
                 if !matches!(
                     self.snapshot.phase,
@@ -310,9 +310,9 @@ impl RecordingState {
                         "stopped 的 sessionDir 和 systemTrack 不能为空".into(),
                     ));
                 }
-                self.snapshot.recoverable_paths = std::iter::once(system_track)
-                    .chain(microphone_track)
-                    .collect();
+                // stopped 里的路径来自原生事件，状态机不能把它直接暴露给前端。
+                // 只有 manager 对照受控 UUID 和落盘清单验证后才可写入恢复路径。
+                self.snapshot.recoverable_paths.clear();
             }
             NativeEvent::FatalError { message } | NativeEvent::ProtocolError { message } => {
                 if matches!(
@@ -416,7 +416,7 @@ mod tests {
                 microphone_track: None,
             })
             .unwrap();
-        assert!(!state.snapshot().recoverable_paths.is_empty());
+        assert!(state.snapshot().recoverable_paths.is_empty());
 
         state.begin_mixing().unwrap();
         assert_eq!(state.snapshot().phase, RecordingPhase::Mixing);
