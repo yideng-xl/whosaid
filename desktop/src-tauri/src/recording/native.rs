@@ -11,12 +11,25 @@ pub trait NativeRecorder: Send + Sync {
 }
 
 pub fn platform_recorder() -> std::sync::Arc<dyn NativeRecorder> {
-    std::sync::Arc::new(PlatformRecorder)
+    std::sync::Arc::new(PlatformRecorder::new())
 }
 
 fn parse_native_event(json: &[u8]) -> Result<NativeEvent, RecordingError> {
-    serde_json::from_slice(json)
-        .map_err(|error| RecordingError::InvalidNativeEvent(error.to_string()))
+    let event: NativeEvent = serde_json::from_slice(json)
+        .map_err(|error| RecordingError::InvalidNativeEvent(error.to_string()))?;
+    if let NativeEvent::Stopped {
+        session_dir,
+        system_track,
+        ..
+    } = &event
+    {
+        if session_dir.trim().is_empty() || system_track.trim().is_empty() {
+            return Err(RecordingError::InvalidNativeEvent(
+                "stopped 的 sessionDir 和 systemTrack 不能为空".into(),
+            ));
+        }
+    }
+    Ok(event)
 }
 
 fn parse_permission_snapshot(json: &[u8]) -> Result<PermissionSnapshot, RecordingError> {
@@ -28,9 +41,8 @@ fn parse_permission_snapshot(json: &[u8]) -> Result<PermissionSnapshot, Recordin
 mod platform {
     use std::ffi::{c_char, c_void, CStr, CString};
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::Sender;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, Weak};
 
     use super::{
         parse_native_event, parse_permission_snapshot, NativeEvent, NativeRecorder,
@@ -54,12 +66,36 @@ mod platform {
 
     struct CallbackContext {
         sink: Sender<NativeEvent>,
-        native_owner_released: AtomicBool,
+        native_owner: Mutex<Option<Arc<CallbackContext>>>,
     }
 
-    pub(super) struct PlatformRecorder;
+    impl CallbackContext {
+        fn own_for_native(self: &Arc<Self>) -> *mut c_void {
+            *self.native_owner.lock().unwrap() = Some(Arc::clone(self));
+            Arc::as_ptr(self).cast_mut().cast()
+        }
+
+        fn release_native_owner(&self) {
+            self.native_owner.lock().unwrap().take();
+        }
+
+        #[cfg(test)]
+        fn is_owned_by_native(&self) -> bool {
+            self.native_owner.lock().unwrap().is_some()
+        }
+    }
+
+    pub(super) struct PlatformRecorder {
+        active_context: Mutex<Option<Weak<CallbackContext>>>,
+    }
 
     impl PlatformRecorder {
+        pub(super) fn new() -> Self {
+            Self {
+                active_context: Mutex::new(None),
+            }
+        }
+
         fn ensure_api_version(&self) -> Result<(), RecordingError> {
             let version = unsafe { whosaid_recorder_api_version() };
             if version == EXPECTED_API_VERSION {
@@ -68,6 +104,18 @@ mod platform {
                 Err(RecordingError::Native(format!(
                     "不兼容的录音接口版本 {version}，需要 {EXPECTED_API_VERSION}"
                 )))
+            }
+        }
+
+        fn release_active_context(&self) {
+            if let Some(context) = self
+                .active_context
+                .lock()
+                .unwrap()
+                .take()
+                .and_then(|context| context.upgrade())
+            {
+                context.release_native_owner();
             }
         }
     }
@@ -85,7 +133,7 @@ mod platform {
 
         let (event, is_native_terminal) = if json.is_null() {
             (
-                NativeEvent::FatalError {
+                NativeEvent::ProtocolError {
                     message: "原生录音回调返回了空事件".into(),
                 },
                 false,
@@ -102,8 +150,11 @@ mod platform {
                     (event, is_terminal)
                 }
                 Err(error) => (
-                    NativeEvent::FatalError {
-                        message: error.to_string(),
+                    NativeEvent::ProtocolError {
+                        message: match error {
+                            RecordingError::InvalidNativeEvent(message) => message,
+                            error => error.to_string(),
+                        },
                     },
                     false,
                 ),
@@ -111,13 +162,9 @@ mod platform {
         };
         let _ = callback_context.sink.send(event);
 
-        if is_native_terminal
-            && !callback_context
-                .native_owner_released
-                .swap(true, Ordering::AcqRel)
-        {
-            // 配对 start 中 Arc::into_raw 交给 C 侧持有的那一个强引用。
-            unsafe { drop(Arc::from_raw(context_ptr)) };
+        if is_native_terminal {
+            // 原生终态闭锁保证终态后不会再回调；解除自持有后，指针不再跨回调保存。
+            callback_context.release_native_owner();
         }
     }
 
@@ -145,28 +192,21 @@ mod platform {
                 .map_err(|_| RecordingError::Native("录音目录包含空字符".into()))?;
             let callback_context = Arc::new(CallbackContext {
                 sink,
-                native_owner_released: AtomicBool::new(false),
+                native_owner: Mutex::new(None),
             });
-            let context_ptr = Arc::into_raw(Arc::clone(&callback_context));
+            let context_ptr = callback_context.own_for_native();
+            *self.active_context.lock().unwrap() = Some(Arc::downgrade(&callback_context));
             let result = unsafe {
-                whosaid_recorder_start(
-                    session_dir.as_ptr(),
-                    recorder_callback,
-                    context_ptr.cast_mut().cast(),
-                )
+                whosaid_recorder_start(session_dir.as_ptr(), recorder_callback, context_ptr)
             };
             if result == 0 {
                 return Ok(());
             }
 
-            // begin 失败若已发送 fatal_error，回调已经释放 C 侧引用；会话门禁拒绝等
-            // 无回调失败则由这里回收，AtomicBool 避免双重释放。
-            if !callback_context
-                .native_owner_released
-                .swap(true, Ordering::AcqRel)
-            {
-                unsafe { drop(Arc::from_raw(context_ptr)) };
-            }
+            // begin 失败若已发送 fatal_error，回调已经解除自持有；会话门禁拒绝等
+            // 无回调失败则由这里明确解除，旧指针不会残留到下一代会话。
+            callback_context.release_native_owner();
+            self.release_active_context();
             Err(RecordingError::Native("无法启动原生录音".into()))
         }
 
@@ -174,6 +214,9 @@ mod platform {
             if unsafe { whosaid_recorder_stop() } == 0 {
                 Ok(())
             } else {
+                // ABI 的 -1 表示已无活跃原生会话，不会再有回调。此时解除回调上下文，
+                // 避免协议错误路径因等不到原生终态而永久自持有。
+                self.release_active_context();
                 Err(RecordingError::Native("无法停止原生录音".into()))
             }
         }
@@ -187,7 +230,6 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use std::ffi::CString;
-        use std::sync::atomic::AtomicBool;
         use std::sync::{mpsc, Arc};
 
         use super::*;
@@ -197,26 +239,26 @@ mod platform {
             let (sender, receiver) = mpsc::channel();
             let context = Arc::new(CallbackContext {
                 sink: sender,
-                native_owner_released: AtomicBool::new(false),
+                native_owner: Mutex::new(None),
             });
-            let context_ptr = Arc::into_raw(Arc::clone(&context));
+            let context_ptr = context.own_for_native();
             let json = CString::new(
                 r#"{"type":"stopped","sessionDir":"/tmp/session","systemTrack":"/tmp/system.caf","microphoneTrack":null}"#,
             )
             .unwrap();
 
-            unsafe { recorder_callback(json.as_ptr(), context_ptr.cast_mut().cast()) };
+            unsafe { recorder_callback(json.as_ptr(), context_ptr) };
             drop(json);
 
             assert_eq!(
                 receiver.recv().unwrap(),
                 NativeEvent::Stopped {
-                    session_dir: Some("/tmp/session".into()),
-                    system_track: Some("/tmp/system.caf".into()),
+                    session_dir: "/tmp/session".into(),
+                    system_track: "/tmp/system.caf".into(),
                     microphone_track: None,
                 }
             );
-            assert!(context.native_owner_released.load(Ordering::Acquire));
+            assert!(!context.is_owned_by_native());
         }
 
         #[test]
@@ -224,22 +266,36 @@ mod platform {
             let (sender, receiver) = mpsc::channel();
             let context = Arc::new(CallbackContext {
                 sink: sender,
-                native_owner_released: AtomicBool::new(false),
+                native_owner: Mutex::new(None),
             });
-            let context_ptr = Arc::into_raw(Arc::clone(&context));
+            let context_ptr = context.own_for_native();
             let json = CString::new(r#"{"type":"elapsed","elapsedSeconds":"bad"}"#).unwrap();
 
-            unsafe { recorder_callback(json.as_ptr(), context_ptr.cast_mut().cast()) };
+            unsafe { recorder_callback(json.as_ptr(), context_ptr) };
 
             assert!(matches!(
                 receiver.recv().unwrap(),
-                NativeEvent::FatalError { .. }
+                NativeEvent::ProtocolError { .. }
             ));
-            assert!(!context.native_owner_released.load(Ordering::Acquire));
+            assert!(context.is_owned_by_native());
+            context.release_native_owner();
+        }
 
-            if !context.native_owner_released.swap(true, Ordering::AcqRel) {
-                unsafe { drop(Arc::from_raw(context_ptr)) };
-            }
+        #[test]
+        fn explicit_inactive_cleanup_releases_callback_context() {
+            let (sender, _receiver) = mpsc::channel();
+            let context = Arc::new(CallbackContext {
+                sink: sender,
+                native_owner: Mutex::new(None),
+            });
+            context.own_for_native();
+            let recorder = PlatformRecorder::new();
+            *recorder.active_context.lock().unwrap() = Some(Arc::downgrade(&context));
+
+            recorder.release_active_context();
+
+            assert!(!context.is_owned_by_native());
+            assert!(recorder.active_context.lock().unwrap().is_none());
         }
     }
 }
@@ -252,6 +308,12 @@ mod platform {
     use super::{NativeEvent, NativeRecorder, PermissionSnapshot, RecordingError, SettingsPane};
 
     pub(super) struct PlatformRecorder;
+
+    impl PlatformRecorder {
+        pub(super) fn new() -> Self {
+            Self
+        }
+    }
 
     impl NativeRecorder for PlatformRecorder {
         fn permissions(&self) -> Result<PermissionSnapshot, RecordingError> {
@@ -309,17 +371,12 @@ mod tests {
                 elapsed_seconds: 42,
             }
         );
-        assert_eq!(
+        assert!(matches!(
             parse_native_event(
                 br#"{"type":"stopped","sessionDir":null,"systemTrack":null,"microphoneTrack":null}"#,
-            )
-            .unwrap(),
-            NativeEvent::Stopped {
-                session_dir: None,
-                system_track: None,
-                microphone_track: None,
-            }
-        );
+            ),
+            Err(RecordingError::InvalidNativeEvent(_))
+        ));
         assert_eq!(
             parse_native_event(br#"{"type":"fatal_error","message":"failed"}"#).unwrap(),
             NativeEvent::FatalError {
@@ -340,5 +397,21 @@ mod tests {
                 microphone: PermissionStatus::Granted,
             }
         );
+    }
+
+    #[test]
+    fn stopped_requires_nonempty_session_and_system_paths() {
+        for json in [
+            br#"{"type":"stopped","systemTrack":"/tmp/system.caf","microphoneTrack":null}"#.as_slice(),
+            br#"{"type":"stopped","sessionDir":null,"systemTrack":"/tmp/system.caf","microphoneTrack":null}"#.as_slice(),
+            br#"{"type":"stopped","sessionDir":"/tmp/session","systemTrack":null,"microphoneTrack":null}"#.as_slice(),
+            br#"{"type":"stopped","sessionDir":"","systemTrack":"/tmp/system.caf","microphoneTrack":null}"#.as_slice(),
+            br#"{"type":"stopped","sessionDir":"/tmp/session","systemTrack":" ","microphoneTrack":null}"#.as_slice(),
+        ] {
+            assert!(matches!(
+                parse_native_event(json),
+                Err(RecordingError::InvalidNativeEvent(_))
+            ));
+        }
     }
 }

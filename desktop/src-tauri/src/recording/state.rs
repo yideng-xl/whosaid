@@ -80,13 +80,17 @@ pub enum NativeEvent {
     },
     Stopped {
         #[serde(rename = "sessionDir")]
-        session_dir: Option<String>,
+        session_dir: String,
         #[serde(rename = "systemTrack")]
-        system_track: Option<String>,
+        system_track: String,
         #[serde(rename = "microphoneTrack")]
         microphone_track: Option<String>,
     },
     FatalError {
+        message: String,
+    },
+    #[serde(skip_deserializing)]
+    ProtocolError {
         message: String,
     },
 }
@@ -104,8 +108,8 @@ pub struct RecordingSnapshot {
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct RecordingStopResult {
-    pub session_dir: Option<String>,
-    pub system_track: Option<String>,
+    pub session_dir: String,
+    pub system_track: String,
     pub microphone_track: Option<String>,
 }
 
@@ -286,17 +290,26 @@ impl RecordingState {
                 self.snapshot.elapsed_seconds = elapsed_seconds;
             }
             NativeEvent::Stopped {
-                session_dir: _,
+                session_dir,
                 system_track,
                 microphone_track,
             } => {
-                if self.snapshot.phase != RecordingPhase::Stopping {
+                if !matches!(
+                    self.snapshot.phase,
+                    RecordingPhase::Stopping | RecordingPhase::Failed
+                ) {
                     return Err(self.invalid_transition("stopped"));
                 }
-                self.snapshot.recoverable_paths =
-                    system_track.into_iter().chain(microphone_track).collect();
+                if session_dir.trim().is_empty() || system_track.trim().is_empty() {
+                    return Err(RecordingError::InvalidNativeEvent(
+                        "stopped 的 sessionDir 和 systemTrack 不能为空".into(),
+                    ));
+                }
+                self.snapshot.recoverable_paths = std::iter::once(system_track)
+                    .chain(microphone_track)
+                    .collect();
             }
-            NativeEvent::FatalError { message } => {
+            NativeEvent::FatalError { message } | NativeEvent::ProtocolError { message } => {
                 if matches!(
                     self.snapshot.phase,
                     RecordingPhase::Idle | RecordingPhase::Ready
