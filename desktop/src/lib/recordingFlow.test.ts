@@ -12,10 +12,12 @@ import {
   removePendingRecordingSubmission,
   RecordingCloseGuard,
   RecordingSnapshotCoordinator,
+  RecordingSubmissionError,
   RecordingSubmissionRegistry,
   retainFailedRecordingSubmission,
   runRecordingCloseFlow,
   submitFinalizedRecording,
+  transitionRecordingSubmissionFailure,
   upsertPendingRecordingSubmission,
   type PendingRecordingSubmission,
 } from "./recordingFlow";
@@ -236,6 +238,73 @@ describe("录音结束后的自动提交", () => {
       error: "录音设备异常",
     });
     expect(retained.pending).toHaveLength(1);
+  });
+
+  it("正常停止提交失败后解除全量忽略并改由路径marker保护", () => {
+    const finalPath = "/recordings/normal-stop.m4a";
+    const pending: PendingRecordingSubmission[] = [{
+      key: `path:${finalPath}`,
+      label: "录音结果",
+      finalPath,
+      busy: false,
+      error: "提交失败",
+    }];
+    const transition = transitionRecordingSubmissionFailure(
+      {
+        ...recordingState(),
+        phase: "submitting",
+        final_path: finalPath,
+        recoverable_paths: [finalPath],
+      },
+      new RecordingSubmissionError(finalPath, new Error("offline")),
+      {
+        ignoreRecordingEvents: true,
+        submissionFailureFinalPath: null,
+      },
+    );
+
+    expect(transition.eventGate).toEqual({
+      ignoreRecordingEvents: false,
+      submissionFailureFinalPath: finalPath,
+    });
+    expect(transition.snapshot).toMatchObject({
+      phase: "failed",
+      final_path: finalPath,
+      recoverable_paths: [finalPath],
+    });
+
+    const fatal = mergeBackendRecordingSnapshot(
+      transition.snapshot,
+      {
+        ...recordingState(),
+        phase: "failed",
+        error: "编码器异常",
+      },
+      {
+        submissionFailureTerminal: true,
+        submissionFailureFinalPath:
+          transition.eventGate.submissionFailureFinalPath,
+      },
+    );
+    expect(fatal).toMatchObject({
+      phase: "failed",
+      error: "编码器异常",
+      final_path: finalPath,
+      recoverable_paths: [finalPath],
+    });
+    expect(pending).toHaveLength(1);
+
+    expect(
+      mergeBackendRecordingSnapshot(
+        fatal,
+        { ...recordingState(), phase: "mixing" },
+        {
+          submissionFailureTerminal: true,
+          submissionFailureFinalPath:
+            transition.eventGate.submissionFailureFinalPath,
+        },
+      ),
+    ).toBe(fatal);
   });
 });
 

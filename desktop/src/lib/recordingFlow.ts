@@ -127,6 +127,47 @@ export function mergeBackendRecordingSnapshot(
   return incoming;
 }
 
+export interface RecordingEventGateState {
+  ignoreRecordingEvents: boolean;
+  submissionFailureFinalPath: string | null;
+}
+
+export function transitionRecordingSubmissionFailure(
+  snapshot: RecordingSnapshot,
+  error: unknown,
+  eventGate: RecordingEventGateState,
+): {
+  snapshot: RecordingSnapshot;
+  eventGate: RecordingEventGateState;
+} {
+  const errorFinalPath =
+    error instanceof RecordingSubmissionError
+      ? error.finalPath.trim() || null
+      : null;
+  const protectedFinalPath =
+    errorFinalPath ??
+    eventGate.submissionFailureFinalPath?.trim() ??
+    snapshot.final_path?.trim() ??
+    null;
+  const errorMessage = error instanceof Error ? error.message : String(error);
+
+  return {
+    snapshot: {
+      ...snapshot,
+      phase: "failed",
+      final_path: protectedFinalPath,
+      recoverable_paths: protectedFinalPath
+        ? [protectedFinalPath]
+        : snapshot.recoverable_paths.filter((path) => path.trim()),
+      error: errorMessage,
+    },
+    eventGate: {
+      ignoreRecordingEvents: false,
+      submissionFailureFinalPath: protectedFinalPath,
+    },
+  };
+}
+
 interface SnapshotWaiter {
   afterRevision: number;
   resolve: (snapshot: RecordingSnapshot) => void;

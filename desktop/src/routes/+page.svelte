@@ -34,6 +34,7 @@
     RecordingSubmissionRegistry,
     retainFailedRecordingSubmission,
     runRecordingCloseFlow,
+    transitionRecordingSubmissionFailure,
     upsertPendingRecordingSubmission,
     validateFinalPath,
     type PendingRecordingSubmission,
@@ -176,21 +177,17 @@
   }
 
   function showRecordingFailure(error: unknown) {
-    const finalPath =
-      error instanceof RecordingSubmissionError ? error.finalPath : null;
-    const existingFinalPath = recordingSnapshot.final_path?.trim() || null;
-    const retainedFinalPath =
-      finalPath ?? submissionFailureFinalPath ?? existingFinalPath;
-    if (retainedFinalPath) submissionFailureFinalPath = retainedFinalPath;
-    publishRecordingSnapshot({
-      ...recordingSnapshot,
-      phase: "failed",
-      final_path: retainedFinalPath,
-      recoverable_paths: retainedFinalPath
-        ? [retainedFinalPath]
-          : recordingSnapshot.recoverable_paths.filter((path) => path.trim()),
-      error: messageOf(error),
-    });
+    const transition = transitionRecordingSubmissionFailure(
+      recordingSnapshot,
+      error,
+      { ignoreRecordingEvents, submissionFailureFinalPath },
+    );
+    // 三步都在同一个同步调用栈内完成：先建立路径 marker，再发布本地 failed，
+    // 最后解除全量忽略。后续原生事件只能经过 marker-aware merge。
+    submissionFailureFinalPath =
+      transition.eventGate.submissionFailureFinalPath;
+    publishRecordingSnapshot(transition.snapshot);
+    ignoreRecordingEvents = transition.eventGate.ignoreRecordingEvents;
     view = "recording";
   }
 
