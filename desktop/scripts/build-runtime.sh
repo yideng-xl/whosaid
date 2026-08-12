@@ -20,6 +20,7 @@ DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$DESKTOP_DIR/.." && pwd)"
 STAGING_ROOT="$DESKTOP_DIR/src-tauri"
 CORE_SRC="$REPO_ROOT/core/transcribe_core"
+CORE_STAGE="$STAGING_ROOT/core"
 REQUIREMENTS_LOCK="$SCRIPT_DIR/requirements.lock"
 
 # python-build-standalone 发行版：CPython 3.13.14, arm64 macOS, install_only_stripped
@@ -73,8 +74,12 @@ RUNTIME_SIZE="$(du -sh "$STAGING_ROOT/python" | cut -f1)"
 echo "python 运行时体积：$RUNTIME_SIZE"
 
 echo "== 5/6 复制 transcribe_core 源码 =="
-mkdir -p "$STAGING_ROOT/core"
-cp -R "$CORE_SRC" "$STAGING_ROOT/core/transcribe_core"
+mkdir -p "$CORE_STAGE"
+cp -R "$CORE_SRC" "$CORE_STAGE/transcribe_core"
+# 测试或本地运行可能在源码旁留下缓存。只清理复制后的明确生成目录，避免把运行时
+# 缓存打进签名包；绝不删除 $CORE_SRC 中的文件。
+find "$CORE_STAGE" -type d -name "__pycache__" -prune -exec rm -rf {} +
+find "$CORE_STAGE" -type f -name "*.pyc" -delete
 
 echo "== 6/6 下载静态 ffmpeg + ffprobe =="
 mkdir -p "$STAGING_ROOT/ffmpeg"
