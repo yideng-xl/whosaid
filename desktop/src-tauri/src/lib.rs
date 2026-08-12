@@ -3,16 +3,37 @@
 mod recording;
 mod sidecar;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+const CLOSE_REQUESTED_EVENT: &str = "recording://close-requested";
 
 /// 持有 Python 子进程句柄，退出时 kill；用 Mutex<Option<..>> 便于 setup 后填入。
 struct ServiceProcess(Mutex<Option<std::process::Child>>);
 
 /// 已握手到的服务端口；None 表示尚未就绪，前端应轮询。
 struct ServicePort(Mutex<Option<u16>>);
+
+/// `close_after_recording` 发起的关闭只放行对应窗口的一次关闭事件。
+#[derive(Default)]
+struct CloseGuardState(Mutex<HashSet<String>>);
+
+impl CloseGuardState {
+    fn allow_once(&self, label: &str) {
+        self.0.lock().unwrap().insert(label.to_owned());
+    }
+
+    fn consume_allowance(&self, label: &str) -> bool {
+        self.0.lock().unwrap().remove(label)
+    }
+
+    fn revoke(&self, label: &str) {
+        self.0.lock().unwrap().remove(label);
+    }
+}
 
 /// 三态优先级的通用选择器：运行时 env 覆盖 > 候选路径（`exists` 判真才用）> dev 兜底。
 /// 纯函数，不摸文件系统/环境变量，靠调用方注入 `exists` 判定，故可单测（见 path_tests）。
@@ -154,6 +175,25 @@ fn write_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn close_after_recording(
+    window: tauri::WebviewWindow,
+    manager: tauri::State<'_, recording::RecordingManager>,
+    close_guard: tauri::State<'_, CloseGuardState>,
+) -> Result<(), String> {
+    if manager.blocks_window_close() {
+        return Err("录音仍在保存，暂时不能关闭窗口".into());
+    }
+
+    let label = window.label().to_owned();
+    close_guard.allow_once(&label);
+    if let Err(error) = window.close() {
+        close_guard.revoke(&label);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -161,15 +201,19 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(ServiceProcess(Mutex::new(None)))
         .manage(ServicePort(Mutex::new(None)))
+        .manage(CloseGuardState::default())
         .invoke_handler(tauri::generate_handler![
             get_service_port,
             pick_save_path,
             write_file,
+            recording::get_recording_state,
+            recording::get_recording_permissions,
             recording::start_recording,
             recording::stop_recording,
-            recording::get_recording_state,
+            recording::open_recording_settings,
             recording::list_recoverable_recordings,
-            recording::retry_recording_mix
+            recording::retry_recording_mix,
+            close_after_recording
         ])
         .setup(|app| {
             // 打包态资源目录（.app/Contents/Resources/）；tauri dev 下通常返回 Some 但其下不会有
@@ -217,19 +261,52 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 窗口关闭时 kill 子进程（正常关窗的快路径）
-            if let tauri::WindowEvent::Destroyed = event {
-                kill_service(window.app_handle());
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    let manager = window.app_handle().state::<recording::RecordingManager>();
+                    let close_guard = window.app_handle().state::<CloseGuardState>();
+                    if manager.blocks_window_close() {
+                        // 状态必须优先于一次性放行标记：若放行与新录音并发，新录音仍不可被关闭。
+                        close_guard.revoke(window.label());
+                        api.prevent_close();
+                        if let Err(error) = window.emit(CLOSE_REQUESTED_EVENT, ()) {
+                            eprintln!("[whosaid] 无法发送录音退出确认事件：{error}");
+                        }
+                    } else {
+                        // 普通关闭本就可以通过；这里只负责消费命令设置的一次性标记。
+                        close_guard.consume_allowance(window.label());
+                    }
+                }
+                tauri::WindowEvent::Destroyed => {
+                    // 窗口关闭时 kill 子进程（正常关窗的快路径）
+                    window
+                        .app_handle()
+                        .state::<CloseGuardState>()
+                        .revoke(window.label());
+                    kill_service(window.app_handle());
+                }
+                _ => {}
             }
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            // 应用退出（含 Cmd+Q / 进程正常结束）时兜底再 kill 一次；
-            // 强杀/崩溃场景由 Python 端父进程看门狗自我了断（server.py）
-            if let tauri::RunEvent::Exit = event {
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::ExitRequested { api, .. }
+                if app_handle
+                    .state::<recording::RecordingManager>()
+                    .blocks_window_close() =>
+            {
+                api.prevent_exit();
+                if let Err(error) = app_handle.emit(CLOSE_REQUESTED_EVENT, ()) {
+                    eprintln!("[whosaid] 无法发送录音退出确认事件：{error}");
+                }
+            }
+            tauri::RunEvent::Exit => {
+                // 应用退出（含 Cmd+Q / 进程正常结束）时兜底再 kill 一次；
+                // 强杀/崩溃场景由 Python 端父进程看门狗自我了断（server.py）
                 kill_service(app_handle);
             }
+            _ => {}
         });
 }
 
@@ -244,6 +321,25 @@ fn kill_service(app: &tauri::AppHandle) {
 mod path_tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn close_allowance_is_consumed_once_per_window() {
+        let guard = CloseGuardState::default();
+        guard.allow_once("main");
+
+        assert!(guard.consume_allowance("main"));
+        assert!(!guard.consume_allowance("main"));
+        assert!(!guard.consume_allowance("secondary"));
+    }
+
+    #[test]
+    fn close_allowance_can_be_revoked_when_recording_restarts() {
+        let guard = CloseGuardState::default();
+        guard.allow_once("main");
+        guard.revoke("main");
+
+        assert!(!guard.consume_allowance("main"));
+    }
 
     #[test]
     fn env_override_wins_over_everything() {

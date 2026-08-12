@@ -47,7 +47,8 @@ pub struct PermissionSnapshot {
     pub microphone: PermissionStatus,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub enum SettingsPane {
     SystemAudio,
     Microphone,

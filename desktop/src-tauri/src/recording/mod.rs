@@ -12,14 +12,26 @@ use std::sync::{mpsc, Arc, Mutex};
 use mix::{mix_recording, probe_recording, FfmpegTools};
 use native::{platform_recorder, NativeRecorder};
 use state::{
-    NativeEvent, RecordingError, RecordingPhase, RecordingSnapshot, RecordingState,
-    RecordingStopResult as StoppedTracks,
+    NativeEvent, PermissionSnapshot, RecordingError, RecordingPhase, RecordingSnapshot,
+    RecordingState, RecordingStopResult as StoppedTracks, SettingsPane,
 };
 use storage::{RecordingStore, RecoverableRecording, RetryRecording};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const STATE_EVENT: &str = "recording://state";
 type StopOutcome = Result<StoppedTracks, RecordingError>;
+
+fn should_block_close(phase: &RecordingPhase, has_active_session: bool) -> bool {
+    has_active_session
+        || matches!(
+            phase,
+            RecordingPhase::RequestingPermissions
+                | RecordingPhase::Starting
+                | RecordingPhase::Recording
+                | RecordingPhase::Stopping
+                | RecordingPhase::Mixing
+        )
+}
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct RecordingStopResult {
@@ -97,6 +109,19 @@ impl RecordingManager {
 
     pub fn snapshot(&self) -> RecordingSnapshot {
         self.inner.lock().unwrap().state.snapshot()
+    }
+
+    pub(crate) fn blocks_window_close(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        should_block_close(&inner.state.snapshot().phase, inner.active.is_some())
+    }
+
+    fn permissions(&self) -> Result<PermissionSnapshot, RecordingError> {
+        self.native.permissions()
+    }
+
+    fn open_settings(&self, pane: SettingsPane) -> Result<(), RecordingError> {
+        self.native.open_settings(pane)
     }
 
     fn start(&self, app: &AppHandle) -> Result<RecordingSnapshot, RecordingError> {
@@ -582,6 +607,23 @@ pub fn get_recording_state(manager: State<'_, RecordingManager>) -> RecordingSna
 }
 
 #[tauri::command]
+pub fn get_recording_permissions(
+    manager: State<'_, RecordingManager>,
+) -> Result<PermissionSnapshot, String> {
+    manager.permissions().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn open_recording_settings(
+    pane: SettingsPane,
+    manager: State<'_, RecordingManager>,
+) -> Result<(), String> {
+    manager
+        .open_settings(pane)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn list_recoverable_recordings(
     manager: State<'_, RecordingManager>,
 ) -> Result<Vec<RecoverableRecording>, String> {
@@ -614,6 +656,23 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     #[cfg(unix)]
     use tempfile::TempDir;
+
+    #[test]
+    fn active_phases_block_window_close() {
+        for phase in [
+            RecordingPhase::RequestingPermissions,
+            RecordingPhase::Starting,
+            RecordingPhase::Recording,
+            RecordingPhase::Stopping,
+            RecordingPhase::Mixing,
+        ] {
+            assert!(should_block_close(&phase, false));
+        }
+        assert!(!should_block_close(&RecordingPhase::Idle, false));
+        assert!(!should_block_close(&RecordingPhase::Ready, false));
+        assert!(!should_block_close(&RecordingPhase::Failed, false));
+        assert!(should_block_close(&RecordingPhase::Failed, true));
+    }
 
     struct MockNative {
         stop_calls: AtomicUsize,

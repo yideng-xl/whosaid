@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>whosaid 只录制系统声音，不保存屏幕画面。</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>whosaid 使用麦克风录制你在会议中的发言。</string>
+</dict>
+</plist>
