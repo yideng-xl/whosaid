@@ -20,6 +20,23 @@ def test_save_then_load_roundtrip(tmp_path):
     assert j.transcript.to_txt() == "张三：你好\n\n"  # 改名也持久化
 
 
+def test_idempotency_key_roundtrips_and_old_job_defaults_to_none(tmp_path):
+    store = JobStore(str(tmp_path))
+    job = _done_job()
+    job.idempotency_key = "recording:req-1"
+    store.save(job)
+    loaded = JobStore(str(tmp_path)).load_all()[0]
+    assert loaded.idempotency_key == "recording:req-1"
+
+    import json
+    (store.dir / "legacy.json").write_text(json.dumps({
+        "id": "legacy", "audio_path": "/x/old.m4a", "status": "done",
+        "progress": 1.0, "error": None, "transcript": None,
+    }), encoding="utf-8")
+    jobs = {item.id: item for item in JobStore(str(tmp_path)).load_all()}
+    assert jobs["legacy"].idempotency_key is None
+
+
 def test_running_job_marked_failed_on_load(tmp_path):
     store = JobStore(str(tmp_path))
     store.save(Job(id="job2", audio_path="/x/b.m4a", status="running",

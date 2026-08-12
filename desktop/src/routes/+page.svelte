@@ -31,6 +31,7 @@
     RecordingCloseGuard,
     RecordingSnapshotCoordinator,
     RecordingSubmissionError,
+    RecordingSubmissionKeyStore,
     RecordingSubmissionRegistry,
     retainFailedRecordingSubmission,
     runRecordingCloseFlow,
@@ -47,6 +48,7 @@
   import "$lib/tokens.css";
 
   type Api = ReturnType<typeof createApi>;
+  const recordingSubmissionKeys = new RecordingSubmissionKeyStore(localStorage);
 
   let api: Api | null = $state(null);
   let ready = $state(false);
@@ -61,7 +63,14 @@
   let recordingSnapshot = $state<RecordingSnapshot>(recordingState());
   let recordingPermissions = $state<RecordingPermissions | null>(null);
   let recoverableRecordings = $state<RecoverableRecordingItem[]>([]);
-  let pendingRecordingSubmissions = $state<PendingRecordingSubmission[]>([]);
+  let pendingRecordingSubmissions = $state<PendingRecordingSubmission[]>(
+    recordingSubmissionKeys.list().map((submission) => ({
+      ...submission,
+      key: `path:${submission.finalPath}`,
+      busy: false,
+      error: null,
+    })),
+  );
   let recordingActionPending = $state(false);
   let closeRequested = $state(false);
   let closePending = $state(false);
@@ -157,6 +166,7 @@
   }
 
   function acceptSubmissionResult(result: RecordingSubmissionResult) {
+    recordingSubmissionKeys.complete(result.audioPath);
     const completed = completeAcceptedRecordingSubmission(
       recordingSnapshot,
       pendingRecordingSubmissions,
@@ -218,12 +228,17 @@
         }
         return stopped;
       })();
+      const submission = recordingSubmissionKeys.prepare(
+        stopped.final_path,
+        "录音结果",
+      );
       const result = await recordingSubmissions.submitAndAccept(
         stopped.final_path,
         api,
         async (accepted) => {
           if (pageMounted) acceptSubmissionResult(accepted);
         },
+        submission.idempotencyKey,
       );
       return result;
     } catch (error) {
@@ -251,6 +266,7 @@
   async function retryFinalSubmission() {
     if (!api || recordingActionPending || !recordingSnapshot.final_path) return;
     const finalPath = recordingSnapshot.final_path;
+    const submission = recordingSubmissionKeys.prepare(finalPath, "录音结果");
     recordingActionPending = true;
     publishRecordingSnapshot({
       ...recordingSnapshot,
@@ -264,6 +280,7 @@
         async (accepted) => {
           if (pageMounted) acceptSubmissionResult(accepted);
         },
+        submission.idempotencyKey,
       );
     } catch (error) {
       if (pageMounted) showRecordingFailure(error);
@@ -338,6 +355,7 @@
       const mixed = await retryRecordingMix(recording.sessionId);
       if (!pageMounted) return;
       const finalPath = validateFinalPath(mixed.final_path);
+      const submission = recordingSubmissionKeys.prepare(finalPath, label);
       // 混音已经成功并清理了 .incomplete；即使后续提交失败，也不能再展示一个
       // 已不存在的恢复会话；每段最终文件进入独立待提交队列，不能覆盖别段结果。
       recoverableRecordings = completeRecoverableRecording(
@@ -346,7 +364,14 @@
       );
       pendingRecordingSubmissions = upsertPendingRecordingSubmission(
         pendingRecordingSubmissions,
-        { key: pendingKey, label, finalPath, busy: true, error: null },
+        {
+          key: pendingKey,
+          label,
+          finalPath,
+          idempotencyKey: submission.idempotencyKey,
+          busy: true,
+          error: null,
+        },
       );
       await recordingSubmissions.submitAndAccept(
         finalPath,
@@ -354,6 +379,7 @@
         async (accepted) => {
           if (pageMounted) acceptSubmissionResult(accepted);
         },
+        submission.idempotencyKey,
       );
       if (!pageMounted) return;
     } catch (error) {
@@ -365,6 +391,10 @@
             key: pendingKey,
             label,
             finalPath: error.finalPath,
+            idempotencyKey: recordingSubmissionKeys.prepare(
+              error.finalPath,
+              label,
+            ).idempotencyKey,
             busy: false,
             error: messageOf(error),
           },
@@ -384,9 +414,18 @@
     pending: PendingRecordingSubmission,
   ) {
     if (!api || pending.busy) return;
+    const submission = recordingSubmissionKeys.prepare(
+      pending.finalPath,
+      pending.label,
+    );
     pendingRecordingSubmissions = upsertPendingRecordingSubmission(
       pendingRecordingSubmissions,
-      { ...pending, busy: true, error: null },
+      {
+        ...pending,
+        idempotencyKey: submission.idempotencyKey,
+        busy: true,
+        error: null,
+      },
     );
     try {
       await recordingSubmissions.submitAndAccept(
@@ -395,6 +434,7 @@
         async (accepted) => {
           if (pageMounted) acceptSubmissionResult(accepted);
         },
+        submission.idempotencyKey,
       );
       if (!pageMounted) return;
     } catch (error) {
@@ -419,6 +459,7 @@
 
   async function submitFinalPathForClose(finalPath: string) {
     if (!api) throw new Error("转写服务尚未就绪");
+    const submission = recordingSubmissionKeys.prepare(finalPath, "录音结果");
     publishRecordingSnapshot({
       ...recordingSnapshot,
       phase: "submitting",
@@ -433,6 +474,7 @@
         async (accepted) => {
           if (pageMounted) acceptSubmissionResult(accepted);
         },
+        submission.idempotencyKey,
       );
     } catch (error) {
       if (pageMounted) {
@@ -443,6 +485,7 @@
             key: `final:${finalPath}`,
             label: "录音结果",
             finalPath,
+            idempotencyKey: submission.idempotencyKey,
             error,
           },
         );

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 
 from .jobs import Job
@@ -12,20 +14,32 @@ class JobStore:
     def __init__(self, data_dir: str):
         self.dir = Path(data_dir) / "jobs"
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
 
     def _path(self, job_id: str) -> Path:
         return self.dir / f"{job_id}.json"
 
     def save(self, job: Job) -> None:
-        d = {
-            "id": job.id, "audio_path": job.audio_path, "status": job.status,
-            "progress": job.progress, "error": job.error,
-            "total_chunks": job.total_chunks, "chunks_done": job.chunks_done,
-            "created_at": job.created_at, "num_speakers": job.num_speakers,
-            "transcript": job.transcript.to_dict() if job.transcript else None,
-            "blocks": job.blocks,
-        }
-        self._path(job.id).write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        with self._lock:
+            d = {
+                "id": job.id, "audio_path": job.audio_path, "status": job.status,
+                "progress": job.progress, "error": job.error,
+                "total_chunks": job.total_chunks, "chunks_done": job.chunks_done,
+                "created_at": job.created_at, "num_speakers": job.num_speakers,
+                "transcript": job.transcript.to_dict() if job.transcript else None,
+                "blocks": job.blocks, "idempotency_key": job.idempotency_key,
+            }
+            target = self._path(job.id)
+            temporary = self.dir / f".{job.id}.{threading.get_ident()}.tmp"
+            encoded = json.dumps(d, ensure_ascii=False).encode("utf-8")
+            try:
+                with temporary.open("wb") as output:
+                    output.write(encoded)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def delete(self, job_id: str) -> None:
         self._path(job_id).unlink(missing_ok=True)
@@ -47,5 +61,6 @@ class JobStore:
                             chunks_done=d.get("chunks_done", 0),
                             created_at=created_at,
                             num_speakers=d.get("num_speakers"),
-                            blocks=d.get("blocks")))
+                            blocks=d.get("blocks"),
+                            idempotency_key=d.get("idempotency_key")))
         return jobs

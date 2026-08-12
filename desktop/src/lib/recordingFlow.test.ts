@@ -13,6 +13,7 @@ import {
   RecordingCloseGuard,
   RecordingSnapshotCoordinator,
   RecordingSubmissionError,
+  RecordingSubmissionKeyStore,
   RecordingSubmissionRegistry,
   retainFailedRecordingSubmission,
   runRecordingCloseFlow,
@@ -25,6 +26,13 @@ import type { RecordingSnapshot } from "./recording";
 import { recordingState } from "./recordingState";
 
 describe("录音结束后的自动提交", () => {
+  class MemoryStorage {
+    private values = new Map<string, string>();
+    getItem(key: string) { return this.values.get(key) ?? null; }
+    setItem(key: string, value: string) { this.values.set(key, value); }
+    removeItem(key: string) { this.values.delete(key); }
+  }
+
   it("提交最终文件并返回新任务", async () => {
     const api = { submitJob: vi.fn().mockResolvedValue("job-recorded") };
     const result = await finalizeAndSubmit(
@@ -78,6 +86,96 @@ describe("录音结束后的自动提交", () => {
       audioPath: "/recordings/meeting.m4a",
     });
     expect(api.submitJob).toHaveBeenCalledOnce();
+  });
+
+  it("录音提交失败及应用重启后复用同一持久化幂等键", async () => {
+    const storage = new MemoryStorage();
+    const firstStore = new RecordingSubmissionKeyStore(
+      storage,
+      () => "recording:stable-key",
+    );
+    const pending = firstStore.prepare("/recordings/restart.m4a", "录音结果");
+    const failingApi = { submitJob: vi.fn().mockRejectedValue(new Error("response lost")) };
+
+    await expect(
+      submitFinalizedRecording(pending.finalPath, failingApi, pending.idempotencyKey),
+    ).rejects.toBeInstanceOf(RecordingSubmissionError);
+    expect(failingApi.submitJob).toHaveBeenCalledWith(
+      "/recordings/restart.m4a",
+      undefined,
+      "recording:stable-key",
+    );
+
+    // 新实例代表应用重启；恢复条目和重试都必须沿用已落盘的键。
+    const restartedStore = new RecordingSubmissionKeyStore(storage, () => "unexpected");
+    expect(restartedStore.list()).toEqual([pending]);
+    const retryApi = { submitJob: vi.fn().mockResolvedValue("job-existing") };
+    await submitFinalizedRecording(
+      pending.finalPath,
+      retryApi,
+      restartedStore.prepare(pending.finalPath, "录音结果").idempotencyKey,
+    );
+    expect(retryApi.submitJob).toHaveBeenCalledWith(
+      "/recordings/restart.m4a",
+      undefined,
+      "recording:stable-key",
+    );
+  });
+
+  it("录音接纳后清掉持久化条目，普通拖入不自动携带幂等键", async () => {
+    const storage = new MemoryStorage();
+    const keyStore = new RecordingSubmissionKeyStore(storage, () => "recording:key");
+    keyStore.prepare("/recordings/a.m4a", "录音结果");
+    keyStore.complete("/recordings/a.m4a");
+    expect(new RecordingSubmissionKeyStore(storage, () => "other").list()).toEqual([]);
+
+    const api = { submitJob: vi.fn().mockResolvedValue("job-manual") };
+    await submitFinalizedRecording("/imports/a.m4a", api);
+    expect(api.submitJob).toHaveBeenCalledWith("/imports/a.m4a");
+  });
+
+  it("持久化介质写失败时先阻止POST，当前最终路径仍保留重提入口", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem = () => { throw new Error("quota exceeded"); };
+    const keyStore = new RecordingSubmissionKeyStore(storage, () => "recording:key");
+    const api = { submitJob: vi.fn() };
+    let failure: unknown;
+    try {
+      const submission = keyStore.prepare("/recordings/safe.m4a", "录音结果");
+      await submitFinalizedRecording(
+        submission.finalPath,
+        api,
+        submission.idempotencyKey,
+      );
+    } catch (error) {
+      failure = error;
+    }
+    expect(api.submitJob).not.toHaveBeenCalled();
+    const transition = transitionRecordingSubmissionFailure(
+      {
+        ...recordingState(),
+        phase: "submitting",
+        final_path: "/recordings/safe.m4a",
+        recoverable_paths: ["/recordings/safe.m4a"],
+      },
+      failure,
+      { ignoreRecordingEvents: true, submissionFailureFinalPath: null },
+    );
+    expect(transition.snapshot).toMatchObject({
+      phase: "failed",
+      final_path: "/recordings/safe.m4a",
+      recoverable_paths: ["/recordings/safe.m4a"],
+    });
+  });
+
+  it("持久化索引使用完整路径，不同目录的同名文件互不冲突", () => {
+    const storage = new MemoryStorage();
+    const keys = ["recording:first", "recording:second"];
+    const keyStore = new RecordingSubmissionKeyStore(storage, () => keys.shift()!);
+    const first = keyStore.prepare("/recordings/a/meeting.m4a", "第一段");
+    const second = keyStore.prepare("/recordings/b/meeting.m4a", "第二段");
+    expect(first.idempotencyKey).not.toBe(second.idempotencyKey);
+    expect(keyStore.list()).toEqual([first, second]);
   });
 
   it("创建与拖入音频一致的排队任务并避免重复插入", () => {
@@ -556,8 +654,12 @@ describe("提交和关闭单飞", () => {
       ),
     };
     const registry = new RecordingSubmissionRegistry();
-    const first = registry.submit(" /recordings/meeting.m4a ", api);
-    const second = registry.submit("/recordings/meeting.m4a", api);
+    const first = registry.submit(
+      " /recordings/meeting.m4a ", api, "recording:same",
+    );
+    const second = registry.submit(
+      "/recordings/meeting.m4a", api, "recording:same",
+    );
 
     expect(api.submitJob).toHaveBeenCalledOnce();
     expect(registry.get("/recordings/meeting.m4a")).toBeTruthy();
@@ -569,7 +671,7 @@ describe("提交和关闭单飞", () => {
     expect(registry.get("/recordings/meeting.m4a")).toBeUndefined();
   });
 
-  it("拖入、恢复和关闭同一路径并发只创建一个任务", async () => {
+  it("同一录音的恢复、重试和关闭并发只创建一个任务", async () => {
     let finish!: (jobId: string) => void;
     const api = {
       submitJob: vi.fn(
@@ -577,12 +679,18 @@ describe("提交和关闭单飞", () => {
       ),
     };
     const registry = new RecordingSubmissionRegistry();
-    const drag = registry.submit(" /recordings/shared.m4a ", api);
-    const recovery = registry.submit("/recordings/shared.m4a", api);
-    const close = registry.submit("/recordings/shared.m4a", api);
+    const retry = registry.submit(
+      " /recordings/shared.m4a ", api, "recording:shared",
+    );
+    const recovery = registry.submit(
+      "/recordings/shared.m4a", api, "recording:shared",
+    );
+    const close = registry.submit(
+      "/recordings/shared.m4a", api, "recording:shared",
+    );
 
     finish("job-shared");
-    const results = await Promise.all([drag, recovery, close]);
+    const results = await Promise.all([retry, recovery, close]);
     const jobs = results.reduce(
       (current, result) =>
         prependRecordingJob(current, createRecordingJob(result, 100)),
@@ -616,23 +724,26 @@ describe("提交和关闭单飞", () => {
       subscribe(result.jobId);
     };
 
-    const drag = registry.submitAndAccept(
+    const retry = registry.submitAndAccept(
       " /recordings/shared.m4a ",
       api,
       acceptOnce,
+      "recording:shared",
     );
     const recovery = registry.submitAndAccept(
       "/recordings/shared.m4a",
       api,
       acceptOnce,
+      "recording:shared",
     );
     const close = registry.submitAndAccept(
       "/recordings/shared.m4a",
       api,
       acceptOnce,
+      "recording:shared",
     );
     finish("job-shared");
-    await Promise.all([drag, recovery, close]);
+    await Promise.all([retry, recovery, close]);
 
     expect(api.submitJob).toHaveBeenCalledOnce();
     expect(accept).toHaveBeenCalledOnce();
@@ -664,11 +775,15 @@ describe("提交和关闭单飞", () => {
       );
       pending = retained.pending;
     };
-    const first = registry.submitAndAccept("/a.m4a", api, vi.fn()).catch((error) => {
+    const first = registry.submitAndAccept(
+      "/a.m4a", api, vi.fn(), "recording:one",
+    ).catch((error) => {
       retain(error);
       throw error;
     });
-    const second = registry.submitAndAccept(" /a.m4a ", api, vi.fn()).catch((error) => {
+    const second = registry.submitAndAccept(
+      " /a.m4a ", api, vi.fn(), "recording:one",
+    ).catch((error) => {
       retain(error);
       throw error;
     });
@@ -699,6 +814,22 @@ describe("提交和关闭单飞", () => {
       // 提交边界拒绝空 jobId，页面不会进入建任务分支。
     }
     expect(jobs).toEqual([]);
+  });
+
+  it("普通手工提交同一路径的每次操作都创建新任务", async () => {
+    const api = {
+      submitJob: vi.fn()
+        .mockResolvedValueOnce("job-manual-1")
+        .mockResolvedValueOnce("job-manual-2"),
+    };
+    const registry = new RecordingSubmissionRegistry();
+    const [first, second] = await Promise.all([
+      registry.submit("/imports/repeat.m4a", api),
+      registry.submit("/imports/repeat.m4a", api),
+    ]);
+    expect(api.submitJob).toHaveBeenCalledTimes(2);
+    expect(first.jobId).toBe("job-manual-1");
+    expect(second.jobId).toBe("job-manual-2");
   });
 
   it("提交失败也会settle并清理registry供重试", async () => {

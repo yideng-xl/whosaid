@@ -5,7 +5,11 @@ import type {
 } from "./recording";
 
 export interface RecordingSubmissionApi {
-  submitJob(audioPath: string): Promise<string>;
+  submitJob(
+    audioPath: string,
+    numSpeakers?: number,
+    idempotencyKey?: string,
+  ): Promise<string>;
 }
 
 export interface RecordingSubmissionResult {
@@ -43,10 +47,13 @@ export function validateFinalPath(finalPath: string): string {
 export async function submitFinalizedRecording(
   finalPath: string,
   api: RecordingSubmissionApi,
+  idempotencyKey?: string,
 ): Promise<RecordingSubmissionResult> {
   const validatedPath = validateFinalPath(finalPath);
   try {
-    const rawJobId = await api.submitJob(validatedPath);
+    const rawJobId = idempotencyKey
+      ? await api.submitJob(validatedPath, undefined, idempotencyKey)
+      : await api.submitJob(validatedPath);
     const jobId = rawJobId.trim();
     if (!jobId) throw new Error("转写服务返回的任务 ID 为空");
     return { jobId, audioPath: validatedPath };
@@ -281,6 +288,7 @@ export class RecordingSubmissionRegistry {
   submit(
     finalPath: string,
     api: RecordingSubmissionApi,
+    idempotencyKey?: string,
   ): Promise<RecordingSubmissionResult> {
     let validatedPath: string;
     try {
@@ -288,10 +296,12 @@ export class RecordingSubmissionRegistry {
     } catch (error) {
       return Promise.reject(error);
     }
+    // 无键调用代表一次明确的手工提交，不按路径单飞；用户可以主动对同一文件再转一次。
+    if (!idempotencyKey) return submitFinalizedRecording(validatedPath, api);
     const existing = this.inFlight.get(validatedPath);
     if (existing) return existing;
 
-    const task = submitFinalizedRecording(validatedPath, api);
+    const task = submitFinalizedRecording(validatedPath, api, idempotencyKey);
     this.inFlight.set(validatedPath, task);
     void task.then(
       () => this.clear(validatedPath, task),
@@ -316,6 +326,7 @@ export class RecordingSubmissionRegistry {
     finalPath: string,
     api: RecordingSubmissionApi,
     accept: (result: RecordingSubmissionResult) => void | Promise<void>,
+    idempotencyKey?: string,
   ): Promise<RecordingSubmissionResult> {
     let validatedPath: string;
     try {
@@ -323,10 +334,16 @@ export class RecordingSubmissionRegistry {
     } catch (error) {
       return Promise.reject(error);
     }
+    if (!idempotencyKey) {
+      return submitFinalizedRecording(validatedPath, api).then(async (result) => {
+        await accept(result);
+        return result;
+      });
+    }
     const existing = this.acceptanceInFlight.get(validatedPath);
     if (existing) return existing;
 
-    const task = this.submit(validatedPath, api).then(async (result) => {
+    const task = this.submit(validatedPath, api, idempotencyKey).then(async (result) => {
       await accept(result);
       return result;
     });
@@ -388,8 +405,103 @@ export interface PendingRecordingSubmission {
   key: string;
   label: string;
   finalPath: string;
+  idempotencyKey?: string;
   busy: boolean;
   error: string | null;
+}
+
+interface RecordingSubmissionStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+export interface PersistedRecordingSubmission {
+  label: string;
+  finalPath: string;
+  idempotencyKey: string;
+}
+
+const RECORDING_SUBMISSIONS_STORAGE_KEY =
+  "whosaid.recording-submissions.v1";
+
+/**
+ * 录音最终文件的提交意图。先持久化再发 POST，响应丢失或应用重启后仍复用同一键。
+ * 这里不接管普通拖入文件，避免把“同一路径再次手工转写”误判成重复请求。
+ */
+export class RecordingSubmissionKeyStore {
+  constructor(
+    private readonly storage: RecordingSubmissionStorage,
+    private readonly makeKey: () => string = () =>
+      `recording:${crypto.randomUUID()}`,
+  ) {}
+
+  list(): PersistedRecordingSubmission[] {
+    const encoded = this.storage.getItem(RECORDING_SUBMISSIONS_STORAGE_KEY);
+    if (!encoded) return [];
+    try {
+      const decoded: unknown = JSON.parse(encoded);
+      if (!Array.isArray(decoded)) return [];
+      const byPath = new Map<string, PersistedRecordingSubmission>();
+      for (const candidate of decoded) {
+        if (!candidate || typeof candidate !== "object") continue;
+        const value = candidate as Record<string, unknown>;
+        const finalPath =
+          typeof value.finalPath === "string" ? value.finalPath.trim() : "";
+        const idempotencyKey =
+          typeof value.idempotencyKey === "string"
+            ? value.idempotencyKey.trim()
+            : "";
+        const label = typeof value.label === "string" && value.label.trim()
+          ? value.label.trim()
+          : "录音结果";
+        if (!finalPath || !idempotencyKey) continue;
+        byPath.set(finalPath, { finalPath, idempotencyKey, label });
+      }
+      return [...byPath.values()];
+    } catch {
+      return [];
+    }
+  }
+
+  prepare(finalPath: string, label: string): PersistedRecordingSubmission {
+    const normalizedPath = validateFinalPath(finalPath);
+    const existing = this.list().find(
+      (submission) => submission.finalPath === normalizedPath,
+    );
+    if (existing) return existing;
+    const idempotencyKey = this.makeKey().trim();
+    if (!idempotencyKey) {
+      throw new RecordingFlowError("无法生成录音转写提交标识");
+    }
+    const submission = {
+      finalPath: normalizedPath,
+      label: label.trim() || "录音结果",
+      idempotencyKey,
+    };
+    this.persist([...this.list(), submission]);
+    return submission;
+  }
+
+  complete(finalPath: string): void {
+    const normalizedPath = validateFinalPath(finalPath);
+    this.persist(
+      this.list().filter(
+        (submission) => submission.finalPath !== normalizedPath,
+      ),
+    );
+  }
+
+  private persist(submissions: PersistedRecordingSubmission[]): void {
+    if (submissions.length === 0) {
+      this.storage.removeItem(RECORDING_SUBMISSIONS_STORAGE_KEY);
+      return;
+    }
+    this.storage.setItem(
+      RECORDING_SUBMISSIONS_STORAGE_KEY,
+      JSON.stringify(submissions),
+    );
+  }
 }
 
 export function completeAcceptedRecordingSubmission(
@@ -501,6 +613,7 @@ export function retainFailedRecordingSubmission(
     key: string;
     label: string;
     finalPath: string;
+    idempotencyKey?: string;
     error: unknown;
   },
 ): {
@@ -524,6 +637,7 @@ export function retainFailedRecordingSubmission(
       key: failure.key,
       label: failure.label,
       finalPath,
+      idempotencyKey: failure.idempotencyKey,
       busy: false,
       error,
     }),

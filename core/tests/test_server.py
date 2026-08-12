@@ -58,6 +58,38 @@ def test_submit_and_fetch_job(tmp_path):
     assert "说话人A：你好" in job["txt"]
 
 
+def test_submit_accepts_optional_idempotency_key_and_returns_existing_job(tmp_path):
+    c = make_client(tmp_path)
+    payload = {
+        "audio_path": "/recordings/meeting.m4a",
+        "idempotency_key": "recording:response-lost",
+    }
+    # 首次响应由客户端丢弃；再次 POST 必须接回同一服务端任务。
+    first_id = c.post("/jobs", json=payload).json()["job_id"]
+    second_id = c.post("/jobs", json=payload).json()["job_id"]
+    assert second_id == first_id
+    assert [j["id"] for j in c.get("/jobs").json()].count(first_id) == 1
+
+
+def test_submit_without_key_remains_non_idempotent(tmp_path):
+    c = make_client(tmp_path)
+    payload = {"audio_path": "/x/a.m4a"}
+    assert c.post("/jobs", json=payload).json()["job_id"] != \
+        c.post("/jobs", json=payload).json()["job_id"]
+
+
+def test_reusing_key_for_different_audio_is_rejected(tmp_path):
+    c = make_client(tmp_path)
+    key = "recording:one-operation"
+    assert c.post(
+        "/jobs", json={"audio_path": "/x/a.m4a", "idempotency_key": key}
+    ).status_code == 200
+    response = c.post(
+        "/jobs", json={"audio_path": "/x/b.m4a", "idempotency_key": key}
+    )
+    assert response.status_code == 409
+
+
 def test_get_job_returns_plain_txt_without_speaker_prefix(tmp_path):
     """done 任务的 plain_txt 是纯文字稿（各段 text 直接拼接），不含分人稿的"说话人X："前缀。"""
     c = make_client(tmp_path)

@@ -17,6 +17,26 @@ describe("api", () => {
     );
   });
 
+  it("submitJob 可携带录音幂等键", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ job_id: "job1" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(12345);
+    await api.submitJob("/recordings/a.m4a", undefined, "recording:req-1");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:12345/jobs",
+      expect.objectContaining({
+        body: JSON.stringify({
+          audio_path: "/recordings/a.m4a",
+          num_speakers: null,
+          idempotency_key: "recording:req-1",
+        }),
+      }),
+    );
+  });
+
   it("exportUrl builds correct url", () => {
     const api = createApi(999);
     expect(api.exportUrl("job2", "srt")).toBe(

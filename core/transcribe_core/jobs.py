@@ -36,6 +36,12 @@ class Job:
     created_at: float = 0.0   # 拖入/提交时刻（epoch 秒），供前端按时间分组倒序
     num_speakers: int | None = None  # 用户填的预计说话人数，传给 pyannote 约束分离（None=自动）
     blocks: list[tuple[float, float, str]] | None = None   # refine_turns 精炼后的发言块，持久化供 resume 免重跑分离
+    # 仅由需要跨 HTTP 重试去重的调用方提供。普通手工提交保持 None，允许同一路径反复转写。
+    idempotency_key: str | None = None
+
+
+class IdempotencyConflict(ValueError):
+    """同一幂等键被用于不同的提交参数。"""
 
 
 class JobQueue:
@@ -72,6 +78,8 @@ class JobQueue:
         # 在此之前 status 仍是 paused/failed，若不拦，闸门争用下连点两次 resume 会起两个线程
         # 把同一 job 跑两遍（重复 diarize、二次新建 Transcript 丢掉期间的改名）。持锁读写。
         self._inflight: set[str] = set()
+        # 幂等键必须和 _jobs 在同一把锁内创建/查询，避免并发 POST 都穿过检查。
+        self._idempotency_jobs: dict[str, str] = {}
         # 仅供测试观察 rediarize 失败→恢复窗口（status==failed 但快照回填尚未开始）的钩子，
         # 生产环境恒为 None、不生效。见 _run_rediarize_guarded 调用处。
         self._test_before_restore: Callable[[Job], None] | None = None
@@ -113,6 +121,8 @@ class JobQueue:
         with self._lock:
             for j in jobs:
                 self._jobs[j.id] = j
+                if j.idempotency_key and j.idempotency_key not in self._idempotency_jobs:
+                    self._idempotency_jobs[j.idempotency_key] = j.id
 
     def submit(self, audio_path: str, num_speakers: int | None = None) -> str:
         jid = self._new_id()
@@ -141,19 +151,58 @@ class JobQueue:
             if not chans:
                 del self._subscribers[job_id]
 
-    def submit_async(self, audio_path: str, num_speakers: int | None = None) -> str:
+    def submit_async(self, audio_path: str, num_speakers: int | None = None,
+                     idempotency_key: str | None = None) -> str:
         """提交任务并立即返回 job_id，实际转写在后台线程执行，可通过 subscribe 拿进度。"""
-        jid = self._new_id()
-        job = Job(id=jid, audio_path=audio_path, status="queued",
-                  progress=0.0, transcript=None, error=None, created_at=time.time(),
-                  num_speakers=num_speakers)
-        self._jobs[jid] = job
-        self._notify(job)
-
+        key = idempotency_key.strip() if idempotency_key is not None else None
+        if idempotency_key is not None and not key:
+            raise ValueError("幂等键不能为空")
         with self._lock:
+            if key is not None:
+                existing_id = self._idempotency_jobs.get(key)
+                if existing_id is not None:
+                    existing = self._jobs.get(existing_id)
+                    if existing is None:
+                        # 防御旧版直接改 _jobs 的调用；删除任务后键不能永久占位。
+                        del self._idempotency_jobs[key]
+                    elif (existing.audio_path, existing.num_speakers) != (
+                        audio_path, num_speakers
+                    ):
+                        raise IdempotencyConflict("幂等键已用于不同的转写参数")
+                    else:
+                        return existing_id
+
+            jid = self._new_id()
+            job = Job(id=jid, audio_path=audio_path, status="queued",
+                      progress=0.0, transcript=None, error=None, created_at=time.time(),
+                      num_speakers=num_speakers, idempotency_key=key)
+            self._jobs[jid] = job
+            if key is not None:
+                self._idempotency_jobs[key] = jid
             self._inflight.add(jid)
+
+            # 新建记录必须在放开幂等锁、启动 runner、向 HTTP 返回之前持久化；否则另一请求
+            # 或进程重启可能观察到“键已接纳但任务尚未落盘”的半状态。
+            try:
+                self._notify(job)
+            except Exception:
+                self._inflight.discard(jid)
+                self._jobs.pop(jid, None)
+                if key is not None:
+                    self._idempotency_jobs.pop(key, None)
+                raise
         threading.Thread(target=self.run_job, args=(job, self._emit), daemon=True).start()
         return jid
+
+    def remove(self, job_id: str) -> Job | None:
+        """移除终态任务，并同步释放其幂等键。调用方负责先校验任务状态。"""
+        with self._lock:
+            job = self._jobs.pop(job_id, None)
+            self._pause.pop(job_id, None)
+            if job is not None and job.idempotency_key:
+                if self._idempotency_jobs.get(job.idempotency_key) == job_id:
+                    del self._idempotency_jobs[job.idempotency_key]
+            return job
 
     def run_job(self, job: Job, on_progress: Callable[[Job], None],
                 manage_inflight: bool = True) -> None:

@@ -7,13 +7,14 @@ from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from .jobs import JobQueue
+from .jobs import IdempotencyConflict, JobQueue
 from .models import ModelRegistry
 
 
 class SubmitReq(BaseModel):
     audio_path: str
     num_speakers: int | None = None  # 用户预计说话人数，约束 pyannote 分离（缺省=自动）
+    idempotency_key: str | None = None
 
 
 class RenameReq(BaseModel):
@@ -77,7 +78,15 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
     @app.post("/jobs")
     def submit(req: SubmitReq):
         # 用 submit_async 而非 submit：后台线程执行，接口立即返回，配合 WS 拿流式进度
-        return {"job_id": queue.submit_async(req.audio_path, req.num_speakers)}
+        try:
+            job_id = queue.submit_async(
+                req.audio_path, req.num_speakers, req.idempotency_key
+            )
+        except IdempotencyConflict as error:
+            raise HTTPException(409, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        return {"job_id": job_id}
 
     @app.get("/jobs")
     def list_jobs():
@@ -145,8 +154,7 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
         # 把已删 JSON 复活，故仅允许终态（done/failed）与 paused 删除。
         if j.status in ("running", "queued"):
             raise HTTPException(409, "任务进行中，请先暂停或等待完成再删除")
-        queue._jobs.pop(job_id, None)
-        queue._pause.pop(job_id, None)
+        queue.remove(job_id)
         if store is not None:
             store.delete(job_id)
         return {"ok": True}

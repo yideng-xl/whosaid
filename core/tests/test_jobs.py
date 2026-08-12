@@ -6,6 +6,7 @@ from transcribe_core.jobs import JobQueue, Job
 from transcribe_core.models import ModelRegistry
 from transcribe_core.transcript import Segment
 from transcribe_core.backend import InferenceBackend
+from transcribe_core.store import JobStore
 
 
 class FakeBackend(InferenceBackend):
@@ -154,6 +155,142 @@ def test_on_change_called_on_terminal_and_submit():
         time.sleep(0.02)
     statuses = [s for _, s in seen]
     assert "queued" in statuses and "done" in statuses
+
+
+def test_same_idempotency_key_creates_one_job_and_one_runner(tmp_path):
+    """客户端丢失首次响应后重试，同一键只能接回原任务，不能再启动 runner。"""
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    class BlockingBackend(FakeBackend):
+        def diarize(self, audio_path, num_speakers):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            entered.set()
+            release.wait(timeout=2)
+            return super().diarize(audio_path, num_speakers)
+
+    store = JobStore(str(tmp_path))
+    q = JobQueue(
+        BlockingBackend(),
+        on_change=store.save,
+        duration_fn=lambda p: 1.0,
+        extract_fn=lambda src, start, dur: src,
+    )
+    try:
+        first = q.submit_async("/recordings/a.m4a", idempotency_key="recording:req-1")
+        assert entered.wait(timeout=1)
+        retried = q.submit_async("/recordings/a.m4a", idempotency_key="recording:req-1")
+        assert retried == first
+        assert len(q.list()) == 1
+        assert calls == 1
+    finally:
+        release.set()
+
+
+def test_concurrent_same_idempotency_key_is_atomic(tmp_path):
+    release = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    class BlockingBackend(FakeBackend):
+        def diarize(self, audio_path, num_speakers):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            release.wait(timeout=2)
+            return super().diarize(audio_path, num_speakers)
+
+    store = JobStore(str(tmp_path))
+    q = JobQueue(
+        BlockingBackend(),
+        on_change=store.save,
+        duration_fn=lambda p: 1.0,
+        extract_fn=lambda src, start, dur: src,
+    )
+    barrier = threading.Barrier(9)
+    ids: list[str] = []
+
+    def submit_once():
+        barrier.wait()
+        ids.append(q.submit_async("/recordings/a.m4a", idempotency_key="recording:req-race"))
+
+    threads = [threading.Thread(target=submit_once) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=1)
+    try:
+        assert len(set(ids)) == 1
+        assert len(q.list()) == 1
+        for _ in range(50):
+            if calls:
+                break
+            time.sleep(0.01)
+        assert calls == 1
+    finally:
+        release.set()
+
+
+def test_idempotency_key_survives_restart_without_new_runner(tmp_path):
+    release = threading.Event()
+    store = JobStore(str(tmp_path))
+
+    class BlockingBackend(FakeBackend):
+        def diarize(self, audio_path, num_speakers):
+            release.wait(timeout=2)
+            return super().diarize(audio_path, num_speakers)
+
+    first_queue = JobQueue(
+        BlockingBackend(),
+        on_change=store.save,
+        duration_fn=lambda p: 1.0,
+        extract_fn=lambda src, start, dur: src,
+    )
+    first_id = first_queue.submit_async(
+        "/recordings/a.m4a", idempotency_key="recording:req-restart"
+    )
+    loaded = JobStore(str(tmp_path)).load_all()
+    second_calls = 0
+
+    class CountingBackend(FakeBackend):
+        def diarize(self, audio_path, num_speakers):
+            nonlocal second_calls
+            second_calls += 1
+            return super().diarize(audio_path, num_speakers)
+
+    second_queue = JobQueue(
+        CountingBackend(),
+        on_change=store.save,
+        duration_fn=lambda p: 1.0,
+        extract_fn=lambda src, start, dur: src,
+    )
+    second_queue.preload(loaded)
+    try:
+        assert second_queue.submit_async(
+            "/recordings/a.m4a", idempotency_key="recording:req-restart"
+        ) == first_id
+        assert second_calls == 0
+        assert len(second_queue.list()) == 1
+    finally:
+        release.set()
+
+
+def test_different_or_missing_keys_keep_existing_submit_behavior():
+    q = JobQueue(
+        FakeBackend(),
+        duration_fn=lambda p: 1.0,
+        extract_fn=lambda src, start, dur: src,
+    )
+    keyed_a = q.submit_async("/recordings/a.m4a", idempotency_key="recording:a")
+    keyed_b = q.submit_async("/recordings/a.m4a", idempotency_key="recording:b")
+    legacy_a = q.submit_async("/recordings/a.m4a")
+    legacy_b = q.submit_async("/recordings/a.m4a")
+    assert len({keyed_a, keyed_b, legacy_a, legacy_b}) == 4
 
 
 def test_chunked_run_covers_full_duration_with_offsets():
