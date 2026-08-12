@@ -1,5 +1,6 @@
 #include "../RecorderBridge.h"
 #include "../RecorderPermissionState.h"
+#include "../RecorderSessionGate.h"
 #include "../TimelineWriter.h"
 
 #import <Foundation/Foundation.h>
@@ -19,6 +20,12 @@ int main() {
 
         assert(WSSilenceFrames(1'000'000'000, 1'250'000'000, 48'000) == 12'000);
         assert(WSSilenceFrames(1'000'000'000, 999'000'000, 48'000) == 0);
+
+        WSRecorderSessionGate sessionGate;
+        assert(sessionGate.claim());
+        assert(!sessionGate.claim());
+        sessionGate.release();
+        assert(sessionGate.claim());
 
         NSURL *timelineURL = [[NSURL fileURLWithPath:NSTemporaryDirectory()]
             URLByAppendingPathComponent:[NSString stringWithFormat:@"whosaid-%@.caf",

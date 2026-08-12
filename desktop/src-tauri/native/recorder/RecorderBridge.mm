@@ -1,5 +1,6 @@
 #import "RecorderBridge.h"
 #import "RecorderPermissionState.h"
+#import "RecorderSessionGate.h"
 #import "TimelineWriter.h"
 
 #import <AppKit/AppKit.h>
@@ -12,6 +13,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <limits>
 
 namespace {
 
@@ -56,6 +59,7 @@ uint64_t monotonic_nanoseconds() {
 namespace {
 
 WSSystemAudioRecorder *active_recorder = nil;
+WSRecorderSessionGate session_gate;
 
 NSObject *active_recorder_lock() {
     static NSObject *lock = nil;
@@ -70,6 +74,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     @synchronized(active_recorder_lock()) {
         if (active_recorder == recorder) {
             active_recorder = nil;
+            session_gate.release();
         }
     }
 }
@@ -353,6 +358,8 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
         if (self.stopping) {
             return;
         }
+        const BOOL wasStarting = self.starting;
+        const BOOL wasRecording = self.recording;
         self.stopping = YES;
         self.starting = NO;
         self.recording = NO;
@@ -364,8 +371,22 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
             clear_active_recorder(self);
             return;
         }
-        [stream stopCaptureWithCompletionHandler:^(__unused NSError *error) {
+        [stream stopCaptureWithCompletionHandler:^(NSError *error) {
             dispatch_async(self.stateQueue, ^{
+                if (error != nil) {
+                    self.starting = wasStarting;
+                    self.recording = wasRecording;
+                    self.stopping = NO;
+                    if (wasRecording) {
+                        [self startElapsedTimer];
+                    }
+                    [self emit:@{
+                        @"type" : @"fatal_error",
+                        @"message" : [NSString stringWithFormat:@"无法停止系统声音：%@",
+                                                                  error.localizedDescription ?: @"未知错误"]
+                    }];
+                    return;
+                }
                 [self closeWriter];
                 self.stream = nil;
                 clear_active_recorder(self);
@@ -408,41 +429,75 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
         [self failAudioWithCode:6 message:@"无法读取系统声音缓冲区"];
         return;
     }
-    AudioBufferList *bufferList = static_cast<AudioBufferList *>(std::malloc(bufferListSize));
-    if (bufferList == nullptr) {
+    AudioBufferList *allocatedBufferList =
+        static_cast<AudioBufferList *>(std::malloc(bufferListSize));
+    if (allocatedBufferList == nullptr) {
         [self failAudioWithCode:7 message:@"无法分配系统声音缓冲区"];
         return;
     }
     CMBlockBufferRef blockBuffer = nullptr;
     status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-        sampleBuffer, nullptr, bufferList, bufferListSize, kCFAllocatorDefault,
+        sampleBuffer, nullptr, allocatedBufferList, bufferListSize, kCFAllocatorDefault,
         kCFAllocatorDefault, kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
         &blockBuffer);
     if (status != noErr) {
-        std::free(bufferList);
+        std::free(allocatedBufferList);
+        if (blockBuffer != nullptr) {
+            CFRelease(blockBuffer);
+        }
         [self failAudioWithCode:8 message:@"无法复制系统声音缓冲区"];
         return;
     }
 
-    AVAudioPCMBuffer *audioBuffer = [[AVAudioPCMBuffer alloc]
-        initWithPCMFormat:format
-         bufferListNoCopy:bufferList
-              deallocator:^(const AudioBufferList *ownedBufferList) {
-                  std::free(const_cast<AudioBufferList *>(ownedBufferList));
-                  if (blockBuffer != nullptr) {
-                      CFRelease(blockBuffer);
-                  }
-              }];
+    const CMItemCount sampleCount = CMSampleBufferGetNumSamples(sampleBuffer);
+    if (sampleCount <= 0) {
+        std::free(allocatedBufferList);
+        if (blockBuffer != nullptr) {
+            CFRelease(blockBuffer);
+        }
+        return;
+    }
+    if (static_cast<uint64_t>(sampleCount) >
+        std::numeric_limits<AVAudioFrameCount>::max()) {
+        std::free(allocatedBufferList);
+        if (blockBuffer != nullptr) {
+            CFRelease(blockBuffer);
+        }
+        [self failAudioWithCode:9 message:@"系统声音缓冲区帧数超限"];
+        return;
+    }
+    const AVAudioFrameCount frameCount = static_cast<AVAudioFrameCount>(sampleCount);
+    AVAudioPCMBuffer *audioBuffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:format
+                                                                 frameCapacity:frameCount];
     if (audioBuffer == nil) {
-        std::free(bufferList);
+        std::free(allocatedBufferList);
         if (blockBuffer != nullptr) {
             CFRelease(blockBuffer);
         }
         [self failAudioWithCode:9 message:@"无法创建系统声音 PCM 缓冲区"];
         return;
     }
-    audioBuffer.frameLength = static_cast<AVAudioFrameCount>(
-        CMSampleBufferGetNumSamples(sampleBuffer));
+    audioBuffer.frameLength = frameCount;
+
+    AudioBufferList *ownedBufferList = audioBuffer.mutableAudioBufferList;
+    BOOL copied = ownedBufferList->mNumberBuffers == allocatedBufferList->mNumberBuffers;
+    for (UInt32 index = 0; copied && index < ownedBufferList->mNumberBuffers; ++index) {
+        const AudioBuffer source = allocatedBufferList->mBuffers[index];
+        AudioBuffer destination = ownedBufferList->mBuffers[index];
+        copied = source.mData != nullptr && destination.mData != nullptr &&
+                 source.mDataByteSize == destination.mDataByteSize;
+        if (copied) {
+            std::memcpy(destination.mData, source.mData, source.mDataByteSize);
+        }
+    }
+    std::free(allocatedBufferList);
+    if (blockBuffer != nullptr) {
+        CFRelease(blockBuffer);
+    }
+    if (!copied) {
+        [self failAudioWithCode:10 message:@"系统声音缓冲区布局不匹配"];
+        return;
+    }
 
     NSError *writeError = nil;
     if (![self.writer appendBuffer:audioBuffer
@@ -518,7 +573,7 @@ int32_t whosaid_recorder_start(const char *session_dir,
                                WhosaidRecorderCallback callback,
                                void *context) {
     @synchronized(active_recorder_lock()) {
-        if (active_recorder != nil) {
+        if (!session_gate.claim()) {
             return -1;
         }
         WSSystemAudioRecorder *recorder =
@@ -526,6 +581,7 @@ int32_t whosaid_recorder_start(const char *session_dir,
                                                           callback:callback
                                                            context:context];
         if (recorder == nil) {
+            session_gate.release();
             return -1;
         }
         active_recorder = recorder;

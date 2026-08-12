@@ -11,6 +11,7 @@ fn main() {
 
         println!("cargo:rerun-if-changed=native/recorder/RecorderBridge.h");
         println!("cargo:rerun-if-changed=native/recorder/RecorderPermissionState.h");
+        println!("cargo:rerun-if-changed=native/recorder/RecorderSessionGate.h");
         println!("cargo:rerun-if-changed=native/recorder/RecorderBridge.mm");
         println!("cargo:rerun-if-changed=native/recorder/TimelineWriter.h");
         println!("cargo:rerun-if-changed=native/recorder/TimelineWriter.mm");
