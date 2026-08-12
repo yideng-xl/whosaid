@@ -8,9 +8,21 @@
 #include <cassert>
 #include <cstring>
 
+enum WSMicStartResult {
+    WSMicStartResultDenied,
+    WSMicStartResultUnavailable,
+    WSMicStartResultInterrupted,
+};
+
+bool WSMicFailureIsFatal(WSMicStartResult result);
+
 int main() {
     @autoreleasepool {
         assert(whosaid_recorder_api_version() == 1);
+
+        assert(!WSMicFailureIsFatal(WSMicStartResultDenied));
+        assert(!WSMicFailureIsFatal(WSMicStartResultUnavailable));
+        assert(!WSMicFailureIsFatal(WSMicStartResultInterrupted));
 
         assert(std::strcmp(whosaid_system_audio_permission_state(true, false), "granted") == 0);
         assert(std::strcmp(whosaid_system_audio_permission_state(true, true), "granted") == 0);
