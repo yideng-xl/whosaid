@@ -177,6 +177,105 @@ NSArray<NSDictionary<NSString *, id> *> *WSStopTerminalEventsAfterPersistence(
     } ];
 }
 
+typedef NS_ENUM(NSInteger, WSRecorderTerminalState) {
+    WSRecorderTerminalStateOpen,
+    WSRecorderTerminalStateFatal,
+    WSRecorderTerminalStateStopped,
+};
+
+@interface WSRecorderTerminalController : NSObject {
+    WSRecorderTerminalState _state;
+    BOOL _fatalDelivered;
+}
+- (BOOL)allowsSuccess;
+- (void)failWithMessage:(NSString *)message
+                prepare:(dispatch_block_t)prepare
+             stopSystem:(void (^)(void (^completion)(NSError *error)))stopSystem
+                cleanup:(dispatch_block_t)cleanup
+                   emit:(void (^)(NSDictionary<NSString *, id> *event))emit
+                release:(dispatch_block_t)release;
+- (BOOL)emitStoppedEvent:(NSDictionary<NSString *, id> *)event
+                    emit:(void (^)(NSDictionary<NSString *, id> *event))emit;
+@end
+
+@implementation WSRecorderTerminalController
+
+- (instancetype)init {
+    self = [super init];
+    if (self != nil) {
+        _state = WSRecorderTerminalStateOpen;
+    }
+    return self;
+}
+
+- (BOOL)allowsSuccess {
+    @synchronized(self) {
+        return _state == WSRecorderTerminalStateOpen;
+    }
+}
+
+- (void)failWithMessage:(NSString *)message
+                prepare:(dispatch_block_t)prepare
+             stopSystem:(void (^)(void (^completion)(NSError *error)))stopSystem
+                cleanup:(dispatch_block_t)cleanup
+                   emit:(void (^)(NSDictionary<NSString *, id> *event))emit
+                release:(dispatch_block_t)release {
+    @synchronized(self) {
+        if (_state != WSRecorderTerminalStateOpen) {
+            return;
+        }
+        _state = WSRecorderTerminalStateFatal;
+    }
+
+    if (prepare != nil) {
+        prepare();
+    }
+    void (^completion)(NSError *) = ^(NSError *stopError) {
+        @synchronized(self) {
+            if (_fatalDelivered) {
+                return;
+            }
+            _fatalDelivered = YES;
+        }
+        if (cleanup != nil) {
+            cleanup();
+        }
+        NSString *finalMessage = message.length > 0 ? message : @"录音会话失败";
+        if (stopError != nil) {
+            finalMessage = [NSString
+                stringWithFormat:@"%@；系统声音停止失败：%@", finalMessage,
+                                 stopError.localizedDescription ?: @"未知错误"];
+        }
+        if (emit != nil) {
+            emit(@{ @"type" : @"fatal_error", @"message" : finalMessage });
+        }
+        if (release != nil) {
+            release();
+        }
+    };
+    if (stopSystem != nil) {
+        stopSystem(completion);
+    } else {
+        completion(nil);
+    }
+}
+
+- (BOOL)emitStoppedEvent:(NSDictionary<NSString *, id> *)event
+                    emit:(void (^)(NSDictionary<NSString *, id> *event))emit {
+    @synchronized(self) {
+        if (_state != WSRecorderTerminalStateOpen) {
+            return NO;
+        }
+        _state = WSRecorderTerminalStateStopped;
+    }
+    if (emit != nil) {
+        emit(event);
+    }
+    return YES;
+}
+
+@end
+
 namespace {
 
 NSString *const system_audio_permission_requested_key =
@@ -265,6 +364,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 @property(nonatomic, strong) WSTimelineWriter *microphoneWriter;
 @property(nonatomic, strong) NSObject *microphoneLock;
 @property(nonatomic, strong) id microphoneConfigurationObserver;
+@property(nonatomic, strong) WSRecorderTerminalController *terminalController;
 @property(nonatomic, strong) dispatch_queue_t stateQueue;
 @property(nonatomic, strong) dispatch_queue_t audioQueue;
 @property(nonatomic, strong) dispatch_source_t elapsedTimer;
@@ -308,6 +408,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     _callback = callback;
     _callbackContext = context;
     _microphoneLock = [NSObject new];
+    _terminalController = [WSRecorderTerminalController new];
     _stateQueue = dispatch_queue_create("com.yideng.whosaid.recorder.state",
                                         DISPATCH_QUEUE_SERIAL);
     _audioQueue = dispatch_queue_create("com.yideng.whosaid.recorder.system-audio",
@@ -366,6 +467,69 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     }
 }
 
+- (void)beginFatalTerminationWithMessage:(NSString *)message
+                   removeSessionDirectory:(BOOL)removeSessionDirectory
+                                stopSystem:(BOOL)stopSystem {
+    __weak WSSystemAudioRecorder *weakSelf = self;
+    [self.terminalController
+        failWithMessage:message
+                prepare:^{
+                    WSSystemAudioRecorder *strongSelf = weakSelf;
+                    strongSelf.stopping = YES;
+                    strongSelf.starting = NO;
+                    strongSelf.recording = NO;
+                    strongSelf.finished = YES;
+                    [strongSelf cancelElapsedTimer];
+                }
+             stopSystem:^(void (^completion)(NSError *error)) {
+                 WSSystemAudioRecorder *strongSelf = weakSelf;
+                 SCStream *stream = strongSelf.stream;
+                 if (!stopSystem || stream == nil) {
+                     completion(nil);
+                     return;
+                 }
+                 [stream stopCaptureWithCompletionHandler:^(NSError *error) {
+                     dispatch_async(strongSelf.stateQueue, ^{
+                         completion(error);
+                     });
+                 }];
+             }
+                cleanup:^{
+                    WSSystemAudioRecorder *strongSelf = weakSelf;
+                    SCStream *stream = strongSelf.stream;
+                    if (stream != nil) {
+                        NSError *removeOutputError = nil;
+                        [stream removeStreamOutput:strongSelf
+                                              type:SCStreamOutputTypeAudio
+                                             error:&removeOutputError];
+                    }
+                    dispatch_sync(strongSelf.audioQueue, ^{});
+                    [strongSelf stopMicrophoneCapture];
+                    [strongSelf closeWriter];
+                    strongSelf.stream = nil;
+                    if (removeSessionDirectory) {
+                        [strongSelf removeSessionDirectory];
+                    }
+                }
+                   emit:^(NSDictionary<NSString *, id> *event) {
+                       WSSystemAudioRecorder *strongSelf = weakSelf;
+                       [strongSelf emit:event];
+                   }
+                release:^{
+                    WSSystemAudioRecorder *strongSelf = weakSelf;
+                    if (strongSelf != nil) {
+                        clear_active_recorder(strongSelf);
+                    }
+                }];
+}
+
+- (void)terminateForPersistenceContext:(NSString *)context error:(NSError *)error {
+    NSString *message = persistence_failure_event(context, error)[@"message"];
+    [self beginFatalTerminationWithMessage:message
+                    removeSessionDirectory:NO
+                                 stopSystem:YES];
+}
+
 - (void)emitMicrophoneResult:(WSMicStartResult)result {
     if (WSMicFailureIsFatal(result)) {
         return;
@@ -373,8 +537,16 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     self.microphoneStatus = microphone_status(result);
     NSError *manifestError = nil;
     const BOOL persisted = [self writeSessionManifest:&manifestError];
-    [self emitEvents:WSSourceStatusEventsAfterPersistence(
-                         persisted, @"microphone", self.microphoneStatus, manifestError)];
+    if (!persisted) {
+        [self terminateForPersistenceContext:
+                  [NSString stringWithFormat:@"microphone %@ 状态", self.microphoneStatus]
+                                      error:manifestError];
+        return;
+    }
+    if ([self.terminalController allowsSuccess]) {
+        [self emitEvents:WSSourceStatusEventsAfterPersistence(
+                             YES, @"microphone", self.microphoneStatus, nil)];
+    }
 }
 
 - (void)closeMicrophoneWriter {
@@ -507,11 +679,12 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     }
     if (firstValidFrames) {
         dispatch_async(self.stateQueue, ^{
-            if (!self.finished) {
+            if (!self.finished && !self.stopping &&
+                [self.terminalController allowsSuccess]) {
                 NSError *manifestError = nil;
                 if (![self writeSessionManifest:&manifestError]) {
-                    [self emit:persistence_failure_event(@"麦克风首帧清单",
-                                                         manifestError)];
+                    [self terminateForPersistenceContext:@"麦克风首帧清单"
+                                                  error:manifestError];
                 }
             }
         });
@@ -573,8 +746,15 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     self.microphoneStatus = @"active";
     NSError *manifestError = nil;
     const BOOL persisted = [self writeSessionManifest:&manifestError];
-    [self emitEvents:WSSourceStatusEventsAfterPersistence(
-                         persisted, @"microphone", @"active", manifestError)];
+    if (!persisted) {
+        [self terminateForPersistenceContext:@"microphone active 状态"
+                                      error:manifestError];
+        return;
+    }
+    if ([self.terminalController allowsSuccess]) {
+        [self emitEvents:WSSourceStatusEventsAfterPersistence(
+                             YES, @"microphone", @"active", nil)];
+    }
 }
 
 - (void)startMicrophone {
@@ -628,53 +808,28 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 }
 
 - (void)failStartup:(NSError *)error {
-    if (self.stopping) {
+    if (self.stopping || ![self.terminalController allowsSuccess]) {
         return;
     }
-    self.stopping = YES;
-    self.starting = NO;
-    [self cancelElapsedTimer];
-    [self stopMicrophoneCapture];
-    [self closeWriter];
-    self.stream = nil;
-    [self removeSessionDirectory];
-    [self emit:@{
-        @"type" : @"fatal_error",
-        @"message" : error.localizedDescription ?: @"系统声音启动失败"
-    }];
-    clear_active_recorder(self);
+    [self beginFatalTerminationWithMessage:error.localizedDescription
+                                                ?: @"系统声音启动失败"
+                    removeSessionDirectory:YES
+                                 stopSystem:self.stream != nil];
 }
 
 - (void)failDuringRecording:(NSError *)error {
-    if (self.stopping) {
+    if (self.stopping || ![self.terminalController allowsSuccess]) {
         return;
     }
-    self.stopping = YES;
-    self.recording = NO;
     self.systemStatus = @"interrupted";
-    [self cancelElapsedTimer];
-    [self stopMicrophoneCapture];
-    [self closeWriter];
     NSError *manifestError = nil;
+    NSString *message = error.localizedDescription ?: @"系统声音录制中断";
     if (![self writeSessionManifest:&manifestError]) {
-        [self emit:persistence_failure_event(@"系统声音中断清单", manifestError)];
-    } else {
-        [self emit:@{
-            @"type" : @"fatal_error",
-            @"message" : error.localizedDescription ?: @"系统声音录制中断"
-        }];
+        message = persistence_failure_event(@"系统声音中断清单", manifestError)[@"message"];
     }
-    SCStream *stream = self.stream;
-    if (stream != nil) {
-        [stream stopCaptureWithCompletionHandler:^(__unused NSError *stopError) {
-            dispatch_async(self.stateQueue, ^{
-                self.stream = nil;
-                clear_active_recorder(self);
-            });
-        }];
-    } else {
-        clear_active_recorder(self);
-    }
+    [self beginFatalTerminationWithMessage:message
+                    removeSessionDirectory:NO
+                                 stopSystem:YES];
 }
 
 - (void)failAudioWithCode:(NSInteger)code message:(NSString *)message {
@@ -803,8 +958,11 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                     self.systemStatus = @"active";
                     NSError *manifestError = nil;
                     if (![self writeSessionManifest:&manifestError]) {
-                        [self emitEvents:WSSourceStatusEventsAfterPersistence(
-                                             NO, @"system", @"active", manifestError)];
+                        [self terminateForPersistenceContext:@"system active 状态"
+                                                      error:manifestError];
+                        return;
+                    }
+                    if (![self.terminalController allowsSuccess]) {
                         return;
                     }
                     [self emit:@{
@@ -832,6 +990,9 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                               dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
                               NSEC_PER_SEC, NSEC_PER_MSEC * 100);
     dispatch_source_set_event_handler(self.elapsedTimer, ^{
+        if (![self.terminalController allowsSuccess]) {
+            return;
+        }
         const uint64_t now = monotonic_nanoseconds();
         const uint64_t elapsed = now > self.sessionStartNs
                                      ? (now - self.sessionStartNs) / NSEC_PER_SEC
@@ -858,9 +1019,23 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                                     : nil;
     NSError *manifestError = nil;
     const BOOL persisted = [self writeSessionManifest:&manifestError];
-    [self emitEvents:WSStopTerminalEventsAfterPersistence(
-                         persisted, self.sessionURL.path, systemTrackURL.path,
-                         microphoneTrackURL.path, manifestError)];
+    if (!persisted) {
+        NSString *message = persistence_failure_event(@"停止会话清单",
+                                                       manifestError)[@"message"];
+        [self beginFatalTerminationWithMessage:message
+                        removeSessionDirectory:NO
+                                     stopSystem:NO];
+        return;
+    }
+
+    NSDictionary<NSString *, id> *stoppedEvent =
+        WSStopTerminalEventsAfterPersistence(YES, self.sessionURL.path,
+                                             systemTrackURL.path,
+                                             microphoneTrackURL.path, nil).firstObject;
+    [self.terminalController emitStoppedEvent:stoppedEvent
+                                         emit:^(NSDictionary<NSString *, id> *event) {
+                                             [self emit:event];
+                                         }];
     self.stream = nil;
     clear_active_recorder(self);
 }
@@ -870,8 +1045,6 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
         if (self.stopping) {
             return;
         }
-        const BOOL wasStarting = self.starting;
-        const BOOL wasRecording = self.recording;
         self.stopping = YES;
         self.starting = NO;
         self.recording = NO;
@@ -884,17 +1057,12 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
         [stream stopCaptureWithCompletionHandler:^(NSError *error) {
             dispatch_async(self.stateQueue, ^{
                 if (error != nil) {
-                    self.starting = wasStarting;
-                    self.recording = wasRecording;
-                    self.stopping = NO;
-                    if (wasRecording) {
-                        [self startElapsedTimer];
-                    }
-                    [self emit:@{
-                        @"type" : @"fatal_error",
-                        @"message" : [NSString stringWithFormat:@"无法停止系统声音：%@",
-                                                                  error.localizedDescription ?: @"未知错误"]
-                    }];
+                    NSString *message = [NSString
+                        stringWithFormat:@"无法停止系统声音：%@",
+                                         error.localizedDescription ?: @"未知错误"];
+                    [self beginFatalTerminationWithMessage:message
+                                    removeSessionDirectory:NO
+                                                 stopSystem:NO];
                     return;
                 }
                 [self finishStoppedSession];

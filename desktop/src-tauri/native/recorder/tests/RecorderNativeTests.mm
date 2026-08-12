@@ -34,6 +34,18 @@ NSArray<NSDictionary<NSString *, id> *> *WSStopTerminalEventsAfterPersistence(
     NSString *microphoneTrack,
     NSError *error);
 
+@interface WSRecorderTerminalController : NSObject
+- (BOOL)allowsSuccess;
+- (void)failWithMessage:(NSString *)message
+                prepare:(dispatch_block_t)prepare
+             stopSystem:(void (^)(void (^completion)(NSError *error)))stopSystem
+                cleanup:(dispatch_block_t)cleanup
+                   emit:(void (^)(NSDictionary<NSString *, id> *event))emit
+                release:(dispatch_block_t)release;
+- (BOOL)emitStoppedEvent:(NSDictionary<NSString *, id> *)event
+                    emit:(void (^)(NSDictionary<NSString *, id> *event))emit;
+@end
+
 int main() {
     @autoreleasepool {
         assert(whosaid_recorder_api_version() == 1);
@@ -104,6 +116,107 @@ int main() {
         assert(successfulStopEvents.count == 1);
         assert([successfulStopEvents.firstObject[@"type"] isEqual:@"stopped"]);
         assert(successfulStopEvents.firstObject[@"microphoneTrack"] == NSNull.null);
+
+        WSRecorderSessionGate fatalCleanupGate;
+        assert(fatalCleanupGate.claim());
+        WSRecorderSessionGate *fatalCleanupGatePointer = &fatalCleanupGate;
+        WSRecorderTerminalController *startupFailureController =
+            [WSRecorderTerminalController new];
+        NSMutableArray<NSString *> *cleanupOrder = [NSMutableArray array];
+        [startupFailureController
+            failWithMessage:@"manifest failed"
+                    prepare:^{
+                        [cleanupOrder addObject:@"prepare"];
+                    }
+                 stopSystem:^(void (^completion)(NSError *error)) {
+                     [cleanupOrder addObject:@"stop_system"];
+                     completion(nil);
+                 }
+                    cleanup:^{
+                        [cleanupOrder addObject:@"cleanup_writers"];
+                    }
+                       emit:^(NSDictionary<NSString *, id> *event) {
+                           [cleanupOrder addObject:event[@"type"]];
+                       }
+                    release:^{
+                        fatalCleanupGatePointer->release();
+                        [cleanupOrder addObject:@"release_gate"];
+                    }];
+        NSArray<NSString *> *expectedCleanupOrder = @[
+            @"prepare", @"stop_system", @"cleanup_writers", @"fatal_error",
+            @"release_gate"
+        ];
+        assert([cleanupOrder isEqual:expectedCleanupOrder]);
+        assert(fatalCleanupGate.claim());
+
+        WSRecorderTerminalController *microphoneFailureController =
+            [WSRecorderTerminalController new];
+        __block NSInteger microphoneFatalEvents = 0;
+        __block NSInteger stoppedAfterFatalEvents = 0;
+        [microphoneFailureController
+            failWithMessage:@"microphone manifest failed"
+                    prepare:^{}
+                 stopSystem:^(void (^completion)(NSError *error)) {
+                     completion(nil);
+                 }
+                    cleanup:^{}
+                       emit:^(__unused NSDictionary<NSString *, id> *event) {
+                           microphoneFatalEvents += 1;
+                       }
+                    release:^{}];
+        BOOL emittedStoppedAfterFatal = [microphoneFailureController
+            emitStoppedEvent:@{@"type" : @"stopped"}
+                         emit:^(__unused NSDictionary<NSString *, id> *event) {
+                             stoppedAfterFatalEvents += 1;
+                         }];
+        assert(microphoneFatalEvents == 1);
+        assert(!emittedStoppedAfterFatal);
+        assert(stoppedAfterFatalEvents == 0);
+        assert(![microphoneFailureController allowsSuccess]);
+
+        WSRecorderTerminalController *multipleFailureController =
+            [WSRecorderTerminalController new];
+        __block void (^pendingStopCompletion)(NSError *error) = nil;
+        __block NSInteger stopAttempts = 0;
+        __block NSInteger fatalEvents = 0;
+        __block NSString *fatalMessage = nil;
+        void (^deferredStop)(void (^)(NSError *error)) =
+            ^(void (^completion)(NSError *error)) {
+                stopAttempts += 1;
+                pendingStopCompletion = [completion copy];
+            };
+        void (^countFatal)(NSDictionary<NSString *, id> *event) =
+            ^(NSDictionary<NSString *, id> *event) {
+                fatalEvents += 1;
+                fatalMessage = event[@"message"];
+            };
+        [multipleFailureController failWithMessage:@"first"
+                                           prepare:^{}
+                                        stopSystem:deferredStop
+                                           cleanup:^{}
+                                              emit:countFatal
+                                           release:^{}];
+        [multipleFailureController failWithMessage:@"second"
+                                           prepare:^{}
+                                        stopSystem:deferredStop
+                                           cleanup:^{}
+                                              emit:countFatal
+                                           release:^{}];
+        assert(stopAttempts == 1);
+        assert(fatalEvents == 0);
+        assert(![multipleFailureController
+            emitStoppedEvent:@{@"type" : @"stopped"}
+                         emit:^(__unused NSDictionary<NSString *, id> *event) {
+                             stoppedAfterFatalEvents += 1;
+                         }]);
+        assert(pendingStopCompletion != nil);
+        NSError *stopFailure = [NSError
+            errorWithDomain:@"com.yideng.whosaid.tests"
+                       code:2
+                   userInfo:@{NSLocalizedDescriptionKey : @"stop failed"}];
+        pendingStopCompletion(stopFailure);
+        assert(fatalEvents == 1);
+        assert([fatalMessage containsString:@"stop failed"]);
 
         assert(std::strcmp(whosaid_system_audio_permission_state(true, false), "granted") == 0);
         assert(std::strcmp(whosaid_system_audio_permission_state(true, true), "granted") == 0);
