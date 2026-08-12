@@ -6,8 +6,10 @@
 #import <Foundation/Foundation.h>
 
 #include <cassert>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <memory>
 
 enum WSMicStartResult {
     WSMicStartResultDenied,
@@ -45,6 +47,17 @@ NSArray<NSDictionary<NSString *, id> *> *WSStopTerminalEventsAfterPersistence(
 - (BOOL)emitStoppedEvent:(NSDictionary<NSString *, id> *)event
                     emit:(void (^)(NSDictionary<NSString *, id> *event))emit;
 @end
+
+@interface WSRecorderActivityController : NSObject
+- (instancetype)initWithBegin:(id (^)(void))begin
+                           end:(void (^)(id activity))end;
+- (void)begin;
+- (void)end;
+@end
+
+void WSFinalizeSystemAudioOutput(dispatch_block_t removeOutput,
+                                 dispatch_queue_t audioQueue,
+                                 dispatch_block_t closeWriter);
 
 int main() {
     @autoreleasepool {
@@ -217,6 +230,156 @@ int main() {
         pendingStopCompletion(stopFailure);
         assert(fatalEvents == 1);
         assert([fatalMessage containsString:@"stop failed"]);
+
+        dispatch_queue_t audioQueue = dispatch_queue_create(
+            "com.yideng.whosaid.tests.system-audio", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_t finalizerQueue = dispatch_queue_create(
+            "com.yideng.whosaid.tests.finalizer", DISPATCH_QUEUE_SERIAL);
+        dispatch_semaphore_t callbackStarted = dispatch_semaphore_create(0);
+        dispatch_semaphore_t releaseCallback = dispatch_semaphore_create(0);
+        dispatch_semaphore_t finalizerReachedDrain = dispatch_semaphore_create(0);
+        dispatch_semaphore_t finalizerFinished = dispatch_semaphore_create(0);
+        auto callbackFinished = std::make_shared<std::atomic_bool>(false);
+        auto outputRemoved = std::make_shared<std::atomic_bool>(false);
+        auto writerClosed = std::make_shared<std::atomic_bool>(false);
+        auto writerClosedAfterCallback = std::make_shared<std::atomic_bool>(false);
+        auto writerClosedAfterRemoval = std::make_shared<std::atomic_bool>(false);
+        dispatch_async(audioQueue, ^{
+            dispatch_semaphore_signal(callbackStarted);
+            dispatch_semaphore_wait(releaseCallback, DISPATCH_TIME_FOREVER);
+            callbackFinished->store(true);
+        });
+        assert(dispatch_semaphore_wait(
+                   callbackStarted,
+                   dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+        dispatch_async(finalizerQueue, ^{
+            WSFinalizeSystemAudioOutput(
+                ^{
+                    outputRemoved->store(true);
+                    dispatch_semaphore_signal(finalizerReachedDrain);
+                },
+                audioQueue, ^{
+                    writerClosedAfterCallback->store(callbackFinished->load());
+                    writerClosedAfterRemoval->store(outputRemoved->load());
+                    writerClosed->store(true);
+                });
+            dispatch_semaphore_signal(finalizerFinished);
+        });
+        assert(dispatch_semaphore_wait(
+                   finalizerReachedDrain,
+                   dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+        assert(dispatch_semaphore_wait(finalizerFinished, DISPATCH_TIME_NOW) != 0);
+        assert(outputRemoved->load());
+        assert(!writerClosed->load());
+        dispatch_semaphore_signal(releaseCallback);
+        assert(dispatch_semaphore_wait(
+                   finalizerFinished,
+                   dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
+        assert(writerClosed->load());
+        assert(writerClosedAfterCallback->load());
+        assert(writerClosedAfterRemoval->load());
+
+        __block NSInteger normalActivityBegins = 0;
+        __block NSInteger normalActivityEnds = 0;
+        NSObject *normalActivityToken = [NSObject new];
+        WSRecorderActivityController *normalActivity =
+            [[WSRecorderActivityController alloc]
+                initWithBegin:^id {
+                    normalActivityBegins += 1;
+                    return normalActivityToken;
+                }
+                         end:^(__unused id activity) {
+                             normalActivityEnds += 1;
+                         }];
+        [normalActivity begin];
+        [normalActivity begin];
+        [normalActivity end];
+        [normalActivity end];
+        assert(normalActivityBegins == 1);
+        assert(normalActivityEnds == 1);
+
+        __block NSInteger fatalActivityBegins = 0;
+        __block NSInteger fatalActivityEnds = 0;
+        NSObject *fatalActivityToken = [NSObject new];
+        WSRecorderActivityController *fatalActivity =
+            [[WSRecorderActivityController alloc]
+                initWithBegin:^id {
+                    fatalActivityBegins += 1;
+                    return fatalActivityToken;
+                }
+                         end:^(__unused id activity) {
+                             fatalActivityEnds += 1;
+                         }];
+        WSRecorderTerminalController *activityFatalController =
+            [WSRecorderTerminalController new];
+        __block void (^activityStopCompletion)(NSError *error) = nil;
+        [fatalActivity begin];
+        [activityFatalController
+            failWithMessage:@"fatal"
+                    prepare:^{}
+                 stopSystem:^(void (^completion)(NSError *error)) {
+                     activityStopCompletion = [completion copy];
+                 }
+                    cleanup:^{
+                        [fatalActivity end];
+                    }
+                       emit:^(__unused NSDictionary<NSString *, id> *event) {}
+                    release:^{}];
+        assert(fatalActivityBegins == 1);
+        assert(fatalActivityEnds == 0);
+        assert(activityStopCompletion != nil);
+        activityStopCompletion(nil);
+        activityStopCompletion(nil);
+        [fatalActivity end];
+        assert(fatalActivityEnds == 1);
+
+        __block NSInteger startupFailureActivityBegins = 0;
+        __block NSInteger startupFailureActivityEnds = 0;
+        NSObject *startupFailureActivityToken = [NSObject new];
+        WSRecorderActivityController *startupFailureActivity =
+            [[WSRecorderActivityController alloc]
+                initWithBegin:^id {
+                    startupFailureActivityBegins += 1;
+                    return startupFailureActivityToken;
+                }
+                         end:^(__unused id activity) {
+                             startupFailureActivityEnds += 1;
+                         }];
+        WSRecorderTerminalController *activityStartupFailureController =
+            [WSRecorderTerminalController new];
+        [startupFailureActivity begin];
+        [activityStartupFailureController
+            failWithMessage:@"startup persistence failed"
+                    prepare:^{}
+                 stopSystem:^(void (^completion)(NSError *error)) {
+                     completion(nil);
+                 }
+                    cleanup:^{
+                        [startupFailureActivity end];
+                    }
+                       emit:^(__unused NSDictionary<NSString *, id> *event) {}
+                    release:^{}];
+        [startupFailureActivity end];
+        assert(startupFailureActivityBegins == 1);
+        assert(startupFailureActivityEnds == 1);
+
+        __block NSInteger destructionActivityBegins = 0;
+        __block NSInteger destructionActivityEnds = 0;
+        @autoreleasepool {
+            NSObject *destructionActivityToken = [NSObject new];
+            WSRecorderActivityController *destructionActivity =
+                [[WSRecorderActivityController alloc]
+                    initWithBegin:^id {
+                        destructionActivityBegins += 1;
+                        return destructionActivityToken;
+                    }
+                             end:^(__unused id activity) {
+                                 destructionActivityEnds += 1;
+                             }];
+            [destructionActivity begin];
+            assert(destructionActivityBegins == 1);
+        }
+        assert(destructionActivityEnds == 1);
 
         assert(std::strcmp(whosaid_system_audio_permission_state(true, false), "granted") == 0);
         assert(std::strcmp(whosaid_system_audio_permission_state(true, true), "granted") == 0);

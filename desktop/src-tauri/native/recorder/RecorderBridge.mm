@@ -276,6 +276,80 @@ typedef NS_ENUM(NSInteger, WSRecorderTerminalState) {
 
 @end
 
+@interface WSRecorderActivityController : NSObject {
+    id (^_beginActivity)(void);
+    void (^_endActivity)(id activity);
+    id _activity;
+    BOOL _beginAttempted;
+    BOOL _ended;
+}
+- (instancetype)initWithBegin:(id (^)(void))begin
+                           end:(void (^)(id activity))end;
+- (void)begin;
+- (void)end;
+@end
+
+@implementation WSRecorderActivityController
+
+- (instancetype)initWithBegin:(id (^)(void))begin
+                           end:(void (^)(id activity))end {
+    self = [super init];
+    if (self != nil) {
+        _beginActivity = [begin copy];
+        _endActivity = [end copy];
+    }
+    return self;
+}
+
+- (void)begin {
+    @synchronized(self) {
+        if (_beginAttempted || _ended) {
+            return;
+        }
+        _beginAttempted = YES;
+        if (_beginActivity != nil) {
+            _activity = _beginActivity();
+        }
+    }
+}
+
+- (void)end {
+    id activity = nil;
+    void (^endActivity)(id activity) = nil;
+    @synchronized(self) {
+        if (_ended) {
+            return;
+        }
+        _ended = YES;
+        activity = _activity;
+        _activity = nil;
+        endActivity = _endActivity;
+    }
+    if (activity != nil && endActivity != nil) {
+        endActivity(activity);
+    }
+}
+
+- (void)dealloc {
+    [self end];
+}
+
+@end
+
+void WSFinalizeSystemAudioOutput(dispatch_block_t removeOutput,
+                                 dispatch_queue_t audioQueue,
+                                 dispatch_block_t closeWriter) {
+    if (removeOutput != nil) {
+        removeOutput();
+    }
+    if (audioQueue != nil) {
+        dispatch_sync(audioQueue, ^{});
+    }
+    if (closeWriter != nil) {
+        closeWriter();
+    }
+}
+
 namespace {
 
 NSString *const system_audio_permission_requested_key =
@@ -365,6 +439,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 @property(nonatomic, strong) NSObject *microphoneLock;
 @property(nonatomic, strong) id microphoneConfigurationObserver;
 @property(nonatomic, strong) WSRecorderTerminalController *terminalController;
+@property(nonatomic, strong) WSRecorderActivityController *activityController;
 @property(nonatomic, strong) dispatch_queue_t stateQueue;
 @property(nonatomic, strong) dispatch_queue_t audioQueue;
 @property(nonatomic, strong) dispatch_source_t elapsedTimer;
@@ -385,6 +460,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                                  context:(void *)context;
 - (BOOL)begin;
 - (void)stop;
+- (void)finalizeCaptureResources;
 @end
 
 @implementation WSSystemAudioRecorder
@@ -409,6 +485,15 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     _callbackContext = context;
     _microphoneLock = [NSObject new];
     _terminalController = [WSRecorderTerminalController new];
+    _activityController = [[WSRecorderActivityController alloc]
+        initWithBegin:^id {
+            return [[NSProcessInfo processInfo]
+                beginActivityWithOptions:NSActivityIdleSystemSleepDisabled
+                                  reason:@"WhoSaid 正在录制系统声音"];
+        }
+                 end:^(id activity) {
+                     [[NSProcessInfo processInfo] endActivity:activity];
+                 }];
     _stateQueue = dispatch_queue_create("com.yideng.whosaid.recorder.state",
                                         DISPATCH_QUEUE_SERIAL);
     _audioQueue = dispatch_queue_create("com.yideng.whosaid.recorder.system-audio",
@@ -430,6 +515,10 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     if (json != nil && self.callback != nullptr) {
         self.callback(json.UTF8String, self.callbackContext);
     }
+}
+
+- (void)dealloc {
+    [self.activityController end];
 }
 
 - (NSURL *)sessionFileURL:(NSString *)filename {
@@ -496,17 +585,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
              }
                 cleanup:^{
                     WSSystemAudioRecorder *strongSelf = weakSelf;
-                    SCStream *stream = strongSelf.stream;
-                    if (stream != nil) {
-                        NSError *removeOutputError = nil;
-                        [stream removeStreamOutput:strongSelf
-                                              type:SCStreamOutputTypeAudio
-                                             error:&removeOutputError];
-                    }
-                    dispatch_sync(strongSelf.audioQueue, ^{});
-                    [strongSelf stopMicrophoneCapture];
-                    [strongSelf closeWriter];
-                    strongSelf.stream = nil;
+                    [strongSelf finalizeCaptureResources];
                     if (removeSessionDirectory) {
                         [strongSelf removeSessionDirectory];
                     }
@@ -796,6 +875,27 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     self.writer = nil;
 }
 
+- (void)finalizeCaptureResources {
+    SCStream *stream = self.stream;
+    __weak WSSystemAudioRecorder *weakSelf = self;
+    WSFinalizeSystemAudioOutput(
+        ^{
+            if (stream != nil) {
+                NSError *removeOutputError = nil;
+                [stream removeStreamOutput:weakSelf
+                                      type:SCStreamOutputTypeAudio
+                                     error:&removeOutputError];
+            }
+        },
+        self.audioQueue, ^{
+            WSSystemAudioRecorder *strongSelf = weakSelf;
+            [strongSelf stopMicrophoneCapture];
+            [strongSelf closeWriter];
+        });
+    self.stream = nil;
+    [self.activityController end];
+}
+
 - (void)cancelElapsedTimer {
     if (self.elapsedTimer != nil) {
         dispatch_source_cancel(self.elapsedTimer);
@@ -953,6 +1053,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                         return;
                     }
 
+                    [self.activityController begin];
                     self.starting = NO;
                     self.recording = YES;
                     self.systemStatus = @"active";
@@ -1010,8 +1111,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     self.recording = NO;
     self.starting = NO;
     self.systemStatus = @"stopped";
-    [self stopMicrophoneCapture];
-    [self closeWriter];
+    [self finalizeCaptureResources];
 
     NSURL *systemTrackURL = [self sessionFileURL:@"system.caf"];
     NSURL *microphoneTrackURL = self.microphoneHasFrames
@@ -1036,7 +1136,6 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                                          emit:^(NSDictionary<NSString *, id> *event) {
                                              [self emit:event];
                                          }];
-    self.stream = nil;
     clear_active_recorder(self);
 }
 
