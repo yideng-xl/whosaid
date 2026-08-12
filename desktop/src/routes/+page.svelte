@@ -27,7 +27,6 @@
     failRecoverableRecording,
     makeRecoverableRecordingItems,
     prependRecordingJob,
-    removePendingRecordingSubmission,
     RecordingCloseGuard,
     RecordingSnapshotCoordinator,
     RecordingSubmissionError,
@@ -65,6 +64,7 @@
   let closeRequested = $state(false);
   let closePending = $state(false);
   let ignoreRecordingEvents = false;
+  let submissionFailureTerminal = false;
   let pageMounted = false;
   let finalizationInFlight: Promise<RecordingSubmissionResult> | null = null;
   const recordingSnapshots = new RecordingSnapshotCoordinator(recordingState());
@@ -134,7 +134,9 @@
     // 进入 submitting 后才送达。必须先merge，只有接受的快照才增加revision并唤醒等待者。
     const accepted = recordingSnapshots.publishBackend(
       snapshot,
-      ignoreRecordingEvents,
+      ignoreRecordingEvents
+        ? true
+        : { submissionFailureTerminal },
     );
     if (!accepted) return;
     recordingSnapshot = recordingSnapshots.snapshot;
@@ -149,7 +151,7 @@
     }
   }
 
-  function acceptSubmittedJob(result: RecordingSubmissionResult) {
+  function acceptSubmissionResult(result: RecordingSubmissionResult) {
     pendingRecordingSubmissions = pendingRecordingSubmissions.filter(
       (pending) => pending.finalPath !== result.audioPath,
     );
@@ -158,25 +160,25 @@
     selectedJobId = job.id;
     view = "transcript";
     subscribe(job);
-  }
-
-  function acceptRecordingSubmission(result: RecordingSubmissionResult) {
-    acceptSubmittedJob(result);
-    ignoreRecordingEvents = true;
-    publishRecordingSnapshot({
-      ...recordingSnapshot,
-      phase: "idle",
-      elapsed_seconds: 0,
-      final_path: null,
-      recoverable_paths: [],
-      error: null,
-    });
+    if (recordingSnapshot.final_path?.trim() === result.audioPath) {
+      ignoreRecordingEvents = true;
+      submissionFailureTerminal = false;
+      publishRecordingSnapshot({
+        ...recordingSnapshot,
+        phase: "idle",
+        elapsed_seconds: 0,
+        final_path: null,
+        recoverable_paths: [],
+        error: null,
+      });
+    }
   }
 
   function showRecordingFailure(error: unknown) {
     const finalPath =
       error instanceof RecordingSubmissionError ? error.finalPath : null;
     const existingFinalPath = recordingSnapshot.final_path?.trim() || null;
+    if (finalPath ?? existingFinalPath) submissionFailureTerminal = true;
     publishRecordingSnapshot({
       ...recordingSnapshot,
       phase: "failed",
@@ -218,8 +220,13 @@
         }
         return stopped;
       })();
-      const result = await recordingSubmissions.submit(stopped.final_path, api);
-      if (pageMounted) acceptRecordingSubmission(result);
+      const result = await recordingSubmissions.submitAndAccept(
+        stopped.final_path,
+        api,
+        async (accepted) => {
+          if (pageMounted) acceptSubmissionResult(accepted);
+        },
+      );
       return result;
     } catch (error) {
       if (pageMounted) showRecordingFailure(error);
@@ -253,8 +260,13 @@
       error: null,
     });
     try {
-      const result = await recordingSubmissions.submit(finalPath, api);
-      if (pageMounted) acceptRecordingSubmission(result);
+      await recordingSubmissions.submitAndAccept(
+        finalPath,
+        api,
+        async (accepted) => {
+          if (pageMounted) acceptSubmissionResult(accepted);
+        },
+      );
     } catch (error) {
       if (pageMounted) showRecordingFailure(error);
       throw error;
@@ -266,6 +278,7 @@
   async function startDirectRecording() {
     if (recordingActionPending || recordingActive) return;
     ignoreRecordingEvents = false;
+    submissionFailureTerminal = false;
     recordingActionPending = true;
     view = "recording";
     publishRecordingSnapshot({
@@ -337,13 +350,14 @@
         pendingRecordingSubmissions,
         { key: pendingKey, label, finalPath, busy: true, error: null },
       );
-      const result = await recordingSubmissions.submit(finalPath, api);
-      if (!pageMounted) return;
-      pendingRecordingSubmissions = removePendingRecordingSubmission(
-        pendingRecordingSubmissions,
-        pendingKey,
+      await recordingSubmissions.submitAndAccept(
+        finalPath,
+        api,
+        async (accepted) => {
+          if (pageMounted) acceptSubmissionResult(accepted);
+        },
       );
-      acceptSubmittedJob(result);
+      if (!pageMounted) return;
     } catch (error) {
       if (!pageMounted) return;
       if (error instanceof RecordingSubmissionError) {
@@ -377,13 +391,14 @@
       { ...pending, busy: true, error: null },
     );
     try {
-      const result = await recordingSubmissions.submit(pending.finalPath, api);
-      if (!pageMounted) return;
-      pendingRecordingSubmissions = removePendingRecordingSubmission(
-        pendingRecordingSubmissions,
-        pending.key,
+      await recordingSubmissions.submitAndAccept(
+        pending.finalPath,
+        api,
+        async (accepted) => {
+          if (pageMounted) acceptSubmissionResult(accepted);
+        },
       );
-      acceptSubmittedJob(result);
+      if (!pageMounted) return;
     } catch (error) {
       if (pageMounted) {
         pendingRecordingSubmissions = upsertPendingRecordingSubmission(
@@ -414,8 +429,13 @@
       error: null,
     });
     try {
-      const result = await recordingSubmissions.submit(finalPath, api);
-      if (pageMounted) acceptRecordingSubmission(result);
+      await recordingSubmissions.submitAndAccept(
+        finalPath,
+        api,
+        async (accepted) => {
+          if (pageMounted) acceptSubmissionResult(accepted);
+        },
+      );
     } catch (error) {
       if (pageMounted) {
         const retained = retainFailedRecordingSubmission(
@@ -429,6 +449,7 @@
           },
         );
         pendingRecordingSubmissions = retained.pending;
+        submissionFailureTerminal = true;
         publishRecordingSnapshot(retained.snapshot);
         view = "recording";
       }
@@ -449,7 +470,7 @@
               recordingSnapshot.phase === "submitting" &&
               recordingSnapshot.final_path
             ) {
-              const matchingSubmission = recordingSubmissions.get(
+              const matchingSubmission = recordingSubmissions.getAccepted(
                 recordingSnapshot.final_path,
               );
               if (matchingSubmission) {
@@ -665,8 +686,13 @@
       return;
     }
     try {
-      const result = await recordingSubmissions.submit(normalizedPath, api);
-      acceptSubmittedJob(result);
+      await recordingSubmissions.submitAndAccept(
+        normalizedPath,
+        api,
+        async (accepted) => {
+          if (pageMounted) acceptSubmissionResult(accepted);
+        },
+      );
     } catch (err) {
       errorBanner = `提交失败：${err}`;
     }

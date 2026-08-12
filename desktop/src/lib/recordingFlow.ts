@@ -87,9 +87,18 @@ export function prependRecordingJob(
 export function mergeBackendRecordingSnapshot(
   current: RecordingSnapshot,
   incoming: RecordingSnapshot,
-  finalizationAccepted = false,
+  context: boolean | { submissionFailureTerminal?: boolean } = false,
 ): RecordingSnapshot {
-  if (finalizationAccepted) return current;
+  if (context === true) return current;
+  if (
+    typeof context === "object" &&
+    context.submissionFailureTerminal &&
+    current.phase === "failed" &&
+    Boolean(current.final_path) &&
+    ["ready", "mixing", "stopping", "recording"].includes(incoming.phase)
+  ) {
+    return current;
+  }
   if (
     current.phase === "submitting" &&
     incoming.phase === "ready" &&
@@ -131,12 +140,12 @@ export class RecordingSnapshotCoordinator {
 
   publishBackend(
     snapshot: RecordingSnapshot,
-    finalizationAccepted = false,
+    context: boolean | { submissionFailureTerminal?: boolean } = false,
   ): boolean {
     const merged = mergeBackendRecordingSnapshot(
       this.currentSnapshot,
       snapshot,
-      finalizationAccepted,
+      context,
     );
     if (merged === this.currentSnapshot) return false;
     return this.advance(merged);
@@ -202,6 +211,10 @@ export class RecordingSubmissionRegistry {
     string,
     Promise<RecordingSubmissionResult>
   >();
+  private readonly acceptanceInFlight = new Map<
+    string,
+    Promise<RecordingSubmissionResult>
+  >();
 
   submit(
     finalPath: string,
@@ -229,11 +242,54 @@ export class RecordingSubmissionRegistry {
     return this.inFlight.get(validateFinalPath(finalPath));
   }
 
+  getAccepted(finalPath: string): Promise<RecordingSubmissionResult> | undefined {
+    const validatedPath = validateFinalPath(finalPath);
+    return (
+      this.acceptanceInFlight.get(validatedPath) ??
+      this.inFlight.get(validatedPath)
+    );
+  }
+
+  submitAndAccept(
+    finalPath: string,
+    api: RecordingSubmissionApi,
+    accept: (result: RecordingSubmissionResult) => void | Promise<void>,
+  ): Promise<RecordingSubmissionResult> {
+    let validatedPath: string;
+    try {
+      validatedPath = validateFinalPath(finalPath);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const existing = this.acceptanceInFlight.get(validatedPath);
+    if (existing) return existing;
+
+    const task = this.submit(validatedPath, api).then(async (result) => {
+      await accept(result);
+      return result;
+    });
+    this.acceptanceInFlight.set(validatedPath, task);
+    void task.then(
+      () => this.clearAcceptance(validatedPath, task),
+      () => this.clearAcceptance(validatedPath, task),
+    );
+    return task;
+  }
+
   private clear(
     finalPath: string,
     task: Promise<RecordingSubmissionResult>,
   ): void {
     if (this.inFlight.get(finalPath) === task) this.inFlight.delete(finalPath);
+  }
+
+  private clearAcceptance(
+    finalPath: string,
+    task: Promise<RecordingSubmissionResult>,
+  ): void {
+    if (this.acceptanceInFlight.get(finalPath) === task) {
+      this.acceptanceInFlight.delete(finalPath);
+    }
   }
 }
 
@@ -318,10 +374,18 @@ export function upsertPendingRecordingSubmission(
   submissions: PendingRecordingSubmission[],
   next: PendingRecordingSubmission,
 ): PendingRecordingSubmission[] {
-  const index = submissions.findIndex((submission) => submission.key === next.key);
-  if (index < 0) return [...submissions, next];
+  const normalizedPath = validateFinalPath(next.finalPath);
+  const normalizedNext = {
+    ...next,
+    key: `path:${normalizedPath}`,
+    finalPath: normalizedPath,
+  };
+  const index = submissions.findIndex(
+    (submission) => submission.finalPath === normalizedPath,
+  );
+  if (index < 0) return [...submissions, normalizedNext];
   return submissions.map((submission, currentIndex) =>
-    currentIndex === index ? next : submission,
+    currentIndex === index ? normalizedNext : submission,
   );
 }
 

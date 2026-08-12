@@ -109,6 +109,40 @@ describe("录音结束后的自动提交", () => {
       mergeBackendRecordingSnapshot(recordingState(), lateReady, true),
     ).toEqual(recordingState());
   });
+
+  it("本地提交失败后拒绝该轮晚到状态，新录音后恢复接收", () => {
+    const failed = {
+      ...recordingState(),
+      phase: "failed" as const,
+      final_path: "/recordings/reloaded.m4a",
+      recoverable_paths: ["/recordings/reloaded.m4a"],
+      error: "提交失败",
+    };
+    for (const phase of [
+      "ready",
+      "mixing",
+      "stopping",
+      "recording",
+    ] as const) {
+      const incoming = {
+        ...recordingState(),
+        phase,
+        final_path: phase === "ready" ? "/recordings/reloaded.m4a" : null,
+      };
+      expect(
+        mergeBackendRecordingSnapshot(failed, incoming, {
+          submissionFailureTerminal: true,
+        }),
+      ).toBe(failed);
+    }
+
+    const starting = { ...recordingState(), phase: "starting" as const };
+    expect(
+      mergeBackendRecordingSnapshot(failed, starting, {
+        submissionFailureTerminal: false,
+      }),
+    ).toBe(starting);
+  });
 });
 
 describe("多段恢复录音", () => {
@@ -162,8 +196,8 @@ describe("多段恢复录音", () => {
       "/recordings/one.m4a",
       "/recordings/two.m4a",
     ]);
-    expect(removePendingRecordingSubmission(both, "recover:one")).toEqual([
-      expect.objectContaining({ key: "recover:two" }),
+    expect(removePendingRecordingSubmission(both, "path:/recordings/one.m4a")).toEqual([
+      expect.objectContaining({ key: "path:/recordings/two.m4a" }),
     ]);
     expect(
       completeRecoverableRecording(
@@ -399,6 +433,90 @@ describe("提交和关闭单飞", () => {
         audio_path: "/recordings/shared.m4a",
       }),
     ]);
+  });
+
+  it("跨入口singleflight包含页面接纳副作用", async () => {
+    let finish!: (jobId: string) => void;
+    const api = {
+      submitJob: vi.fn(
+        () => new Promise<string>((resolve) => { finish = resolve; }),
+      ),
+    };
+    const registry = new RecordingSubmissionRegistry();
+    const accept = vi.fn();
+    const subscribe = vi.fn();
+    const acceptOnce = async (result: {
+      jobId: string;
+      audioPath: string;
+    }) => {
+      accept(result);
+      subscribe(result.jobId);
+    };
+
+    const drag = registry.submitAndAccept(
+      " /recordings/shared.m4a ",
+      api,
+      acceptOnce,
+    );
+    const recovery = registry.submitAndAccept(
+      "/recordings/shared.m4a",
+      api,
+      acceptOnce,
+    );
+    const close = registry.submitAndAccept(
+      "/recordings/shared.m4a",
+      api,
+      acceptOnce,
+    );
+    finish("job-shared");
+    await Promise.all([drag, recovery, close]);
+
+    expect(api.submitJob).toHaveBeenCalledOnce();
+    expect(accept).toHaveBeenCalledOnce();
+    expect(subscribe).toHaveBeenCalledOnce();
+
+    await registry.submitAndAccept(
+      "/recordings/another.m4a",
+      { submitJob: vi.fn().mockResolvedValue("job-another") },
+      acceptOnce,
+    );
+    expect(accept).toHaveBeenCalledTimes(2);
+    expect(subscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("同路径并发失败只产生一个pending入口", async () => {
+    const api = { submitJob: vi.fn().mockRejectedValue(new Error("offline")) };
+    const registry = new RecordingSubmissionRegistry();
+    let pending: PendingRecordingSubmission[] = [];
+    const retain = (error: unknown) => {
+      const retained = retainFailedRecordingSubmission(
+        { ...recordingState(), phase: "submitting", final_path: "/a.m4a" },
+        pending,
+        {
+          key: "session:one",
+          label: "第一段",
+          finalPath: "/a.m4a",
+          error,
+        },
+      );
+      pending = retained.pending;
+    };
+    const first = registry.submitAndAccept("/a.m4a", api, vi.fn()).catch((error) => {
+      retain(error);
+      throw error;
+    });
+    const second = registry.submitAndAccept(" /a.m4a ", api, vi.fn()).catch((error) => {
+      retain(error);
+      throw error;
+    });
+    await Promise.allSettled([first, second]);
+
+    expect(api.submitJob).toHaveBeenCalledOnce();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({
+      key: "path:/a.m4a",
+      finalPath: "/a.m4a",
+    });
   });
 
   it("空白拖入路径不调用API，空jobId不创建任务", async () => {
