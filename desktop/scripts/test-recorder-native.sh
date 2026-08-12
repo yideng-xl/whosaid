@@ -8,6 +8,7 @@ trap 'rm -f "$test_binary"' EXIT
 
 xcrun clang++ -fobjc-arc -std=c++17 -fblocks \
   "$recorder_dir/RecorderBridge.mm" \
+  "$recorder_dir/TimelineWriter.mm" \
   "$recorder_dir/tests/RecorderNativeTests.mm" \
   -framework ScreenCaptureKit \
   -framework AVFoundation \
