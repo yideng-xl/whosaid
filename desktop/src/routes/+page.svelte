@@ -25,14 +25,14 @@
     completeRecoverableRecording,
     createRecordingJob,
     failRecoverableRecording,
-    finalizeAndSubmit,
     makeRecoverableRecordingItems,
-    mergeBackendRecordingSnapshot,
     prependRecordingJob,
     removePendingRecordingSubmission,
+    RecordingCloseGuard,
+    RecordingSnapshotCoordinator,
     RecordingSubmissionError,
+    RecordingSubmissionRegistry,
     runRecordingCloseFlow,
-    submitFinalizedRecording,
     upsertPendingRecordingSubmission,
     validateFinalPath,
     type PendingRecordingSubmission,
@@ -63,14 +63,12 @@
   let recordingActionPending = $state(false);
   let closeRequested = $state(false);
   let closePending = $state(false);
-  let recordingEventRevision = 0;
   let ignoreRecordingEvents = false;
   let pageMounted = false;
   let finalizationInFlight: Promise<RecordingSubmissionResult> | null = null;
-  let recordingProgressWaiters: Array<{
-    afterRevision: number;
-    resolve: (snapshot: RecordingSnapshot) => void;
-  }> = [];
+  const recordingSnapshots = new RecordingSnapshotCoordinator(recordingState());
+  const recordingSubmissions = new RecordingSubmissionRegistry();
+  const recordingClose = new RecordingCloseGuard();
   // 深色/浅色主题：未手动选过时跟随系统，选过则覆盖系统并持久化到 localStorage
   let theme = $state<Theme>("light");
 
@@ -125,23 +123,20 @@
     return error instanceof Error ? error.message : String(error);
   }
 
+  function publishRecordingSnapshot(snapshot: RecordingSnapshot) {
+    recordingSnapshots.publishLocal(snapshot);
+    recordingSnapshot = recordingSnapshots.snapshot;
+  }
+
   function onRecordingSnapshot(snapshot: RecordingSnapshot) {
-    recordingEventRevision += 1;
-    const waiting = recordingProgressWaiters;
-    recordingProgressWaiters = [];
-    for (const waiter of waiting) {
-      if (recordingEventRevision > waiter.afterRevision) waiter.resolve(snapshot);
-      else recordingProgressWaiters.push(waiter);
-    }
     // stop_recording 的 Promise 与最终 ready 事件跨 IPC 通道返回，ready 可能在前端已经
-    // 进入 submitting 后才送达。此时不能把“正在提交”倒退回“录音已保存”。
-    const mergedSnapshot = mergeBackendRecordingSnapshot(
-      recordingSnapshot,
+    // 进入 submitting 后才送达。必须先merge，只有接受的快照才增加revision并唤醒等待者。
+    const accepted = recordingSnapshots.publishBackend(
       snapshot,
       ignoreRecordingEvents,
     );
-    if (mergedSnapshot === recordingSnapshot) return;
-    recordingSnapshot = mergedSnapshot;
+    if (!accepted) return;
+    recordingSnapshot = recordingSnapshots.snapshot;
     if (snapshot.system_audio === "denied") {
       recordingPermissions = {
         systemAudio: "denied",
@@ -164,21 +159,21 @@
   function acceptRecordingSubmission(result: RecordingSubmissionResult) {
     acceptSubmittedJob(result);
     ignoreRecordingEvents = true;
-    recordingSnapshot = {
+    publishRecordingSnapshot({
       ...recordingSnapshot,
       phase: "idle",
       elapsed_seconds: 0,
       final_path: null,
       recoverable_paths: [],
       error: null,
-    };
+    });
   }
 
   function showRecordingFailure(error: unknown) {
     const finalPath =
       error instanceof RecordingSubmissionError ? error.finalPath : null;
     const existingFinalPath = recordingSnapshot.final_path?.trim() || null;
-    recordingSnapshot = {
+    publishRecordingSnapshot({
       ...recordingSnapshot,
       phase: "failed",
       final_path: finalPath ?? existingFinalPath,
@@ -188,7 +183,7 @@
           ? [existingFinalPath]
           : recordingSnapshot.recoverable_paths.filter((path) => path.trim()),
       error: messageOf(error),
-    };
+    });
     view = "recording";
   }
 
@@ -197,28 +192,29 @@
     recordingActionPending = true;
     view = "recording";
     try {
-      const result = await finalizeAndSubmit(async () => {
+      const stopped = await (async () => {
         if (pageMounted) {
-          recordingSnapshot = {
+          publishRecordingSnapshot({
             ...recordingSnapshot,
             phase: "stopping",
             error: null,
-          };
+          });
         }
         const stopped = await recordingController.stop();
         if (pageMounted) {
           const stoppedFinalPath = stopped.final_path.trim() || null;
           ignoreRecordingEvents = true;
-          recordingSnapshot = {
+          publishRecordingSnapshot({
             ...recordingSnapshot,
             phase: "submitting",
             final_path: stoppedFinalPath,
             recoverable_paths: stoppedFinalPath ? [stoppedFinalPath] : [],
             error: null,
-          };
+          });
         }
         return stopped;
-      }, api);
+      })();
+      const result = await recordingSubmissions.submit(stopped.final_path, api);
       if (pageMounted) acceptRecordingSubmission(result);
       return result;
     } catch (error) {
@@ -247,9 +243,13 @@
     if (!api || recordingActionPending || !recordingSnapshot.final_path) return;
     const finalPath = recordingSnapshot.final_path;
     recordingActionPending = true;
-    recordingSnapshot = { ...recordingSnapshot, phase: "submitting", error: null };
+    publishRecordingSnapshot({
+      ...recordingSnapshot,
+      phase: "submitting",
+      error: null,
+    });
     try {
-      const result = await submitFinalizedRecording(finalPath, api);
+      const result = await recordingSubmissions.submit(finalPath, api);
       if (pageMounted) acceptRecordingSubmission(result);
     } catch (error) {
       if (pageMounted) showRecordingFailure(error);
@@ -264,29 +264,29 @@
     ignoreRecordingEvents = false;
     recordingActionPending = true;
     view = "recording";
-    recordingSnapshot = {
+    publishRecordingSnapshot({
       ...recordingState(),
       phase: "requesting_permissions",
-    };
-    const revisionBeforeStart = recordingEventRevision;
+    });
+    const revisionBeforeStart = recordingSnapshots.revision;
     try {
       const permissions = await getRecordingPermissions();
       if (!pageMounted) return;
       recordingPermissions = permissions;
       if (permissions.systemAudio === "denied") {
-        recordingSnapshot = {
+        publishRecordingSnapshot({
           ...recordingState(),
           phase: "failed",
           system_audio: "denied",
           microphone: permissions.microphone === "denied" ? "denied" : "pending",
           error: "需要系统录音权限才能开始录音",
-        };
+        });
         return;
       }
 
       const snapshot = await recordingController.start();
-      if (pageMounted && recordingEventRevision === revisionBeforeStart) {
-        recordingSnapshot = snapshot;
+      if (pageMounted && recordingSnapshots.revision === revisionBeforeStart) {
+        publishRecordingSnapshot(snapshot);
       }
     } catch (error) {
       if (!pageMounted) return;
@@ -295,9 +295,9 @@
       } catch {
         // 保留原始启动错误；权限刷新只是为了决定是否显示设置入口。
       }
-      if (recordingEventRevision === revisionBeforeStart) {
-        showRecordingFailure(error);
-      }
+      // start Promise 失败是该次启动的权威终态；即使之前已经收到 requesting/starting
+      // 事件，也必须发布本地 failed，结束关闭流程的等待。
+      showRecordingFailure(error);
     } finally {
       if (pageMounted) recordingActionPending = false;
     }
@@ -333,7 +333,7 @@
         pendingRecordingSubmissions,
         { key: pendingKey, label, finalPath, busy: true, error: null },
       );
-      const result = await submitFinalizedRecording(finalPath, api);
+      const result = await recordingSubmissions.submit(finalPath, api);
       if (!pageMounted) return;
       pendingRecordingSubmissions = removePendingRecordingSubmission(
         pendingRecordingSubmissions,
@@ -373,7 +373,7 @@
       { ...pending, busy: true, error: null },
     );
     try {
-      const result = await submitFinalizedRecording(pending.finalPath, api);
+      const result = await recordingSubmissions.submit(pending.finalPath, api);
       if (!pageMounted) return;
       pendingRecordingSubmissions = removePendingRecordingSubmission(
         pendingRecordingSubmissions,
@@ -400,70 +400,78 @@
     }
   }
 
-  function waitForRecordingProgress(afterRevision: number): Promise<RecordingSnapshot> {
-    if (recordingEventRevision > afterRevision) {
-      return Promise.resolve(recordingSnapshot);
-    }
-    return new Promise((resolve) => {
-      recordingProgressWaiters.push({ afterRevision, resolve });
-    });
-  }
-
   async function submitFinalPathForClose(finalPath: string) {
     if (!api) throw new Error("转写服务尚未就绪");
-    recordingSnapshot = {
+    publishRecordingSnapshot({
       ...recordingSnapshot,
       phase: "submitting",
       final_path: finalPath,
       recoverable_paths: [finalPath],
       error: null,
-    };
-    const result = await submitFinalizedRecording(finalPath, api);
+    });
+    const result = await recordingSubmissions.submit(finalPath, api);
     if (pageMounted) acceptRecordingSubmission(result);
   }
 
-  async function stopSaveAndClose() {
-    if (closePending) return;
-    closePending = true;
-    let awaitedRevision = recordingEventRevision;
-    try {
-      await runRecordingCloseFlow(recordingSnapshot, {
-        stopAndSubmit: async () => { await finalizeRecordingOnce(); },
-        submitFinalPath: submitFinalPathForClose,
-        waitForSnapshot: async () => {
-          if (finalizationInFlight) {
-            await finalizationInFlight;
-            return recordingSnapshot;
-          }
-          const snapshot = await waitForRecordingProgress(awaitedRevision);
-          awaitedRevision = recordingEventRevision;
-          return snapshot;
-        },
-        close: closeAfterRecording,
-      });
-    } catch (error) {
-      // 保存、混音或提交任何一步失败都留在当前窗口，保留恢复/重新提交入口。
-      errorBanner = messageOf(error);
-      closeRequested = false;
-    } finally {
-      if (pageMounted) closePending = false;
-    }
+  function stopSaveAndClose(): Promise<void> {
+    return recordingClose.run(async () => {
+      closePending = true;
+      let awaitedRevision = recordingSnapshots.revision;
+      try {
+        await runRecordingCloseFlow(recordingSnapshot, {
+          stopAndSubmit: async () => { await finalizeRecordingOnce(); },
+          submitFinalPath: submitFinalPathForClose,
+          waitForSnapshot: async () => {
+            if (
+              recordingSnapshot.phase === "submitting" &&
+              recordingSnapshot.final_path
+            ) {
+              const matchingSubmission = recordingSubmissions.get(
+                recordingSnapshot.final_path,
+              );
+              if (matchingSubmission) {
+                await matchingSubmission;
+                return recordingSnapshots.snapshot;
+              }
+            }
+            if (finalizationInFlight) {
+              await finalizationInFlight;
+              return recordingSnapshots.snapshot;
+            }
+            const snapshot = await recordingSnapshots.waitForAdvance(
+              awaitedRevision,
+              30_000,
+            );
+            awaitedRevision = recordingSnapshots.revision;
+            return snapshot;
+          },
+          close: closeAfterRecording,
+        });
+      } catch (error) {
+        // 保存、混音、提交、监听或等待任何一步失败都留在当前窗口。
+        if (pageMounted) {
+          errorBanner = messageOf(error);
+          closeRequested = false;
+        }
+        throw error;
+      } finally {
+        if (pageMounted) closePending = false;
+      }
+    });
   }
 
   function onRecordingCloseRequested() {
-    if (closePending) return;
     if (["idle", "ready", "failed"].includes(recordingSnapshot.phase)) {
       // Rust 只应在活跃阶段发该事件；遇到竞态造成的晚到事件时直接走安全关闭命令，
       // 绝不能调用 stop 去停止下一代会话。
-      void closeAfterRecording().catch((error) => {
-        if (pageMounted) errorBanner = `关闭失败：${messageOf(error)}`;
-      });
+      void stopSaveAndClose().catch(() => undefined);
       return;
     }
+    if (closePending) return;
     closeRequested = true;
     if (!["starting", "recording"].includes(recordingSnapshot.phase)) {
       // 已在请求权限或收尾时没有“继续录音”可选，直接等待现有流程完成。
-      void stopSaveAndClose();
+      void stopSaveAndClose().catch(() => undefined);
     }
   }
 
@@ -490,7 +498,10 @@
         if (!cancelled) onRecordingSnapshot(snapshot);
       }),
       (error) => {
-        if (!cancelled) errorBanner = `录音状态监听失败：${messageOf(error)}`;
+        if (!cancelled) {
+          recordingSnapshots.fail(error);
+          errorBanner = `录音状态监听失败：${messageOf(error)}`;
+        }
       },
     );
     const disposeCloseRequested = manageAsyncListener(
@@ -504,11 +515,12 @@
 
     // 录音状态、权限和遗留会话不依赖 Python 转写服务，启动即并行读取，不能阻塞
     // 现有任务列表和拖放入口。revision guard 避免晚到快照覆盖已收到的实时事件。
-    const initialRevision = recordingEventRevision;
+    const initialRevision = recordingSnapshots.revision;
     void getRecordingState()
       .then((snapshot) => {
-        if (cancelled || recordingEventRevision !== initialRevision) return;
-        recordingSnapshot = snapshot;
+        if (cancelled || recordingSnapshots.revision !== initialRevision) return;
+        if (!recordingSnapshots.publishBackend(snapshot, ignoreRecordingEvents)) return;
+        recordingSnapshot = recordingSnapshots.snapshot;
         if (["requesting_permissions", "starting", "recording", "stopping", "mixing"].includes(snapshot.phase)) {
           view = "recording";
         }
@@ -602,7 +614,7 @@
     return () => {
       cancelled = true;
       pageMounted = false;
-      recordingProgressWaiters = [];
+      recordingSnapshots.cancel("录音页面已销毁");
       disposeRecordingState();
       disposeCloseRequested();
       if (unlistenDrop) unlistenDrop();
@@ -814,7 +826,7 @@
               class="btn-danger"
               disabled={closePending}
               aria-busy={closePending}
-              onclick={stopSaveAndClose}
+              onclick={() => void stopSaveAndClose().catch(() => undefined)}
             >{closePending
                 ? ["starting", "recording"].includes(recordingSnapshot.phase)
                   ? "正在停止并保存…"

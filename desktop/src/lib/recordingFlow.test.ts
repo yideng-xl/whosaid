@@ -9,6 +9,9 @@ import {
   mergeBackendRecordingSnapshot,
   prependRecordingJob,
   removePendingRecordingSubmission,
+  RecordingCloseGuard,
+  RecordingSnapshotCoordinator,
+  RecordingSubmissionRegistry,
   runRecordingCloseFlow,
   submitFinalizedRecording,
   upsertPendingRecordingSubmission,
@@ -248,5 +251,203 @@ describe("录音关闭流程", () => {
       close,
     });
     expect(close).toHaveBeenCalledOnce();
+  });
+});
+
+describe("录音状态发布通道", () => {
+  it("本地权限失败会唤醒关闭等待且不关闭", async () => {
+    const channel = new RecordingSnapshotCoordinator({
+      ...recordingState(),
+      phase: "requesting_permissions",
+    });
+    const close = vi.fn();
+    const flow = runRecordingCloseFlow(channel.snapshot, {
+      stopAndSubmit: vi.fn(),
+      submitFinalPath: vi.fn(),
+      waitForSnapshot: () => channel.waitForAdvance(channel.revision, 100),
+      close,
+    });
+
+    channel.publishLocal({
+      ...recordingState(),
+      phase: "failed",
+      error: "权限未授权",
+    });
+
+    await expect(flow).rejects.toThrow("权限未授权");
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it("监听失败和销毁都会reject等待者", async () => {
+    const listenerFailure = new RecordingSnapshotCoordinator(recordingState());
+    const failedWait = listenerFailure.waitForAdvance(0, 100);
+    listenerFailure.fail(new Error("listener failed"));
+    await expect(failedWait).rejects.toThrow("listener failed");
+    await expect(listenerFailure.waitForAdvance(0, 100)).rejects.toThrow(
+      "listener failed",
+    );
+
+    const destroyed = new RecordingSnapshotCoordinator(recordingState());
+    const destroyedWait = destroyed.waitForAdvance(0, 100);
+    destroyed.cancel("页面已销毁");
+    await expect(destroyedWait).rejects.toThrow("页面已销毁");
+  });
+
+  it("无事件时超时失败且不会产生新快照", async () => {
+    const channel = new RecordingSnapshotCoordinator(recordingState());
+    await expect(channel.waitForAdvance(0, 5)).rejects.toThrow(
+      "等待录音状态更新超时",
+    );
+    expect(channel.revision).toBe(0);
+  });
+
+  it("关闭等待超时保持窗口", async () => {
+    const channel = new RecordingSnapshotCoordinator({
+      ...recordingState(),
+      phase: "mixing",
+    });
+    const close = vi.fn();
+    await expect(
+      runRecordingCloseFlow(channel.snapshot, {
+        stopAndSubmit: vi.fn(),
+        submitFinalPath: vi.fn(),
+        waitForSnapshot: () => channel.waitForAdvance(0, 5),
+        close,
+      }),
+    ).rejects.toThrow("等待录音状态更新超时");
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it("被merge拒绝的late Ready不会唤醒等待者", async () => {
+    const current = {
+      ...recordingState(),
+      phase: "submitting" as const,
+      final_path: "/recordings/meeting.m4a",
+    };
+    const channel = new RecordingSnapshotCoordinator(current);
+    const wait = channel.waitForAdvance(0, 100);
+
+    expect(
+      channel.publishBackend({
+        ...recordingState(),
+        phase: "ready",
+        final_path: "/recordings/meeting.m4a",
+      }),
+    ).toBe(false);
+    channel.publishLocal({
+      ...current,
+      phase: "failed",
+      error: "提交失败",
+    });
+
+    await expect(wait).resolves.toMatchObject({
+      phase: "failed",
+      error: "提交失败",
+    });
+  });
+});
+
+describe("提交和关闭单飞", () => {
+  it("同一路径并发提交只调用一次API", async () => {
+    let finish!: (jobId: string) => void;
+    const api = {
+      submitJob: vi.fn(
+        () => new Promise<string>((resolve) => { finish = resolve; }),
+      ),
+    };
+    const registry = new RecordingSubmissionRegistry();
+    const first = registry.submit(" /recordings/meeting.m4a ", api);
+    const second = registry.submit("/recordings/meeting.m4a", api);
+
+    expect(api.submitJob).toHaveBeenCalledOnce();
+    expect(registry.get("/recordings/meeting.m4a")).toBeTruthy();
+    finish("job-one");
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { jobId: "job-one", audioPath: "/recordings/meeting.m4a" },
+      { jobId: "job-one", audioPath: "/recordings/meeting.m4a" },
+    ]);
+    expect(registry.get("/recordings/meeting.m4a")).toBeUndefined();
+  });
+
+  it("提交失败也会settle并清理registry供重试", async () => {
+    const api = {
+      submitJob: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("offline"))
+        .mockResolvedValueOnce("job-retry"),
+    };
+    const registry = new RecordingSubmissionRegistry();
+    await expect(
+      registry.submit("/recordings/meeting.m4a", api),
+    ).rejects.toMatchObject({ finalPath: "/recordings/meeting.m4a" });
+    expect(registry.get("/recordings/meeting.m4a")).toBeUndefined();
+    await expect(
+      registry.submit("/recordings/meeting.m4a", api),
+    ).resolves.toMatchObject({ jobId: "job-retry" });
+    expect(api.submitJob).toHaveBeenCalledTimes(2);
+  });
+
+  it("close在retry提交中等待同一promise且不二次提交", async () => {
+    let finish!: (jobId: string) => void;
+    const api = {
+      submitJob: vi.fn(
+        () => new Promise<string>((resolve) => { finish = resolve; }),
+      ),
+    };
+    const path = "/recordings/meeting.m4a";
+    const registry = new RecordingSubmissionRegistry();
+    const channel = new RecordingSnapshotCoordinator({
+      ...recordingState(),
+      phase: "submitting",
+      final_path: path,
+    });
+    const retry = registry.submit(path, api).then((result) => {
+      channel.publishLocal(recordingState());
+      return result;
+    });
+    const submitFinalPath = vi.fn();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const flow = runRecordingCloseFlow(channel.snapshot, {
+      stopAndSubmit: vi.fn(),
+      submitFinalPath,
+      waitForSnapshot: async () => {
+        await registry.get(path);
+        return channel.snapshot;
+      },
+      close,
+    });
+
+    channel.publishBackend({
+      ...recordingState(),
+      phase: "ready",
+      final_path: path,
+    });
+    finish("job-retry");
+    await retry;
+    await flow;
+
+    expect(api.submitJob).toHaveBeenCalledOnce();
+    expect(submitFinalPath).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("重复关闭复用同一流程，失败后允许重试", async () => {
+    const guard = new RecordingCloseGuard();
+    let finish!: () => void;
+    const close = vi.fn(
+      () => new Promise<void>((resolve) => { finish = resolve; }),
+    );
+    const first = guard.run(close);
+    const second = guard.run(close);
+    expect(first).toBe(second);
+    expect(close).toHaveBeenCalledOnce();
+    finish();
+    await first;
+
+    const failure = new Error("close failed");
+    const fail = vi.fn().mockRejectedValueOnce(failure).mockResolvedValueOnce(undefined);
+    await expect(guard.run(fail)).rejects.toThrow("close failed");
+    await expect(guard.run(fail)).resolves.toBeUndefined();
+    expect(fail).toHaveBeenCalledTimes(2);
   });
 });

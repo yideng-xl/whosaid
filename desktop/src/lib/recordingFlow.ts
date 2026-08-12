@@ -100,6 +100,162 @@ export function mergeBackendRecordingSnapshot(
   return incoming;
 }
 
+interface SnapshotWaiter {
+  afterRevision: number;
+  resolve: (snapshot: RecordingSnapshot) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+export class RecordingSnapshotCoordinator {
+  private currentSnapshot: RecordingSnapshot;
+  private currentRevision = 0;
+  private terminalError: Error | null = null;
+  private waiters = new Set<SnapshotWaiter>();
+
+  constructor(initialSnapshot: RecordingSnapshot) {
+    this.currentSnapshot = initialSnapshot;
+  }
+
+  get snapshot(): RecordingSnapshot {
+    return this.currentSnapshot;
+  }
+
+  get revision(): number {
+    return this.currentRevision;
+  }
+
+  publishLocal(snapshot: RecordingSnapshot): boolean {
+    return this.advance(snapshot);
+  }
+
+  publishBackend(
+    snapshot: RecordingSnapshot,
+    finalizationAccepted = false,
+  ): boolean {
+    const merged = mergeBackendRecordingSnapshot(
+      this.currentSnapshot,
+      snapshot,
+      finalizationAccepted,
+    );
+    if (merged === this.currentSnapshot) return false;
+    return this.advance(merged);
+  }
+
+  waitForAdvance(
+    afterRevision: number,
+    timeoutMs = 30_000,
+  ): Promise<RecordingSnapshot> {
+    if (this.terminalError) return Promise.reject(this.terminalError);
+    if (this.currentRevision > afterRevision) {
+      return Promise.resolve(this.currentSnapshot);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter: SnapshotWaiter = {
+        afterRevision,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          this.waiters.delete(waiter);
+          reject(new RecordingFlowError("等待录音状态更新超时"));
+        }, timeoutMs),
+      };
+      this.waiters.add(waiter);
+    });
+  }
+
+  fail(error: unknown): void {
+    this.rejectAll(
+      error instanceof Error ? error : new RecordingFlowError(String(error)),
+    );
+  }
+
+  cancel(message = "录音状态等待已取消"): void {
+    this.rejectAll(new RecordingFlowError(message));
+  }
+
+  private advance(snapshot: RecordingSnapshot): boolean {
+    if (snapshot === this.currentSnapshot) return false;
+    this.currentSnapshot = snapshot;
+    this.currentRevision += 1;
+    for (const waiter of [...this.waiters]) {
+      if (this.currentRevision <= waiter.afterRevision) continue;
+      this.waiters.delete(waiter);
+      clearTimeout(waiter.timer);
+      waiter.resolve(snapshot);
+    }
+    return true;
+  }
+
+  private rejectAll(error: Error): void {
+    this.terminalError = error;
+    for (const waiter of this.waiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    this.waiters.clear();
+  }
+}
+
+export class RecordingSubmissionRegistry {
+  private readonly inFlight = new Map<
+    string,
+    Promise<RecordingSubmissionResult>
+  >();
+
+  submit(
+    finalPath: string,
+    api: RecordingSubmissionApi,
+  ): Promise<RecordingSubmissionResult> {
+    const validatedPath = validateFinalPath(finalPath);
+    const existing = this.inFlight.get(validatedPath);
+    if (existing) return existing;
+
+    const task = submitFinalizedRecording(validatedPath, api);
+    this.inFlight.set(validatedPath, task);
+    void task.then(
+      () => this.clear(validatedPath, task),
+      () => this.clear(validatedPath, task),
+    );
+    return task;
+  }
+
+  get(finalPath: string): Promise<RecordingSubmissionResult> | undefined {
+    return this.inFlight.get(validateFinalPath(finalPath));
+  }
+
+  private clear(
+    finalPath: string,
+    task: Promise<RecordingSubmissionResult>,
+  ): void {
+    if (this.inFlight.get(finalPath) === task) this.inFlight.delete(finalPath);
+  }
+}
+
+export class RecordingCloseGuard {
+  private inFlight: Promise<void> | null = null;
+
+  run(action: () => Promise<void>): Promise<void> {
+    if (this.inFlight) return this.inFlight;
+    let task: Promise<void>;
+    try {
+      task = Promise.resolve(action());
+    } catch (error) {
+      task = Promise.reject(error);
+    }
+    this.inFlight = task;
+    void task.then(
+      () => this.clear(task),
+      () => this.clear(task),
+    );
+    return task;
+  }
+
+  private clear(task: Promise<void>): void {
+    if (this.inFlight === task) this.inFlight = null;
+  }
+}
+
 export interface RecoverableRecordingItem extends RecoverableRecording {
   busy: boolean;
   error: string | null;
