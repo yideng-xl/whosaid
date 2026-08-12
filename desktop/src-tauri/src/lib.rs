@@ -121,6 +121,17 @@ fn ffmpeg_dir(resource_dir: Option<PathBuf>) -> Option<String> {
     }
 }
 
+fn recording_ffmpeg_tools(resource_dir: Option<PathBuf>) -> recording::mix::FfmpegTools {
+    let (ffmpeg_name, ffprobe_name) = ffmpeg_binary_names(cfg!(target_os = "windows"));
+    match ffmpeg_dir(resource_dir) {
+        Some(directory) => recording::mix::FfmpegTools::new(
+            PathBuf::from(&directory).join(ffmpeg_name),
+            PathBuf::from(directory).join(ffprobe_name),
+        ),
+        None => recording::mix::FfmpegTools::new(ffmpeg_name.into(), ffprobe_name.into()),
+    }
+}
+
 #[tauri::command]
 fn get_service_port(state: tauri::State<'_, ServicePort>) -> Option<u16> {
     *state.0.lock().unwrap()
@@ -156,7 +167,9 @@ pub fn run() {
             write_file,
             recording::start_recording,
             recording::stop_recording,
-            recording::get_recording_state
+            recording::get_recording_state,
+            recording::list_recoverable_recordings,
+            recording::retry_recording_mix
         ])
         .setup(|app| {
             // 打包态资源目录（.app/Contents/Resources/）；tauri dev 下通常返回 Some 但其下不会有
@@ -169,6 +182,7 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             app.manage(recording::RecordingManager::new(
                 data_dir.join("recordings"),
+                recording_ffmpeg_tools(resource_dir.clone()),
             ));
             let cwd = data_dir.to_string_lossy().into_owned();
             // transcribe_core 未 pip 安装进 venv，只能从 core 根目录导入；
@@ -338,5 +352,27 @@ mod path_tests {
         std::fs::create_dir_all(&tmp).unwrap();
         assert_eq!(ffmpeg_dir(Some(tmp.clone())), None);
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn recording_tools_fall_back_to_path_binaries() {
+        let tools = recording_ffmpeg_tools(None);
+        let (ffmpeg, ffprobe) = ffmpeg_binary_names(cfg!(target_os = "windows"));
+        assert_eq!(tools.ffmpeg, PathBuf::from(ffmpeg));
+        assert_eq!(tools.ffprobe, PathBuf::from(ffprobe));
+    }
+
+    #[test]
+    fn recording_tools_use_packaged_binaries_together() {
+        let resources = tempfile::tempdir().unwrap();
+        let directory = resources.path().join("ffmpeg");
+        std::fs::create_dir(&directory).unwrap();
+        let (ffmpeg, ffprobe) = ffmpeg_binary_names(cfg!(target_os = "windows"));
+        std::fs::write(directory.join(ffmpeg), b"").unwrap();
+        std::fs::write(directory.join(ffprobe), b"").unwrap();
+
+        let tools = recording_ffmpeg_tools(Some(resources.path().to_path_buf()));
+        assert_eq!(tools.ffmpeg, directory.join(ffmpeg));
+        assert_eq!(tools.ffprobe, directory.join(ffprobe));
     }
 }

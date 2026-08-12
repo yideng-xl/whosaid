@@ -1,22 +1,30 @@
+pub mod mix;
 pub mod native;
 pub mod state;
+pub mod storage;
 
+use chrono::Local;
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use mix::{mix_recording, FfmpegTools};
 use native::{platform_recorder, NativeRecorder};
 use state::{
     NativeEvent, RecordingError, RecordingPhase, RecordingSnapshot, RecordingState,
-    RecordingStopResult,
+    RecordingStopResult as StoppedTracks,
 };
+use storage::{RecordingStore, RecoverableRecording};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const STATE_EVENT: &str = "recording://state";
-static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+type StopOutcome = Result<StoppedTracks, RecordingError>;
 
-type StopOutcome = Result<RecordingStopResult, RecordingError>;
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct RecordingStopResult {
+    pub final_path: String,
+}
 
 trait StateEventSink: Send + Sync {
     fn emit(&self, snapshot: RecordingSnapshot) -> Result<(), RecordingError>;
@@ -46,23 +54,40 @@ struct ManagerInner {
 pub struct RecordingManager {
     inner: Mutex<ManagerInner>,
     native: Arc<dyn NativeRecorder>,
-    session_root: PathBuf,
+    store: RecordingStore,
+    tools: FfmpegTools,
+    mix_lock: Mutex<()>,
     next_generation: AtomicU64,
 }
 
 impl RecordingManager {
-    pub fn new(session_root: PathBuf) -> Self {
-        Self::with_native(session_root, platform_recorder())
+    pub fn new(recordings_root: PathBuf, tools: FfmpegTools) -> Self {
+        Self::with_native_and_tools(recordings_root, platform_recorder(), tools)
     }
 
+    #[cfg(test)]
     fn with_native(session_root: PathBuf, native: Arc<dyn NativeRecorder>) -> Self {
+        Self::with_native_and_tools(
+            session_root,
+            native,
+            FfmpegTools::new("ffmpeg".into(), "ffprobe".into()),
+        )
+    }
+
+    fn with_native_and_tools(
+        recordings_root: PathBuf,
+        native: Arc<dyn NativeRecorder>,
+        tools: FfmpegTools,
+    ) -> Self {
         Self {
             inner: Mutex::new(ManagerInner {
                 state: RecordingState::new(),
                 active: None,
             }),
             native,
-            session_root,
+            store: RecordingStore::new(recordings_root),
+            tools,
+            mix_lock: Mutex::new(()),
             next_generation: AtomicU64::new(1),
         }
     }
@@ -87,6 +112,8 @@ impl RecordingManager {
         });
 
         if let Err(error) = self.native.start(&session_dir, sender) {
+            // 同步启动失败时尚未形成可恢复录音，清掉 begin_session 创建的空目录。
+            let _ = std::fs::remove_dir_all(&session_dir);
             self.finish_start_failure(generation, &sink, error.clone())?;
             return Err(error);
         }
@@ -119,12 +146,13 @@ impl RecordingManager {
             self.finish_start_failure(generation, sink, error.clone())?;
             return Err(error);
         }
-        if let Err(error) = std::fs::create_dir_all(&self.session_root) {
-            let error = RecordingError::Io(error.to_string());
-            self.finish_start_failure(generation, sink, error.clone())?;
-            return Err(error);
+        match self.store.begin_session(Local::now()) {
+            Ok(session) => Ok((generation, session.session_dir)),
+            Err(error) => {
+                self.finish_start_failure(generation, sink, error.clone())?;
+                Err(error)
+            }
         }
-        Ok((generation, self.next_session_dir()))
     }
 
     fn finish_start_failure(
@@ -212,7 +240,7 @@ impl RecordingManager {
                     microphone_track,
                 } => Some(match protocol_error {
                     Some(error) => Err(error),
-                    None => Ok(RecordingStopResult {
+                    None => Ok(StoppedTracks {
                         session_dir: session_dir.clone(),
                         system_track: system_track.clone(),
                         microphone_track: microphone_track.clone(),
@@ -322,13 +350,80 @@ impl RecordingManager {
             .is_some_and(|active| active.generation == generation)
     }
 
-    fn next_session_dir(&self) -> PathBuf {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let sequence = SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        self.session_root.join(format!("{timestamp}-{sequence}"))
+    fn begin_mixing(&self, sink: &dyn StateEventSink) -> Result<RecordingSnapshot, RecordingError> {
+        let snapshot = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.state.begin_mixing()?;
+            inner.state.snapshot()
+        };
+        if let Err(error) = sink.emit(snapshot.clone()) {
+            eprintln!("[whosaid] 无法发送录音混音状态：{error}");
+        }
+        Ok(snapshot)
+    }
+
+    fn finish_mixing(
+        &self,
+        sink: &dyn StateEventSink,
+        final_path: String,
+    ) -> Result<RecordingSnapshot, RecordingError> {
+        let snapshot = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.state.finish_mixing(final_path)?;
+            inner.state.snapshot()
+        };
+        if let Err(error) = sink.emit(snapshot.clone()) {
+            eprintln!("[whosaid] 无法发送录音完成状态：{error}");
+        }
+        Ok(snapshot)
+    }
+
+    fn fail_mixing(&self, sink: &dyn StateEventSink, message: String) {
+        let snapshot = {
+            let mut inner = self.inner.lock().unwrap();
+            let _ = inner.state.apply(NativeEvent::FatalError { message });
+            inner.state.snapshot()
+        };
+        let _ = sink.emit(snapshot);
+    }
+
+    fn mix_tracks(&self, tracks: StoppedTracks) -> Result<RecordingStopResult, String> {
+        let _guard = self
+            .mix_lock
+            .lock()
+            .map_err(|_| "录音混音锁已损坏".to_owned())?;
+        let recording = self
+            .store
+            .recording_from_native_paths(
+                &tracks.session_dir,
+                &tracks.system_track,
+                tracks.microphone_track.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
+        self.mix_recording(&recording)
+    }
+
+    fn retry_mix(&self, session_id: &str) -> Result<RecordingStopResult, String> {
+        let _guard = self
+            .mix_lock
+            .lock()
+            .map_err(|_| "录音混音锁已损坏".to_owned())?;
+        let recording = self
+            .store
+            .recoverable_by_id(session_id)
+            .map_err(|error| error.to_string())?;
+        self.mix_recording(&recording)
+    }
+
+    fn mix_recording(
+        &self,
+        recording: &RecoverableRecording,
+    ) -> Result<RecordingStopResult, String> {
+        let final_path = mix_recording(&self.tools, &self.store, recording)
+            .map_err(|error| format!("录音混音失败：{error}"))?;
+        Ok(RecordingStopResult {
+            final_path: final_path.to_string_lossy().into_owned(),
+        })
     }
 }
 
@@ -345,19 +440,69 @@ pub async fn stop_recording(
     app: AppHandle,
     manager: State<'_, RecordingManager>,
 ) -> Result<RecordingStopResult, String> {
-    let receiver = manager
-        .stop(&AppEventSink(app))
-        .map_err(|error| error.to_string())?;
-    let outcome = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+    let sink = AppEventSink(app.clone());
+    let receiver = manager.stop(&sink).map_err(|error| error.to_string())?;
+    let tracks = tauri::async_runtime::spawn_blocking(move || receiver.recv())
         .await
         .map_err(|error| error.to_string())?
-        .map_err(|_| RecordingError::ChannelClosed.to_string())?;
-    outcome.map_err(|error| error.to_string())
+        .map_err(|_| RecordingError::ChannelClosed.to_string())?
+        .map_err(|error| error.to_string())?;
+    manager
+        .begin_mixing(&sink)
+        .map_err(|error| error.to_string())?;
+
+    let mix_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        mix_app.state::<RecordingManager>().mix_tracks(tracks)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    match result {
+        Ok(result) => {
+            manager
+                .finish_mixing(&sink, result.final_path.clone())
+                .map_err(|error| error.to_string())?;
+            Ok(result)
+        }
+        Err(error) => {
+            manager.fail_mixing(&sink, error.clone());
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
 pub fn get_recording_state(manager: State<'_, RecordingManager>) -> RecordingSnapshot {
     manager.snapshot()
+}
+
+#[tauri::command]
+pub fn list_recoverable_recordings(
+    manager: State<'_, RecordingManager>,
+) -> Result<Vec<RecoverableRecording>, String> {
+    manager
+        .store
+        .recoverable()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn retry_recording_mix(
+    session_id: String,
+    app: AppHandle,
+    manager: State<'_, RecordingManager>,
+) -> Result<RecordingStopResult, String> {
+    // 在进入阻塞线程前先做一次轻量校验，让明显非法的 ID 立即返回；在线程内会再次读取
+    // 清单并校验，防止校验后文件被替换。
+    manager
+        .store
+        .recoverable_by_id(&session_id)
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<RecordingManager>().retry_mix(&session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]
@@ -468,7 +613,7 @@ mod tests {
 
         assert_eq!(
             receiver.recv().unwrap().unwrap(),
-            RecordingStopResult {
+            StoppedTracks {
                 session_dir: "/session".into(),
                 system_track: "/session/system.caf".into(),
                 microphone_track: None,

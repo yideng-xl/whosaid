@@ -243,6 +243,7 @@ impl RecordingState {
                 }
                 self.snapshot.phase = RecordingPhase::Ready;
                 self.snapshot.final_path = Some(final_path);
+                self.snapshot.recoverable_paths.clear();
                 self.snapshot.error = None;
                 Ok(())
             }
@@ -404,6 +405,14 @@ mod tests {
             .unwrap();
         state.begin_stop().unwrap();
         assert_eq!(state.snapshot().phase, RecordingPhase::Stopping);
+        state
+            .apply(NativeEvent::Stopped {
+                session_dir: "/tmp/session".into(),
+                system_track: "/tmp/session/system.caf".into(),
+                microphone_track: None,
+            })
+            .unwrap();
+        assert!(!state.snapshot().recoverable_paths.is_empty());
 
         state.begin_mixing().unwrap();
         assert_eq!(state.snapshot().phase, RecordingPhase::Mixing);
@@ -412,6 +421,7 @@ mod tests {
         let snapshot = state.snapshot();
         assert_eq!(snapshot.phase, RecordingPhase::Ready);
         assert_eq!(snapshot.final_path.as_deref(), Some("/tmp/final.m4a"));
+        assert!(snapshot.recoverable_paths.is_empty());
     }
 
     #[test]
