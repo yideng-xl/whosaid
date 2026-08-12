@@ -32,6 +32,7 @@
     RecordingSnapshotCoordinator,
     RecordingSubmissionError,
     RecordingSubmissionRegistry,
+    retainFailedRecordingSubmission,
     runRecordingCloseFlow,
     upsertPendingRecordingSubmission,
     validateFinalPath,
@@ -149,6 +150,9 @@
   }
 
   function acceptSubmittedJob(result: RecordingSubmissionResult) {
+    pendingRecordingSubmissions = pendingRecordingSubmissions.filter(
+      (pending) => pending.finalPath !== result.audioPath,
+    );
     const job = createRecordingJob(result);
     jobs = prependRecordingJob(jobs, job);
     selectedJobId = job.id;
@@ -409,8 +413,27 @@
       recoverable_paths: [finalPath],
       error: null,
     });
-    const result = await recordingSubmissions.submit(finalPath, api);
-    if (pageMounted) acceptRecordingSubmission(result);
+    try {
+      const result = await recordingSubmissions.submit(finalPath, api);
+      if (pageMounted) acceptRecordingSubmission(result);
+    } catch (error) {
+      if (pageMounted) {
+        const retained = retainFailedRecordingSubmission(
+          recordingSnapshot,
+          pendingRecordingSubmissions,
+          {
+            key: `final:${finalPath}`,
+            label: "录音结果",
+            finalPath,
+            error,
+          },
+        );
+        pendingRecordingSubmissions = retained.pending;
+        publishRecordingSnapshot(retained.snapshot);
+        view = "recording";
+      }
+      throw error;
+    }
   }
 
   function stopSaveAndClose(): Promise<void> {
@@ -635,18 +658,15 @@
 
   async function submit(path: string) {
     if (!api) return;
+    const normalizedPath = path.trim();
     // 只收音频文件，忽略其他误拖入
-    if (!/\.(m4a|mp3|wav|aac|flac|mp4|mov|ogg)$/i.test(path)) {
-      errorBanner = `不支持的文件类型（只收音频）：${path}`;
+    if (normalizedPath && !/\.(m4a|mp3|wav|aac|flac|mp4|mov|ogg)$/i.test(normalizedPath)) {
+      errorBanner = `不支持的文件类型（只收音频）：${normalizedPath}`;
       return;
     }
     try {
-      const id = await api.submitJob(path);
-      const job = createRecordingJob({ jobId: id, audioPath: path });
-      jobs = prependRecordingJob(jobs, job);
-      selectedJobId = id;
-      view = "transcript";
-      subscribe(job);
+      const result = await recordingSubmissions.submit(normalizedPath, api);
+      acceptSubmittedJob(result);
     } catch (err) {
       errorBanner = `提交失败：${err}`;
     }

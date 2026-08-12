@@ -12,10 +12,13 @@ import {
   RecordingCloseGuard,
   RecordingSnapshotCoordinator,
   RecordingSubmissionRegistry,
+  retainFailedRecordingSubmission,
   runRecordingCloseFlow,
   submitFinalizedRecording,
   upsertPendingRecordingSubmission,
+  type PendingRecordingSubmission,
 } from "./recordingFlow";
+import type { RecordingSnapshot } from "./recording";
 import { recordingState } from "./recordingState";
 
 describe("录音结束后的自动提交", () => {
@@ -369,6 +372,54 @@ describe("提交和关闭单飞", () => {
     expect(registry.get("/recordings/meeting.m4a")).toBeUndefined();
   });
 
+  it("拖入、恢复和关闭同一路径并发只创建一个任务", async () => {
+    let finish!: (jobId: string) => void;
+    const api = {
+      submitJob: vi.fn(
+        () => new Promise<string>((resolve) => { finish = resolve; }),
+      ),
+    };
+    const registry = new RecordingSubmissionRegistry();
+    const drag = registry.submit(" /recordings/shared.m4a ", api);
+    const recovery = registry.submit("/recordings/shared.m4a", api);
+    const close = registry.submit("/recordings/shared.m4a", api);
+
+    finish("job-shared");
+    const results = await Promise.all([drag, recovery, close]);
+    const jobs = results.reduce(
+      (current, result) =>
+        prependRecordingJob(current, createRecordingJob(result, 100)),
+      [] as ReturnType<typeof createRecordingJob>[],
+    );
+
+    expect(api.submitJob).toHaveBeenCalledOnce();
+    expect(jobs).toEqual([
+      expect.objectContaining({
+        id: "job-shared",
+        audio_path: "/recordings/shared.m4a",
+      }),
+    ]);
+  });
+
+  it("空白拖入路径不调用API，空jobId不创建任务", async () => {
+    const blankPathApi = { submitJob: vi.fn() };
+    const registry = new RecordingSubmissionRegistry();
+    await expect(registry.submit("   ", blankPathApi)).rejects.toThrow(
+      "最终录音路径为空",
+    );
+    expect(blankPathApi.submitJob).not.toHaveBeenCalled();
+
+    const emptyJobApi = { submitJob: vi.fn().mockResolvedValue("  ") };
+    let jobs: ReturnType<typeof createRecordingJob>[] = [];
+    try {
+      const result = await registry.submit("/recordings/empty-id.m4a", emptyJobApi);
+      jobs = prependRecordingJob(jobs, createRecordingJob(result));
+    } catch {
+      // 提交边界拒绝空 jobId，页面不会进入建任务分支。
+    }
+    expect(jobs).toEqual([]);
+  });
+
   it("提交失败也会settle并清理registry供重试", async () => {
     const api = {
       submitJob: vi
@@ -429,6 +480,74 @@ describe("提交和关闭单飞", () => {
     expect(api.submitJob).toHaveBeenCalledOnce();
     expect(submitFinalPath).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("重载后接管混音，ready提交失败会保留重提入口并阻止关闭", async () => {
+    const path = "/recordings/reloaded.m4a";
+    const api = { submitJob: vi.fn().mockRejectedValue(new Error("offline")) };
+    const registry = new RecordingSubmissionRegistry();
+    let snapshot: RecordingSnapshot = {
+      ...recordingState(),
+      phase: "mixing",
+    };
+    let pending: PendingRecordingSubmission[] = [];
+    const close = vi.fn();
+
+    await expect(
+      runRecordingCloseFlow(snapshot, {
+        stopAndSubmit: vi.fn(),
+        waitForSnapshot: vi.fn().mockResolvedValue({
+          ...recordingState(),
+          phase: "ready",
+          final_path: path,
+        }),
+        submitFinalPath: async (finalPath) => {
+          snapshot = {
+            ...snapshot,
+            phase: "submitting",
+            final_path: finalPath,
+          };
+          try {
+            await registry.submit(finalPath, api);
+          } catch (error) {
+            const retained = retainFailedRecordingSubmission(
+              snapshot,
+              pending,
+              {
+                key: `final:${finalPath}`,
+                label: "录音结果",
+                finalPath,
+                error,
+              },
+            );
+            snapshot = retained.snapshot;
+            pending = retained.pending;
+            throw error;
+          }
+        },
+        close,
+      }),
+    ).rejects.toMatchObject({ finalPath: path });
+
+    expect(snapshot).toMatchObject({
+      phase: "failed",
+      final_path: path,
+      recoverable_paths: [path],
+    });
+    expect(pending).toEqual([
+      expect.objectContaining({
+        finalPath: path,
+        busy: false,
+        error: expect.stringContaining("offline"),
+      }),
+    ]);
+    expect(close).not.toHaveBeenCalled();
+
+    const retryApi = { submitJob: vi.fn().mockResolvedValue("job-reloaded") };
+    await expect(registry.submit(path, retryApi)).resolves.toMatchObject({
+      jobId: "job-reloaded",
+    });
+    expect(retryApi.submitJob).toHaveBeenCalledOnce();
   });
 
   it("重复关闭复用同一流程，失败后允许重试", async () => {

@@ -207,7 +207,12 @@ export class RecordingSubmissionRegistry {
     finalPath: string,
     api: RecordingSubmissionApi,
   ): Promise<RecordingSubmissionResult> {
-    const validatedPath = validateFinalPath(finalPath);
+    let validatedPath: string;
+    try {
+      validatedPath = validateFinalPath(finalPath);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const existing = this.inFlight.get(validatedPath);
     if (existing) return existing;
 
@@ -325,6 +330,42 @@ export function removePendingRecordingSubmission(
   key: string,
 ): PendingRecordingSubmission[] {
   return submissions.filter((submission) => submission.key !== key);
+}
+
+export function retainFailedRecordingSubmission(
+  snapshot: RecordingSnapshot,
+  submissions: PendingRecordingSubmission[],
+  failure: {
+    key: string;
+    label: string;
+    finalPath: string;
+    error: unknown;
+  },
+): {
+  snapshot: RecordingSnapshot;
+  pending: PendingRecordingSubmission[];
+} {
+  const finalPath = validateFinalPath(failure.finalPath);
+  const error =
+    failure.error instanceof Error
+      ? failure.error.message
+      : String(failure.error);
+  return {
+    snapshot: {
+      ...snapshot,
+      phase: "failed",
+      final_path: finalPath,
+      recoverable_paths: [finalPath],
+      error,
+    },
+    pending: upsertPendingRecordingSubmission(submissions, {
+      key: failure.key,
+      label: failure.label,
+      finalPath,
+      busy: false,
+      error,
+    }),
+  };
 }
 
 export interface RecordingCloseDependencies {
