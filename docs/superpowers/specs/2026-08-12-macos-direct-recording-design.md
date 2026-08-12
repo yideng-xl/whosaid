@@ -41,9 +41,9 @@ Apple Silicon 场景，同时采集全系统声音和麦克风；停止录音后
 
 ## 模块边界
 
-### macOS 录音助手
+### macOS 原生录音桥
 
-新增一个随桌面应用打包的原生录音助手，负责：
+新增一个直接链接到 Tauri 主程序的 Objective-C++ 原生录音桥，负责：
 
 - 检查和触发系统录音、麦克风权限；
 - 启停 ScreenCaptureKit 与 AVAudioEngine；
@@ -52,21 +52,22 @@ Apple Silicon 场景，同时采集全系统声音和麦克风；停止录音后
 - 录制期间申请系统活动，避免自动休眠；
 - 停止时关闭文件并返回会话清单。
 
-录音助手采用 Swift 实现，以独立辅助进程与 Tauri Rust 层通过标准输入、标准
-输出交换逐行 JSON。这样将 Apple 框架、实时音频回调和桌面业务状态隔离开，
-也避免把 Swift/Objective-C 音频细节散落在现有 Rust 外壳中。
+原生桥通过 C ABI 接收启停命令，并用回调向 Rust 层传递 JSON 事件。Apple
+框架、实时音频回调和音轨写入集中在 `native/recorder/`，不散落到现有 Rust
+外壳中。原生桥必须运行在 whosaid 主进程内，使 macOS 将系统录音和麦克风
+权限明确归属 `com.yideng.whosaid`，并使用主应用 `Info.plist` 中的用途说明。
 
 协议至少包含：
 
-- 命令：`check_permissions`、`start`、`stop`、`shutdown`；
+- 命令：`check_permissions`、`start`、`stop`、`open_system_settings`；
 - 事件：`starting`、`recording`、`source_status`、`elapsed`、`stopping`、
   `stopped`、`fatal_error`；
 - 音源状态：`active`、`unavailable`、`denied`、`interrupted`；
 - 停止结果：开始时间、结束时间、系统音轨路径、可选麦克风音轨路径、各路
   首帧时间和中断区间。
 
-协议字段使用固定结构并校验路径，Rust 不拼接任意 shell 命令。辅助进程退出
-或协议损坏视为主录音故障，进入抢救保存流程。
+协议字段使用固定结构并校验路径，Rust 不拼接任意 shell 命令。原生桥上报
+不可恢复错误时，Rust 协调器进入抢救保存流程。
 
 ### Tauri 录音协调器
 
@@ -74,14 +75,16 @@ Rust 层提供前端命令和单会话状态机：
 
 ```text
 idle → requesting_permissions → starting → recording → stopping
-     → mixing → submitting → done
+     → mixing → ready
 ```
 
-任何阶段都可以进入 `failed`；`failed` 必须携带可读原因、已经保住的文件路径
+前端在拿到 `ready` 的最终路径后进入 `submitting`，调用现有任务 API；成功后回到
+`idle`，失败则保留最终录音并提供重新提交。原生阶段可以进入 `failed`；`failed`
+必须携带可读原因、已经保住的文件路径
 以及是否可以重试混音。协调器负责：
 
 - 防止重复开始或重复停止；
-- 启动、监控和回收录音助手；
+- 初始化并监控原生录音桥；
 - 创建录音目录和会话临时目录；
 - 调用包内 FFmpeg 合成；
 - 混音成功后删除临时双轨；
@@ -160,7 +163,7 @@ recordings/
 - 磁盘不足或写入失败：立即停止并尽量关闭文件，展示具体原因和可恢复路径。
 - 混音失败：保留双轨与 `session.json`，提供重试入口；不创建转写任务。
 - 转写提交失败：保留最终 `.m4a`，允许从录音结果重新提交。
-- 应用或助手异常退出：下次启动扫描 `.incomplete`，提示发现未完成录音，并允许
+- 应用异常退出：下次启动扫描 `.incomplete`，提示发现未完成录音，并允许
   尝试恢复；首版不静默自动混音。
 - 录制期间阻止系统自动休眠。用户主动合盖、关机或强制退出不承诺连续录音，
   但下次启动应能发现已经落盘的临时轨道。
@@ -169,7 +172,7 @@ recordings/
 
 ### 自动测试
 
-- Rust 状态机：合法流转、重复开始、重复停止、助手退出、混音失败、提交失败。
+- Rust 状态机：合法流转、重复开始、重复停止、原生采集失败、混音失败、提交失败。
 - 协议解析：全部命令和事件、未知字段、损坏 JSON、路径校验。
 - 时间轴：两路延迟开始、短暂中断、麦克风缺失、不同长度和补静音。
 - 前端：按钮状态、计时、两路状态、麦克风降级提示、停止三阶段、错误恢复。
