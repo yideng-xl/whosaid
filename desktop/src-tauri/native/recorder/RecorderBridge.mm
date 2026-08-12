@@ -1,4 +1,5 @@
 #import "RecorderBridge.h"
+#import "RecorderPermissionState.h"
 
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -8,6 +9,9 @@
 #include <cstdlib>
 
 namespace {
+
+NSString *const system_audio_permission_requested_key =
+    @"com.yideng.whosaid.recorder.systemAudioPermissionRequested";
 
 const char *microphone_permission() {
     switch ([AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio]) {
@@ -24,7 +28,10 @@ const char *microphone_permission() {
 }
 
 const char *system_audio_permission() {
-    return CGPreflightScreenCaptureAccess() ? "granted" : "notDetermined";
+    const bool granted = CGPreflightScreenCaptureAccess();
+    const bool requested = [[NSUserDefaults standardUserDefaults]
+        boolForKey:system_audio_permission_requested_key];
+    return whosaid_system_audio_permission_state(granted, requested);
 }
 
 } // namespace
@@ -52,6 +59,13 @@ char *whosaid_recorder_permission_snapshot(void) {
                   "{\"systemAudio\":\"%s\",\"microphone\":\"%s\"}",
                   system_audio, microphone);
     return snapshot;
+}
+
+int32_t whosaid_recorder_request_system_audio_permission(void) {
+    const bool granted = CGRequestScreenCaptureAccess();
+    [[NSUserDefaults standardUserDefaults] setBool:YES
+                                           forKey:system_audio_permission_requested_key];
+    return granted ? 1 : 0;
 }
 
 void whosaid_recorder_open_settings(int32_t pane) {
