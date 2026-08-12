@@ -94,16 +94,21 @@ impl RecordingManager {
     }
 
     fn prepare_start(&self, sink: &dyn StateEventSink) -> Result<(u64, PathBuf), RecordingError> {
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-        let snapshot = {
+        let (generation, snapshot) = {
             let mut inner = self.inner.lock().unwrap();
+            // 原生 stop 是进程级 API；只要上一代 session 尚未收到真实终态或完成同步
+            // 失败清理，就不能启动下一代，否则旧 stop 可能停掉新录音。
+            if inner.active.is_some() {
+                return Err(RecordingError::AlreadyRecording);
+            }
             inner.state.begin_start()?;
+            let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
             inner.active = Some(ActiveSession {
                 generation,
                 stop_waiter: None,
                 protocol_error: None,
             });
-            inner.state.snapshot()
+            (generation, inner.state.snapshot())
         };
         if let Err(error) = sink.emit(snapshot) {
             self.finish_start_failure(generation, sink, error.clone())?;
@@ -148,19 +153,29 @@ impl RecordingManager {
         &self,
         sink: &dyn StateEventSink,
     ) -> Result<mpsc::Receiver<StopOutcome>, RecordingError> {
-        let (receiver, snapshot) = {
+        let (expected_generation, receiver, snapshot) = {
             let mut inner = self.inner.lock().unwrap();
+            let expected_generation = inner
+                .active
+                .as_ref()
+                .map(|active| active.generation)
+                .ok_or(RecordingError::NotRecording)?;
             inner.state.begin_stop()?;
             let (sender, receiver) = mpsc::channel();
-            let active = inner.active.as_mut().ok_or(RecordingError::NotRecording)?;
+            let active = inner.active.as_mut().expect("active 已在同一把锁内确认");
             active.stop_waiter = Some(sender);
-            (receiver, inner.state.snapshot())
+            (expected_generation, receiver, inner.state.snapshot())
         };
 
         let emit_result = sink.emit(snapshot);
-        let stop_result = self.native.stop();
+        let stop_result = self.request_native_stop(expected_generation);
         if let Err(error) = stop_result {
-            self.finish_synchronous_stop_failure(sink, error.clone(), emit_result.err());
+            self.finish_synchronous_stop_failure(
+                expected_generation,
+                sink,
+                error.clone(),
+                emit_result.err(),
+            );
             return Err(error);
         }
         emit_result?;
@@ -250,21 +265,41 @@ impl RecordingManager {
 
         let emit_result = sink.emit(snapshot);
         // 协议已失去同步，必须主动停止，但仍保留 generation 和 waiter，等待真实原生终态。
-        if let Err(stop_error) = self.native.stop() {
-            self.finish_synchronous_stop_failure(sink, stop_error.clone(), emit_result.err());
+        if let Err(stop_error) = self.request_native_stop(generation) {
+            self.finish_synchronous_stop_failure(
+                generation,
+                sink,
+                stop_error.clone(),
+                emit_result.err(),
+            );
             return Err(stop_error);
         }
         emit_result
     }
 
+    fn request_native_stop(&self, expected_generation: u64) -> Result<(), RecordingError> {
+        let inner = self.inner.lock().unwrap();
+        if !Self::is_current(&inner, expected_generation) {
+            // 真实终态已先一步处理完，无需再调用进程级 stop。
+            return Ok(());
+        }
+        // 持有 session 锁到全局 stop 请求返回：原生回调只写 channel，不会重入本锁；
+        // 这样终态处理和下一代 start 都不可能插进“核对 generation → 调 stop”的窗口。
+        self.native.stop()
+    }
+
     fn finish_synchronous_stop_failure(
         &self,
+        expected_generation: u64,
         sink: &dyn StateEventSink,
         stop_error: RecordingError,
         emit_error: Option<RecordingError>,
     ) {
         let (waiter, snapshot) = {
             let mut inner = self.inner.lock().unwrap();
+            if !Self::is_current(&inner, expected_generation) {
+                return;
+            }
             let waiter = inner.active.take().and_then(|active| active.stop_waiter);
             if inner.state.snapshot().phase != RecordingPhase::Failed {
                 let _ = inner.state.apply(NativeEvent::FatalError {
@@ -502,6 +537,40 @@ mod tests {
     }
 
     #[test]
+    fn protocol_failed_session_blocks_restart_until_real_terminal() {
+        let (manager, _, sink) = manager();
+        let generation = activate(&manager, &sink);
+
+        manager
+            .handle_native_event(
+                generation,
+                &sink,
+                NativeEvent::ProtocolError {
+                    message: "坏 JSON".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(manager.snapshot().phase, RecordingPhase::Failed);
+        assert_eq!(
+            manager.prepare_start(&sink).unwrap_err(),
+            RecordingError::AlreadyRecording
+        );
+
+        manager
+            .handle_native_event(
+                generation,
+                &sink,
+                NativeEvent::Stopped {
+                    session_dir: "/session".into(),
+                    system_track: "/session/system.caf".into(),
+                    microphone_track: None,
+                },
+            )
+            .unwrap();
+        assert!(manager.prepare_start(&sink).is_ok());
+    }
+
+    #[test]
     fn stale_generation_cannot_change_new_recording() {
         let (manager, _, sink) = manager();
         let old_generation = activate(&manager, &sink);
@@ -591,6 +660,53 @@ mod tests {
                 },
             )
             .unwrap();
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        manager
+            .handle_native_event(
+                new_generation,
+                &sink,
+                NativeEvent::Stopped {
+                    session_dir: "/new".into(),
+                    system_track: "/new/system.caf".into(),
+                    microphone_track: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(receiver.recv().unwrap().unwrap().session_dir, "/new");
+    }
+
+    #[test]
+    fn old_stop_failure_cleanup_cannot_clear_new_generation() {
+        let (manager, _, sink) = manager();
+        let old_generation = activate(&manager, &sink);
+        manager
+            .handle_native_event(
+                old_generation,
+                &sink,
+                NativeEvent::FatalError {
+                    message: "旧会话终态".into(),
+                },
+            )
+            .unwrap();
+        let new_generation = activate(&manager, &sink);
+        let receiver = manager.stop(&sink).unwrap();
+
+        manager.finish_synchronous_stop_failure(
+            old_generation,
+            &sink,
+            RecordingError::Native("旧 stop 迟到失败".into()),
+            None,
+        );
+
+        assert!(RecordingManager::is_current(
+            &manager.inner.lock().unwrap(),
+            new_generation
+        ));
+        assert_eq!(manager.snapshot().phase, RecordingPhase::Stopping);
         assert!(matches!(
             receiver.try_recv(),
             Err(mpsc::TryRecvError::Empty)
