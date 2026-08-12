@@ -1,5 +1,6 @@
 //! Tauri 外壳入口：启动时 spawn Python 转写服务，握手拿端口存入 app 状态，
 //! 前端通过 `get_service_port` 命令拿端口后走 REST/WS 连本地服务；退出时 kill 子进程。
+mod recording;
 mod sidecar;
 
 use std::path::{Path, PathBuf};
@@ -152,7 +153,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_service_port,
             pick_save_path,
-            write_file
+            write_file,
+            recording::start_recording,
+            recording::stop_recording,
+            recording::get_recording_state
         ])
         .setup(|app| {
             // 打包态资源目录（.app/Contents/Resources/）；tauri dev 下通常返回 Some 但其下不会有
@@ -163,6 +167,9 @@ pub fn run() {
             let home_dir = std::env::var_os("HOME").map(PathBuf::from);
             let data_dir = resolve_data_dir(app_data_dir, home_dir, cfg!(target_os = "macos"));
             std::fs::create_dir_all(&data_dir)?;
+            app.manage(recording::RecordingManager::new(
+                data_dir.join("recordings"),
+            ));
             let cwd = data_dir.to_string_lossy().into_owned();
             // transcribe_core 未 pip 安装进 venv，只能从 core 根目录导入；
             // 故 cwd 用数据目录（config.json/持久化落此），PYTHONPATH 指向 core 根让 import 生效
