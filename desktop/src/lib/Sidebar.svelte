@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { JobSummary } from "./api";
   import Icon from "./Icon.svelte";
+  import { formatElapsed } from "./recordingState";
 
   // 呈现型组件：任务列表由 +page 统一持有并传入，本组件只负责渲染与派发点击。
   let {
@@ -10,6 +11,9 @@
     onSelect,
     onOpenModels,
     onDelete,
+    onStartRecording = () => {},
+    recordingActive = false,
+    recordingElapsed = 0,
     currentTheme = "light",
     onToggleTheme,
   }: {
@@ -19,6 +23,9 @@
     onSelect: (id: string) => void;
     onOpenModels: () => void;
     onDelete: (id: string) => void;
+    onStartRecording?: () => void;
+    recordingActive?: boolean;
+    recordingElapsed?: number;
     // 当前主题与切换回调：由 +page 统一持有并下发
     currentTheme?: "light" | "dark";
     onToggleTheme?: () => void;
@@ -74,6 +81,23 @@
 </script>
 
 <aside class="sidebar">
+  <button
+    class="recording-entry"
+    class:active={recordingActive}
+    disabled={recordingActive}
+    aria-label={recordingActive
+      ? `录音进行中，${formatElapsed(recordingElapsed)}`
+      : "开始录音"}
+    onclick={onStartRecording}
+  >
+    {#if recordingActive}<span class="recording-dot" aria-hidden="true"></span>{/if}
+    <Icon name={recordingActive ? "record" : "microphone"} size={16} />
+    <span>{recordingActive ? "正在录音" : "开始录音"}</span>
+    {#if recordingActive}
+      <time>{formatElapsed(recordingElapsed)}</time>
+    {/if}
+  </button>
+
   <div class="drop-hint" class:active={dragging}>
     把音频文件拖进窗口开始转写
   </div>
@@ -159,6 +183,43 @@
     background: color-mix(in srgb, var(--sidebar-bg) 70%, transparent);
     padding: var(--space-3);
     gap: var(--space-2);
+  }
+  .recording-entry {
+    width: 100%;
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius-btn);
+    background: var(--danger);
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.12s, opacity 0.12s;
+  }
+  .recording-entry:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--danger) 86%, black);
+  }
+  .recording-entry:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .recording-entry.active {
+    justify-content: flex-start;
+    background: color-mix(in srgb, var(--danger) 10%, var(--sidebar-bg));
+    color: var(--danger);
+  }
+  .recording-entry:disabled { cursor: default; }
+  .recording-entry time {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+  }
+  .recording-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--danger);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 14%, transparent);
   }
   .drop-hint {
     border: 1.5px dashed var(--hairline);
