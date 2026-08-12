@@ -13,6 +13,7 @@
     onDelete,
     onStartRecording = () => {},
     recordingActive = false,
+    recordingResultPending = false,
     recordingElapsed = 0,
     currentTheme = "light",
     onToggleTheme,
@@ -25,6 +26,7 @@
     onDelete: (id: string) => void;
     onStartRecording?: () => void;
     recordingActive?: boolean;
+    recordingResultPending?: boolean;
     recordingElapsed?: number;
     // 当前主题与切换回调：由 +page 统一持有并下发
     currentTheme?: "light" | "dark";
@@ -87,12 +89,14 @@
     disabled={recordingActive}
     aria-label={recordingActive
       ? `录音进行中，${formatElapsed(recordingElapsed)}`
+      : recordingResultPending
+        ? "录音已保存，等待提交转写"
       : "开始录音"}
     onclick={onStartRecording}
   >
     {#if recordingActive}<span class="recording-dot" aria-hidden="true"></span>{/if}
-    <Icon name={recordingActive ? "record" : "microphone"} size={16} />
-    <span>{recordingActive ? "正在录音" : "开始录音"}</span>
+    <Icon name={recordingActive ? "record" : recordingResultPending ? "warning" : "microphone"} size={16} />
+    <span>{recordingActive ? "正在录音" : recordingResultPending ? "录音待提交" : "开始录音"}</span>
     {#if recordingActive}
       <time>{formatElapsed(recordingElapsed)}</time>
     {/if}

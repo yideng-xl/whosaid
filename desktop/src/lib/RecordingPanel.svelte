@@ -12,12 +12,20 @@
   let {
     snapshot,
     onStop,
+    systemPermissionDenied = false,
+    onOpenSystemSettings = () => {},
+    onRetrySubmit,
   }: {
     snapshot: RecordingSnapshot;
     onStop: () => void | Promise<void>;
+    systemPermissionDenied?: boolean;
+    onOpenSystemSettings?: () => void | Promise<void>;
+    onRetrySubmit?: () => void | Promise<void>;
   } = $props();
 
   let stopPending = $state(false);
+  let retryPending = $state(false);
+  let settingsPending = $state(false);
   const ui = $derived(reduceRecordingState(recordingState(), snapshot));
   const canStop = $derived(ui.phase === "recording");
 
@@ -29,6 +37,28 @@
     } catch {
       // 停止命令失败时允许用户重试；具体错误由持有录音状态的上层展示。
       stopPending = false;
+    }
+  }
+
+  async function retrySubmitOnce() {
+    if (retryPending || !onRetrySubmit) return;
+    retryPending = true;
+    try {
+      await onRetrySubmit();
+    } catch {
+      retryPending = false;
+    }
+  }
+
+  async function openSettingsOnce() {
+    if (settingsPending) return;
+    settingsPending = true;
+    try {
+      await onOpenSystemSettings();
+    } catch {
+      // 上层负责展示具体错误；组件只保证按钮可再次操作。
+    } finally {
+      settingsPending = false;
     }
   }
 </script>
@@ -72,6 +102,21 @@
       </div>
     {/if}
 
+    {#if systemPermissionDenied}
+      <div class="permission" role="status">
+        <Icon name="computer-audio" size={18} />
+        <div>
+          <strong>需要允许系统录音</strong>
+          <p>whosaid 只录声音，不保存屏幕画面。授权后如系统提示，请重新启动 whosaid。</p>
+          <button
+            disabled={settingsPending}
+            aria-busy={settingsPending}
+            onclick={openSettingsOnce}
+          >打开系统设置</button>
+        </div>
+      </div>
+    {/if}
+
     {#if ui.phase === "failed"}
       <div class="failure" role="alert">
         <strong>{ui.error ?? "录音未能完成"}</strong>
@@ -101,6 +146,13 @@
         <span class="spinner" aria-hidden="true"></span>
         {labelForPhase(ui.phase)}
       </div>
+    {:else if ui.final_path && onRetrySubmit}
+      <button
+        class="retry"
+        disabled={retryPending}
+        aria-busy={retryPending}
+        onclick={retrySubmitOnce}
+      >{retryPending ? "正在重新提交…" : "重新提交转写"}</button>
     {/if}
   </div>
 </section>
@@ -205,6 +257,38 @@
     line-height: 1.5;
   }
   .warning :global(svg) { flex: 0 0 auto; margin-top: 1px; }
+  .permission {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+    padding: var(--space-3);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--hairline));
+    border-radius: var(--radius-card);
+    background: color-mix(in srgb, var(--accent) 8%, var(--card));
+    color: var(--fg);
+  }
+  .permission :global(svg) { flex: 0 0 auto; color: var(--accent); }
+  .permission strong { font-size: 13px; }
+  .permission p {
+    margin: var(--space-1) 0 var(--space-2);
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .permission button,
+  .retry {
+    min-height: 34px;
+    padding: 6px 14px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-btn);
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .permission button:disabled,
+  .retry:disabled { cursor: default; opacity: 0.6; }
   .failure {
     margin-top: var(--space-3);
     padding: var(--space-3);
@@ -222,6 +306,7 @@
     font-size: 11px;
   }
   .stop,
+  .retry,
   .working {
     width: 100%;
     min-height: 42px;
@@ -246,6 +331,9 @@
   }
   .stop:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .stop:disabled { cursor: default; opacity: 0.6; }
+  .retry:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 86%, black);
+  }
   .working {
     color: var(--muted);
     background: color-mix(in srgb, var(--muted) 8%, transparent);

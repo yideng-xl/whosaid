@@ -60,6 +60,21 @@ describe("RecordingPanel", () => {
     finish();
   });
 
+  it("停止请求被拒绝后重新启用停止按钮", async () => {
+    const onStop = vi.fn().mockRejectedValueOnce(new Error("stop failed"));
+    render(RecordingPanel, { snapshot: snapshot(), onStop });
+
+    const button = screen.getByRole("button", {
+      name: "停止并开始转写",
+    }) as HTMLButtonElement;
+    await fireEvent.click(button);
+    await Promise.resolve();
+
+    expect(onStop).toHaveBeenCalledOnce();
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).toContain("停止并开始转写");
+  });
+
   it("失败时展示错误和全部可恢复文件路径", () => {
     render(RecordingPanel, {
       snapshot: snapshot({
@@ -83,5 +98,50 @@ describe("RecordingPanel", () => {
     expect(
       screen.queryByRole("button", { name: "停止并开始转写" }),
     ).toBeNull();
+  });
+
+  it("系统录音权限被拒绝时说明只录声音并可打开设置", async () => {
+    const onOpenSystemSettings = vi.fn();
+    render(RecordingPanel, {
+      snapshot: snapshot({
+        phase: "failed",
+        system_audio: "denied",
+        error: "需要系统录音权限",
+      }),
+      onStop: vi.fn(),
+      systemPermissionDenied: true,
+      onOpenSystemSettings,
+    });
+
+    expect(screen.getByText(/只录声音，不保存屏幕画面/)).toBeTruthy();
+    await fireEvent.click(
+      screen.getByRole("button", { name: "打开系统设置" }),
+    );
+    expect(onOpenSystemSettings).toHaveBeenCalledOnce();
+  });
+
+  it("最终文件提交失败时提供重新提交且防止双击", async () => {
+    let finish!: () => void;
+    const onRetrySubmit = vi.fn(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    render(RecordingPanel, {
+      snapshot: snapshot({
+        phase: "failed",
+        final_path: "/recordings/meeting.m4a",
+        recoverable_paths: ["/recordings/meeting.m4a"],
+        error: "录音已保存，但提交转写失败",
+      }),
+      onStop: vi.fn(),
+      onRetrySubmit,
+    });
+
+    const button = screen.getByRole("button", { name: "重新提交转写" });
+    await fireEvent.click(button);
+    await fireEvent.click(button);
+
+    expect(onRetrySubmit).toHaveBeenCalledOnce();
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    finish();
   });
 });
