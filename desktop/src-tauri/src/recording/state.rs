@@ -201,6 +201,10 @@ impl RecordingState {
         self.transition(StateTransition::FinishMixing(final_path))
     }
 
+    pub fn set_recoverable_paths(&mut self, paths: Vec<String>) {
+        self.snapshot.recoverable_paths = paths;
+    }
+
     pub fn apply(&mut self, event: NativeEvent) -> Result<(), RecordingError> {
         self.transition(StateTransition::Native(event))
     }

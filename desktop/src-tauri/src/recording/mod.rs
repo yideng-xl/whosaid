@@ -9,13 +9,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
-use mix::{mix_recording, FfmpegTools};
+use mix::{mix_recording, probe_recording, FfmpegTools};
 use native::{platform_recorder, NativeRecorder};
 use state::{
     NativeEvent, RecordingError, RecordingPhase, RecordingSnapshot, RecordingState,
     RecordingStopResult as StoppedTracks,
 };
-use storage::{RecordingStore, RecoverableRecording};
+use storage::{RecordingStore, RecoverableRecording, RetryRecording};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const STATE_EVENT: &str = "recording://state";
@@ -40,8 +40,11 @@ impl StateEventSink for AppEventSink {
     }
 }
 
+#[derive(Clone)]
 struct ActiveSession {
     generation: u64,
+    session_id: String,
+    session_dir: PathBuf,
     stop_waiter: Option<mpsc::Sender<StopOutcome>>,
     protocol_error: Option<RecordingError>,
 }
@@ -56,7 +59,7 @@ pub struct RecordingManager {
     native: Arc<dyn NativeRecorder>,
     store: RecordingStore,
     tools: FfmpegTools,
-    mix_lock: Mutex<()>,
+    coordination_lock: Mutex<()>,
     next_generation: AtomicU64,
 }
 
@@ -87,7 +90,7 @@ impl RecordingManager {
             native,
             store: RecordingStore::new(recordings_root),
             tools,
-            mix_lock: Mutex::new(()),
+            coordination_lock: Mutex::new(()),
             next_generation: AtomicU64::new(1),
         }
     }
@@ -112,8 +115,6 @@ impl RecordingManager {
         });
 
         if let Err(error) = self.native.start(&session_dir, sender) {
-            // 同步启动失败时尚未形成可恢复录音，清掉 begin_session 创建的空目录。
-            let _ = std::fs::remove_dir_all(&session_dir);
             self.finish_start_failure(generation, &sink, error.clone())?;
             return Err(error);
         }
@@ -121,7 +122,8 @@ impl RecordingManager {
     }
 
     fn prepare_start(&self, sink: &dyn StateEventSink) -> Result<(u64, PathBuf), RecordingError> {
-        let (generation, snapshot) = {
+        let _coordination = self.coordination_lock.lock().unwrap();
+        let (generation, snapshot, session_dir) = {
             let mut inner = self.inner.lock().unwrap();
             // 原生 stop 是进程级 API；只要上一代 session 尚未收到真实终态或完成同步
             // 失败清理，就不能启动下一代，否则旧 stop 可能停掉新录音。
@@ -129,13 +131,24 @@ impl RecordingManager {
                 return Err(RecordingError::AlreadyRecording);
             }
             inner.state.begin_start()?;
+            let session = match self.store.begin_session(Local::now()) {
+                Ok(session) => session,
+                Err(error) => {
+                    let _ = inner.state.apply(NativeEvent::FatalError {
+                        message: error.to_string(),
+                    });
+                    return Err(error);
+                }
+            };
             let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
             inner.active = Some(ActiveSession {
                 generation,
+                session_id: session.session_id,
+                session_dir: session.session_dir.clone(),
                 stop_waiter: None,
                 protocol_error: None,
             });
-            (generation, inner.state.snapshot())
+            (generation, inner.state.snapshot(), session.session_dir)
         };
         if let Err(error) = sink.emit(snapshot) {
             self.finish_start_failure(generation, sink, error.clone())?;
@@ -146,13 +159,7 @@ impl RecordingManager {
             self.finish_start_failure(generation, sink, error.clone())?;
             return Err(error);
         }
-        match self.store.begin_session(Local::now()) {
-            Ok(session) => Ok((generation, session.session_dir)),
-            Err(error) => {
-                self.finish_start_failure(generation, sink, error.clone())?;
-                Err(error)
-            }
-        }
+        Ok((generation, session_dir))
     }
 
     fn finish_start_failure(
@@ -166,7 +173,11 @@ impl RecordingManager {
             if !Self::is_current(&inner, generation) {
                 return Ok(());
             }
-            inner.active = None;
+            if let Some(active) = inner.active.take() {
+                // 权限/同步启动失败时只清理由 Rust 创建且仍为空的受控会话目录；
+                // 如果原生已落下任何数据，保留给恢复扫描。
+                let _ = self.store.discard_empty_session(&active.session_id);
+            }
             if inner.state.snapshot().phase != RecordingPhase::Failed {
                 inner.state.apply(NativeEvent::FatalError {
                     message: error.to_string(),
@@ -233,6 +244,9 @@ impl RecordingManager {
                 .active
                 .as_ref()
                 .and_then(|active| active.protocol_error.clone());
+            let terminal_session = is_terminal
+                .then(|| inner.active.as_ref().cloned())
+                .flatten();
             let native_outcome = match &event {
                 NativeEvent::Stopped {
                     session_dir,
@@ -252,6 +266,18 @@ impl RecordingManager {
                 _ => None,
             };
             inner.state.apply(event)?;
+            if let Some(active) = &terminal_session {
+                if let Ok(recording) = self.store.recoverable_by_id(&active.session_id) {
+                    if PathBuf::from(&recording.session_dir) == active.session_dir {
+                        inner.state.set_recoverable_paths(
+                            std::iter::once(recording.session_dir)
+                                .chain(std::iter::once(recording.system_track))
+                                .chain(recording.microphone_track)
+                                .collect(),
+                        );
+                    }
+                }
+            }
             let snapshot = inner.state.snapshot();
             let waiter = if is_terminal {
                 inner.active.take().and_then(|active| active.stop_waiter)
@@ -328,7 +354,20 @@ impl RecordingManager {
             if !Self::is_current(&inner, expected_generation) {
                 return;
             }
-            let waiter = inner.active.take().and_then(|active| active.stop_waiter);
+            let active = inner.active.take();
+            if let Some(active) = &active {
+                if let Ok(recording) = self.store.recoverable_by_id(&active.session_id) {
+                    if PathBuf::from(&recording.session_dir) == active.session_dir {
+                        inner.state.set_recoverable_paths(
+                            std::iter::once(recording.session_dir)
+                                .chain(std::iter::once(recording.system_track))
+                                .chain(recording.microphone_track)
+                                .collect(),
+                        );
+                    }
+                }
+            }
+            let waiter = active.and_then(|active| active.stop_waiter);
             if inner.state.snapshot().phase != RecordingPhase::Failed {
                 let _ = inner.state.apply(NativeEvent::FatalError {
                     message: stop_error.to_string(),
@@ -389,9 +428,9 @@ impl RecordingManager {
 
     fn mix_tracks(&self, tracks: StoppedTracks) -> Result<RecordingStopResult, String> {
         let _guard = self
-            .mix_lock
+            .coordination_lock
             .lock()
-            .map_err(|_| "录音混音锁已损坏".to_owned())?;
+            .map_err(|_| "录音协调锁已损坏".to_owned())?;
         let recording = self
             .store
             .recording_from_native_paths(
@@ -405,14 +444,47 @@ impl RecordingManager {
 
     fn retry_mix(&self, session_id: &str) -> Result<RecordingStopResult, String> {
         let _guard = self
-            .mix_lock
+            .coordination_lock
             .lock()
-            .map_err(|_| "录音混音锁已损坏".to_owned())?;
-        let recording = self
+            .map_err(|_| "录音协调锁已损坏".to_owned())?;
+        if self
+            .inner
+            .lock()
+            .unwrap()
+            .active
+            .as_ref()
+            .is_some_and(|active| active.session_id == session_id)
+        {
+            return Err("该会话仍在录音，不能恢复混音".into());
+        }
+        match self
             .store
-            .recoverable_by_id(session_id)
-            .map_err(|error| error.to_string())?;
-        self.mix_recording(&recording)
+            .retry_recording(session_id)
+            .map_err(|error| error.to_string())?
+        {
+            RetryRecording::Complete(final_path) => Ok(RecordingStopResult {
+                final_path: {
+                    probe_recording(&self.tools, &final_path)
+                        .map_err(|error| format!("已完成录音校验失败：{error}"))?;
+                    final_path.to_string_lossy().into_owned()
+                },
+            }),
+            RetryRecording::Pending(recording) => self.mix_recording(&recording),
+        }
+    }
+
+    fn list_recoverable(&self) -> Result<Vec<RecoverableRecording>, RecordingError> {
+        let _guard = self.coordination_lock.lock().unwrap();
+        let active_id = self
+            .inner
+            .lock()
+            .unwrap()
+            .active
+            .as_ref()
+            .map(|active| active.session_id.clone());
+        let mut recordings = self.store.recoverable()?;
+        recordings.retain(|recording| Some(&recording.session_id) != active_id.as_ref());
+        Ok(recordings)
     }
 
     fn mix_recording(
@@ -481,8 +553,7 @@ pub fn list_recoverable_recordings(
     manager: State<'_, RecordingManager>,
 ) -> Result<Vec<RecoverableRecording>, String> {
     manager
-        .store
-        .recoverable()
+        .list_recoverable()
         .map_err(|error| error.to_string())
 }
 
@@ -490,14 +561,8 @@ pub fn list_recoverable_recordings(
 pub async fn retry_recording_mix(
     session_id: String,
     app: AppHandle,
-    manager: State<'_, RecordingManager>,
+    _manager: State<'_, RecordingManager>,
 ) -> Result<RecordingStopResult, String> {
-    // 在进入阻塞线程前先做一次轻量校验，让明显非法的 ID 立即返回；在线程内会再次读取
-    // 清单并校验，防止校验后文件被替换。
-    manager
-        .store
-        .recoverable_by_id(&session_id)
-        .map_err(|error| error.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         app.state::<RecordingManager>().retry_mix(&session_id)
     })
@@ -576,7 +641,10 @@ mod tests {
     fn manager() -> (RecordingManager, Arc<MockNative>, TestSink) {
         let native = Arc::new(MockNative::new());
         let manager = RecordingManager::with_native(
-            std::env::temp_dir().join("whosaid-recording-manager-tests"),
+            std::env::temp_dir().join(format!(
+                "whosaid-recording-manager-tests-{}",
+                uuid::Uuid::new_v4()
+            )),
             native.clone(),
         );
         (manager, native, TestSink::default())
@@ -591,6 +659,34 @@ mod tests {
             .handle_native_event(generation, sink, NativeEvent::Recording { started_at: 1.0 })
             .unwrap();
         generation
+    }
+
+    fn persist_active_manifest(manager: &RecordingManager) -> (String, PathBuf) {
+        let active = manager
+            .inner
+            .lock()
+            .unwrap()
+            .active
+            .as_ref()
+            .unwrap()
+            .clone();
+        std::fs::write(active.session_dir.join("system.caf"), b"audio").unwrap();
+        std::fs::write(
+            active.session_dir.join("session.json"),
+            serde_json::json!({
+                "schemaVersion": 1,
+                "sessionId": uuid::Uuid::new_v4().to_string(),
+                "startedAt": 1786492215.0,
+                "systemTrack": "system.caf",
+                "microphoneTrack": null,
+                "systemStatus": "interrupted",
+                "microphoneStatus": "unavailable",
+                "complete": false
+            })
+            .to_string(),
+        )
+        .unwrap();
+        (active.session_id, active.session_dir)
     }
 
     #[test]
@@ -644,9 +740,38 @@ mod tests {
     }
 
     #[test]
+    fn fatal_terminal_exposes_only_persisted_recoverable_session() {
+        let (manager, _, sink) = manager();
+        let generation = activate(&manager, &sink);
+        let (session_id, session_dir) = persist_active_manifest(&manager);
+
+        manager
+            .handle_native_event(
+                generation,
+                &sink,
+                NativeEvent::FatalError {
+                    message: "系统声音中断".into(),
+                },
+            )
+            .unwrap();
+
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.phase, RecordingPhase::Failed);
+        assert!(snapshot
+            .recoverable_paths
+            .contains(&session_dir.to_string_lossy().into_owned()));
+        assert!(manager
+            .list_recoverable()
+            .unwrap()
+            .iter()
+            .any(|recording| recording.session_id == session_id));
+    }
+
+    #[test]
     fn protocol_error_stops_native_but_waits_for_real_terminal_event() {
         let (manager, native, sink) = manager();
         let generation = activate(&manager, &sink);
+        let (_, session_dir) = persist_active_manifest(&manager);
         let receiver = manager.stop(&sink).unwrap();
 
         manager
@@ -659,6 +784,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(native.stop_calls.load(Ordering::Relaxed), 2);
+        assert!(manager.snapshot().recoverable_paths.is_empty());
         assert!(matches!(
             receiver.try_recv(),
             Err(mpsc::TryRecvError::Empty)
@@ -675,6 +801,10 @@ mod tests {
                 },
             )
             .unwrap();
+        assert!(manager
+            .snapshot()
+            .recoverable_paths
+            .contains(&session_dir.to_string_lossy().into_owned()));
         assert_eq!(
             receiver.recv().unwrap().unwrap_err(),
             RecordingError::InvalidNativeEvent("坏 JSON".into())
@@ -923,6 +1053,7 @@ mod tests {
     fn protocol_stop_sync_failure_explicitly_terminates_session() {
         let (manager, native, sink) = manager();
         let generation = activate(&manager, &sink);
+        let (_, session_dir) = persist_active_manifest(&manager);
         let receiver = manager.stop(&sink).unwrap();
         native.stop_fails.store(true, Ordering::Relaxed);
 
@@ -943,9 +1074,32 @@ mod tests {
             RecordingError::Native("同步停止失败".into())
         );
         assert_eq!(manager.snapshot().phase, RecordingPhase::Failed);
+        assert!(manager
+            .snapshot()
+            .recoverable_paths
+            .contains(&session_dir.to_string_lossy().into_owned()));
 
         native.stop_fails.store(false, Ordering::Relaxed);
         assert!(manager.prepare_start(&sink).is_ok());
+    }
+
+    #[test]
+    fn active_session_is_hidden_and_cannot_be_retried() {
+        let (manager, _, sink) = manager();
+        let (generation, _) = manager.prepare_start(&sink).unwrap();
+        let (session_id, _) = persist_active_manifest(&manager);
+
+        assert!(manager.store.recoverable_by_id(&session_id).is_ok());
+
+        assert!(manager.list_recoverable().unwrap().is_empty());
+        assert!(manager
+            .retry_mix(&session_id)
+            .unwrap_err()
+            .contains("仍在录音"));
+        assert!(RecordingManager::is_current(
+            &manager.inner.lock().unwrap(),
+            generation
+        ));
     }
 
     #[test]

@@ -86,14 +86,47 @@ pub fn build_probe_args(output: &Path) -> Vec<String> {
     ]
 }
 
+pub fn probe_recording(tools: &FfmpegTools, output: &Path) -> Result<f64, MixError> {
+    let probe_output = Command::new(&tools.ffprobe)
+        .args(build_probe_args(output))
+        .output()
+        .map_err(|error| {
+            MixError::new(format!(
+                "无法启动 ffprobe（{}）：{error}",
+                tools.ffprobe.display()
+            ))
+        })?;
+    if !probe_output.status.success() {
+        return Err(MixError::new(format!(
+            "ffprobe 校验失败：{}",
+            stderr_summary(&probe_output.stderr)
+        )));
+    }
+    let duration = String::from_utf8_lossy(&probe_output.stdout)
+        .trim()
+        .parse::<f64>()
+        .map_err(|error| MixError::new(format!("ffprobe 返回了无效时长：{error}")))?;
+    if !duration.is_finite() || duration <= 0.0 {
+        return Err(MixError::new("ffprobe 检测到录音时长为零"));
+    }
+    Ok(duration)
+}
+
 pub fn mix_recording(
     tools: &FfmpegTools,
     store: &RecordingStore,
     recording: &RecoverableRecording,
 ) -> Result<PathBuf, MixError> {
-    let current = store
-        .recoverable_by_id(&recording.session_id)
-        .map_err(|error| MixError::new(error.to_string()))?;
+    let current = match store
+        .retry_recording(&recording.session_id)
+        .map_err(|error| MixError::new(error.to_string()))?
+    {
+        super::storage::RetryRecording::Pending(current) => current,
+        super::storage::RetryRecording::Complete(final_path) => {
+            probe_recording(tools, &final_path)?;
+            return Ok(final_path);
+        }
+    };
     if current != *recording {
         return Err(MixError::new("录音恢复信息已变化，请重新扫描后再试"));
     }
@@ -101,7 +134,23 @@ pub fn mix_recording(
         .ensure_root()
         .map_err(|error| MixError::new(error.to_string()))?;
 
-    let final_path = store.final_path_for(&current);
+    if let Some(final_path) = store
+        .installed_result(&current)
+        .map_err(|error| MixError::new(error.to_string()))?
+    {
+        probe_recording(tools, &final_path)?;
+        store
+            .complete_with_receipt(&current, &final_path)
+            .map_err(|error| MixError::new(error.to_string()))?;
+        if let Err(error) = store.remove_completed_session(&current) {
+            eprintln!("[whosaid] 无法清理已完成录音目录：{error}");
+        }
+        return Ok(final_path);
+    }
+
+    let mut final_path = store
+        .planned_final_path(&current)
+        .map_err(|error| MixError::new(error.to_string()))?;
     let temporary_path = store.temporary_path_for(&current, &final_path);
     let _ = fs::remove_file(&temporary_path);
     let mix_args = build_mix_args(
@@ -126,44 +175,47 @@ pub fn mix_recording(
         )));
     }
 
-    let probe_output = Command::new(&tools.ffprobe)
-        .args(build_probe_args(&temporary_path))
-        .output()
-        .map_err(|error| {
-            let _ = fs::remove_file(&temporary_path);
-            MixError::new(format!(
-                "无法启动 ffprobe（{}）：{error}",
-                tools.ffprobe.display()
-            ))
-        })?;
-    if !probe_output.status.success() {
+    if let Err(error) = probe_recording(tools, &temporary_path) {
         let _ = fs::remove_file(&temporary_path);
-        return Err(MixError::new(format!(
-            "ffprobe 校验失败：{}",
-            stderr_summary(&probe_output.stderr)
-        )));
+        return Err(error);
     }
-    let duration = String::from_utf8_lossy(&probe_output.stdout)
-        .trim()
-        .parse::<f64>()
-        .map_err(|error| {
-            let _ = fs::remove_file(&temporary_path);
-            MixError::new(format!("ffprobe 返回了无效时长：{error}"))
-        })?;
-    if !duration.is_finite() || duration <= 0.0 {
-        let _ = fs::remove_file(&temporary_path);
-        return Err(MixError::new("ffprobe 检测到录音时长为零"));
+    let (size, sha256) = RecordingStore::artifact_fingerprint(&temporary_path)
+        .map_err(|error| MixError::new(error.to_string()))?;
+    store
+        .record_ready_artifact(&current, &final_path, size, &sha256)
+        .map_err(|error| MixError::new(error.to_string()))?;
+
+    loop {
+        match fs::hard_link(&temporary_path, &final_path) {
+            Ok(()) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let is_ours = store
+                    .installed_result(&current)
+                    .map_err(|error| MixError::new(error.to_string()))?
+                    .as_deref()
+                    == Some(final_path.as_path());
+                if is_ours && probe_recording(tools, &final_path).is_ok() {
+                    break;
+                }
+                final_path = store
+                    .move_to_next_final_path(&current)
+                    .map_err(|error| MixError::new(error.to_string()))?;
+                store
+                    .record_ready_artifact(&current, &final_path, size, &sha256)
+                    .map_err(|error| MixError::new(error.to_string()))?;
+            }
+            Err(error) => return Err(MixError::new(format!("无法原子保存最终录音：{error}"))),
+        }
     }
 
-    fs::rename(&temporary_path, &final_path).map_err(|error| {
-        let _ = fs::remove_file(&temporary_path);
-        MixError::new(format!("无法保存最终录音：{error}"))
-    })?;
-    if let Err(error) = store.mark_recording_complete(&current) {
-        // 清单没能完成落盘时，撤回最终文件，避免调用方收到失败后重试出重复录音。
-        let _ = fs::remove_file(&final_path);
-        return Err(MixError::new(error.to_string()));
-    }
+    probe_recording(tools, &final_path)?;
+    store
+        .record_installed(&current)
+        .map_err(|error| MixError::new(error.to_string()))?;
+    let _ = fs::remove_file(&temporary_path);
+    store
+        .complete_with_receipt(&current, &final_path)
+        .map_err(|error| MixError::new(error.to_string()))?;
     if let Err(error) = store.remove_completed_session(&current) {
         // 最终文件和 complete=true 清单均已安全落盘。残留目录不会再次出现在恢复列表，
         // 清理失败不应把一个有效的录音结果降级成可重试失败。
@@ -241,6 +293,10 @@ mod tests {
 
         assert!(final_path.is_file());
         assert!(!session_dir.exists());
+        assert_eq!(
+            store.retry_recording(session_id).unwrap(),
+            super::super::storage::RetryRecording::Complete(final_path.clone())
+        );
         let probe = Command::new("ffprobe")
             .args(build_probe_args(&final_path))
             .output()
@@ -270,6 +326,55 @@ mod tests {
 
         assert!(final_path.is_file());
         assert!(!session_dir.exists());
+    }
+
+    #[test]
+    #[ignore = "需要系统或包内 FFmpeg/ffprobe"]
+    fn retry_after_install_before_complete_returns_same_file() {
+        let root = tempdir().unwrap();
+        let session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let session_dir = write_manifest(root.path(), session_id, false, false);
+        generate_track("ffmpeg", &session_dir.join("system.caf"), 440);
+        let store = RecordingStore::new(root.path().to_path_buf());
+        let recording = store.recoverable_by_id(session_id).unwrap();
+        let final_path = store.planned_final_path(&recording).unwrap();
+        let temporary = store.temporary_path_for(&recording, &final_path);
+        generate_m4a("ffmpeg", &temporary, 440);
+        let (size, sha256) = RecordingStore::artifact_fingerprint(&temporary).unwrap();
+        store
+            .record_ready_artifact(&recording, &final_path, size, &sha256)
+            .unwrap();
+        fs::hard_link(&temporary, &final_path).unwrap();
+        fs::remove_file(&temporary).unwrap();
+
+        let tools = FfmpegTools::new("/usr/bin/false".into(), "ffprobe".into());
+        let recovered = mix_recording(&tools, &store, &recording).unwrap();
+
+        assert_eq!(recovered, final_path);
+        assert_eq!(
+            store.retry_recording(session_id).unwrap(),
+            super::super::storage::RetryRecording::Complete(final_path)
+        );
+    }
+
+    #[test]
+    #[ignore = "需要系统或包内 FFmpeg/ffprobe"]
+    fn collision_never_overwrites_existing_file() {
+        let root = tempdir().unwrap();
+        let session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let session_dir = write_manifest(root.path(), session_id, false, false);
+        generate_track("ffmpeg", &session_dir.join("system.caf"), 440);
+        let store = RecordingStore::new(root.path().to_path_buf());
+        let recording = store.recoverable_by_id(session_id).unwrap();
+        let collided = store.planned_final_path(&recording).unwrap();
+        fs::write(&collided, b"user file").unwrap();
+
+        let tools = FfmpegTools::new("ffmpeg".into(), "ffprobe".into());
+        let final_path = mix_recording(&tools, &store, &recording).unwrap();
+
+        assert_eq!(fs::read(&collided).unwrap(), b"user file");
+        assert_ne!(final_path, collided);
+        probe_recording(&tools, &final_path).unwrap();
     }
 
     fn write_manifest(root: &Path, session_id: &str, complete: bool, microphone: bool) -> PathBuf {
@@ -321,5 +426,26 @@ mod tests {
             "生成测试音轨失败：{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn generate_m4a(ffmpeg: &str, path: &Path, frequency: u16) {
+        let output = Command::new(ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("sine=frequency={frequency}:duration=0.25"),
+                "-ar",
+                "48000",
+                "-ac",
+                "1",
+                "-c:a",
+                "aac",
+                &path.to_string_lossy(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
     }
 }
