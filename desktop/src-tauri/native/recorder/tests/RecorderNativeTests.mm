@@ -6,6 +6,7 @@
 #import <Foundation/Foundation.h>
 
 #include <cassert>
+#include <cmath>
 #include <cstring>
 
 enum WSMicStartResult {
@@ -15,6 +16,23 @@ enum WSMicStartResult {
 };
 
 bool WSMicFailureIsFatal(WSMicStartResult result);
+AVAudioPCMBuffer *WSConvertMicrophoneBuffer(AVAudioPCMBuffer *buffer, NSError **error);
+NSDictionary<NSString *, id> *WSSessionManifest(NSString *sessionID,
+                                                 NSNumber *startedAt,
+                                                 BOOL microphoneHasFrames,
+                                                 NSString *systemStatus,
+                                                 NSString *microphoneStatus);
+NSArray<NSDictionary<NSString *, id> *> *WSSourceStatusEventsAfterPersistence(
+    BOOL persisted,
+    NSString *source,
+    NSString *status,
+    NSError *error);
+NSArray<NSDictionary<NSString *, id> *> *WSStopTerminalEventsAfterPersistence(
+    BOOL persisted,
+    NSString *sessionDirectory,
+    NSString *systemTrack,
+    NSString *microphoneTrack,
+    NSError *error);
 
 int main() {
     @autoreleasepool {
@@ -23,6 +41,69 @@ int main() {
         assert(!WSMicFailureIsFatal(WSMicStartResultDenied));
         assert(!WSMicFailureIsFatal(WSMicStartResultUnavailable));
         assert(!WSMicFailureIsFatal(WSMicStartResultInterrupted));
+
+        AVAudioFormat *stereo44100 = [[AVAudioFormat alloc]
+            initStandardFormatWithSampleRate:44'100
+                                     channels:2];
+        AVAudioPCMBuffer *stereoBuffer = [[AVAudioPCMBuffer alloc]
+            initWithPCMFormat:stereo44100
+                frameCapacity:4'410];
+        stereoBuffer.frameLength = 4'410;
+        for (AVAudioChannelCount channel = 0; channel < stereo44100.channelCount; ++channel) {
+            for (AVAudioFrameCount frame = 0; frame < stereoBuffer.frameLength; ++frame) {
+                stereoBuffer.floatChannelData[channel][frame] =
+                    channel == 0 ? 0.25f : 0.5f;
+            }
+        }
+        NSError *conversionError = nil;
+        AVAudioPCMBuffer *converted = WSConvertMicrophoneBuffer(stereoBuffer,
+                                                                &conversionError);
+        assert(conversionError == nil);
+        assert(converted != nil);
+        assert(std::fabs(converted.format.sampleRate - 48'000) < 0.5);
+        assert(converted.format.channelCount == 1);
+        assert(converted.frameLength == 4'800);
+        BOOL hasSamples = NO;
+        for (AVAudioFrameCount frame = 0; frame < converted.frameLength; ++frame) {
+            if (std::fabs(converted.floatChannelData[0][frame]) > 0.0001f) {
+                hasSamples = YES;
+                break;
+            }
+        }
+        assert(hasSamples);
+
+        NSDictionary<NSString *, id> *stoppedManifest = WSSessionManifest(
+            @"session-id", @1'786'500'000.0, YES, @"stopped", @"active");
+        assert([stoppedManifest[@"complete"] isEqual:@NO]);
+        assert([stoppedManifest[@"microphoneTrack"] isEqual:@"microphone.caf"]);
+
+        NSError *persistenceError = [NSError
+            errorWithDomain:@"com.yideng.whosaid.tests"
+                       code:1
+                   userInfo:@{NSLocalizedDescriptionKey : @"disk full"}];
+        NSArray<NSDictionary<NSString *, id> *> *failedSourceEvents =
+            WSSourceStatusEventsAfterPersistence(NO, @"microphone", @"active",
+                                                  persistenceError);
+        assert(failedSourceEvents.count == 1);
+        assert([failedSourceEvents.firstObject[@"type"] isEqual:@"fatal_error"]);
+        assert([failedSourceEvents.firstObject[@"message"] containsString:@"disk full"]);
+        NSArray<NSDictionary<NSString *, id> *> *successfulSourceEvents =
+            WSSourceStatusEventsAfterPersistence(YES, @"microphone", @"active", nil);
+        assert(successfulSourceEvents.count == 1);
+        assert([successfulSourceEvents.firstObject[@"type"] isEqual:@"source_status"]);
+
+        NSArray<NSDictionary<NSString *, id> *> *failedStopEvents =
+            WSStopTerminalEventsAfterPersistence(NO, @"/sessions/a", @"/sessions/a/system.caf",
+                                                  nil, persistenceError);
+        assert(failedStopEvents.count == 1);
+        assert([failedStopEvents.firstObject[@"type"] isEqual:@"fatal_error"]);
+        assert([failedStopEvents.firstObject[@"message"] containsString:@"停止会话清单"]);
+        NSArray<NSDictionary<NSString *, id> *> *successfulStopEvents =
+            WSStopTerminalEventsAfterPersistence(YES, @"/sessions/a", @"/sessions/a/system.caf",
+                                                  nil, nil);
+        assert(successfulStopEvents.count == 1);
+        assert([successfulStopEvents.firstObject[@"type"] isEqual:@"stopped"]);
+        assert(successfulStopEvents.firstObject[@"microphoneTrack"] == NSNull.null);
 
         assert(std::strcmp(whosaid_system_audio_permission_state(true, false), "granted") == 0);
         assert(std::strcmp(whosaid_system_audio_permission_state(true, true), "granted") == 0);

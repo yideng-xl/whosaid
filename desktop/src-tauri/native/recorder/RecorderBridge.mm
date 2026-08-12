@@ -35,6 +35,150 @@ bool WSMicFailureIsFatal(WSMicStartResult result) {
 
 namespace {
 
+NSError *recorder_error(NSInteger code, NSString *message) {
+    return [NSError errorWithDomain:@"com.yideng.whosaid.recorder"
+                               code:code
+                           userInfo:@{NSLocalizedDescriptionKey : message}];
+}
+
+AVAudioPCMBuffer *convert_microphone_buffer(AVAudioPCMBuffer *buffer,
+                                            AVAudioConverter *converter,
+                                            NSError **error) {
+    if (buffer == nil || buffer.frameLength == 0 || converter == nil ||
+        buffer.format.sampleRate <= 0 || buffer.format.channelCount == 0) {
+        if (error != nullptr) {
+            *error = recorder_error(12, @"麦克风音频格式无效");
+        }
+        return nil;
+    }
+
+    AVAudioFormat *targetFormat = converter.outputFormat;
+    const double ratio = targetFormat.sampleRate / buffer.format.sampleRate;
+    const double capacityValue = std::ceil(buffer.frameLength * ratio);
+    if (!std::isfinite(capacityValue) || capacityValue <= 0 ||
+        capacityValue > std::numeric_limits<AVAudioFrameCount>::max()) {
+        if (error != nullptr) {
+            *error = recorder_error(14, @"麦克风缓冲区帧数超限");
+        }
+        return nil;
+    }
+
+    AVAudioPCMBuffer *converted = [[AVAudioPCMBuffer alloc]
+        initWithPCMFormat:targetFormat
+            frameCapacity:static_cast<AVAudioFrameCount>(capacityValue)];
+    if (converted == nil) {
+        if (error != nullptr) {
+            *error = recorder_error(15, @"无法创建麦克风转换缓冲区");
+        }
+        return nil;
+    }
+
+    __block BOOL suppliedInput = NO;
+    AVAudioConverterOutputStatus status = [converter
+        convertToBuffer:converted
+                   error:error
+      withInputFromBlock:^AVAudioBuffer *(AVAudioPacketCount requestedPackets,
+                                          AVAudioConverterInputStatus *inputStatus) {
+          (void)requestedPackets;
+          if (suppliedInput) {
+              *inputStatus = AVAudioConverterInputStatus_NoDataNow;
+              return nil;
+          }
+          suppliedInput = YES;
+          *inputStatus = AVAudioConverterInputStatus_HaveData;
+          return buffer;
+      }];
+    if (status == AVAudioConverterOutputStatus_Error || converted.frameLength == 0) {
+        if (error != nullptr && *error == nil) {
+            *error = recorder_error(15, @"无法转换麦克风缓冲区");
+        }
+        return nil;
+    }
+    return converted;
+}
+
+NSDictionary<NSString *, id> *persistence_failure_event(NSString *context,
+                                                         NSError *error) {
+    NSString *detail = error.localizedDescription.length > 0
+                           ? error.localizedDescription
+                           : @"未知错误";
+    return @{
+        @"type" : @"fatal_error",
+        @"message" : [NSString stringWithFormat:@"无法持久化“%@”：%@", context, detail],
+    };
+}
+
+} // namespace
+
+AVAudioPCMBuffer *WSConvertMicrophoneBuffer(AVAudioPCMBuffer *buffer, NSError **error) {
+    if (buffer == nil || buffer.format.sampleRate <= 0 ||
+        buffer.format.channelCount == 0) {
+        if (error != nullptr) {
+            *error = recorder_error(12, @"麦克风音频格式无效");
+        }
+        return nil;
+    }
+    AVAudioFormat *targetFormat = [[AVAudioFormat alloc]
+        initStandardFormatWithSampleRate:48'000 channels:1];
+    AVAudioConverter *converter = [[AVAudioConverter alloc]
+        initFromFormat:buffer.format
+              toFormat:targetFormat];
+    converter.primeMethod = AVAudioConverterPrimeMethod_None;
+    return convert_microphone_buffer(buffer, converter, error);
+}
+
+NSDictionary<NSString *, id> *WSSessionManifest(NSString *sessionID,
+                                                 NSNumber *startedAt,
+                                                 BOOL microphoneHasFrames,
+                                                 NSString *systemStatus,
+                                                 NSString *microphoneStatus) {
+    return @{
+        @"schemaVersion" : @1,
+        @"sessionId" : sessionID,
+        @"startedAt" : startedAt,
+        @"systemTrack" : @"system.caf",
+        @"microphoneTrack" : microphoneHasFrames ? @"microphone.caf" : NSNull.null,
+        @"systemStatus" : systemStatus,
+        @"microphoneStatus" : microphoneStatus,
+        @"complete" : @NO,
+    };
+}
+
+NSArray<NSDictionary<NSString *, id> *> *WSSourceStatusEventsAfterPersistence(
+    BOOL persisted,
+    NSString *source,
+    NSString *status,
+    NSError *error) {
+    if (!persisted) {
+        NSString *context = [NSString stringWithFormat:@"%@ %@ 状态", source, status];
+        return @[ persistence_failure_event(context, error) ];
+    }
+    return @[ @{
+        @"type" : @"source_status",
+        @"source" : source,
+        @"status" : status,
+    } ];
+}
+
+NSArray<NSDictionary<NSString *, id> *> *WSStopTerminalEventsAfterPersistence(
+    BOOL persisted,
+    NSString *sessionDirectory,
+    NSString *systemTrack,
+    NSString *microphoneTrack,
+    NSError *error) {
+    if (!persisted) {
+        return @[ persistence_failure_event(@"停止会话清单", error) ];
+    }
+    return @[ @{
+        @"type" : @"stopped",
+        @"sessionDir" : sessionDirectory,
+        @"systemTrack" : systemTrack,
+        @"microphoneTrack" : microphoneTrack != nil ? microphoneTrack : NSNull.null,
+    } ];
+}
+
+namespace {
+
 NSString *const system_audio_permission_requested_key =
     @"com.yideng.whosaid.recorder.systemAudioPermissionRequested";
 
@@ -132,7 +276,6 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 @property(nonatomic, assign) BOOL starting;
 @property(nonatomic, assign) BOOL recording;
 @property(nonatomic, assign) BOOL finished;
-@property(nonatomic, assign) BOOL complete;
 @property(nonatomic, assign) BOOL microphoneTapInstalled;
 @property(atomic, assign) BOOL microphoneHasFrames;
 @property(atomic, assign) BOOL stopping;
@@ -210,18 +353,17 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
         return NO;
     }
 
-    NSDictionary<NSString *, id> *manifest = @{
-        @"schemaVersion" : @1,
-        @"sessionId" : self.sessionID,
-        @"startedAt" : self.startedAt,
-        @"systemTrack" : @"system.caf",
-        @"microphoneTrack" : self.microphoneHasFrames ? @"microphone.caf" : NSNull.null,
-        @"systemStatus" : self.systemStatus,
-        @"microphoneStatus" : self.microphoneStatus,
-        @"complete" : @(self.complete),
-    };
+    NSDictionary<NSString *, id> *manifest = WSSessionManifest(
+        self.sessionID, self.startedAt, self.microphoneHasFrames, self.systemStatus,
+        self.microphoneStatus);
     NSData *data = [NSJSONSerialization dataWithJSONObject:manifest options:0 error:error];
     return data != nil && [data writeToURL:manifestURL options:NSDataWritingAtomic error:error];
+}
+
+- (void)emitEvents:(NSArray<NSDictionary<NSString *, id> *> *)events {
+    for (NSDictionary<NSString *, id> *event in events) {
+        [self emit:event];
+    }
 }
 
 - (void)emitMicrophoneResult:(WSMicStartResult)result {
@@ -230,12 +372,9 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     }
     self.microphoneStatus = microphone_status(result);
     NSError *manifestError = nil;
-    [self writeSessionManifest:&manifestError];
-    [self emit:@{
-        @"type" : @"source_status",
-        @"source" : @"microphone",
-        @"status" : self.microphoneStatus,
-    }];
+    const BOOL persisted = [self writeSessionManifest:&manifestError];
+    [self emitEvents:WSSourceStatusEventsAfterPersistence(
+                         persisted, @"microphone", self.microphoneStatus, manifestError)];
 }
 
 - (void)closeMicrophoneWriter {
@@ -306,6 +445,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                 self.microphoneConverter = [[AVAudioConverter alloc]
                     initFromFormat:sourceFormat
                           toFormat:targetFormat];
+                self.microphoneConverter.primeMethod = AVAudioConverterPrimeMethod_None;
             }
             if (self.microphoneConverter == nil) {
                 failure = [NSError errorWithDomain:@"com.yideng.whosaid.recorder"
@@ -316,28 +456,8 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 
         AVAudioPCMBuffer *converted = nil;
         if (failure == nil) {
-            const double ratio = 48'000.0 / sourceFormat.sampleRate;
-            const double capacityValue = std::ceil(buffer.frameLength * ratio) + 1.0;
-            if (!std::isfinite(capacityValue) || capacityValue <= 0 ||
-                capacityValue > std::numeric_limits<AVAudioFrameCount>::max()) {
-                failure = [NSError errorWithDomain:@"com.yideng.whosaid.recorder"
-                                               code:14
-                                           userInfo:@{NSLocalizedDescriptionKey : @"麦克风缓冲区帧数超限"}];
-            } else {
-                converted = [[AVAudioPCMBuffer alloc]
-                    initWithPCMFormat:targetFormat
-                        frameCapacity:static_cast<AVAudioFrameCount>(capacityValue)];
-                if (converted == nil ||
-                    ![self.microphoneConverter convertToBuffer:converted
-                                                    fromBuffer:buffer
-                                                         error:&failure]) {
-                    if (failure == nil) {
-                        failure = [NSError errorWithDomain:@"com.yideng.whosaid.recorder"
-                                                       code:15
-                                                   userInfo:@{NSLocalizedDescriptionKey : @"无法转换麦克风缓冲区"}];
-                    }
-                }
-            }
+            converted = convert_microphone_buffer(buffer, self.microphoneConverter,
+                                                  &failure);
         }
 
         if (failure == nil && converted.frameLength > 0) {
@@ -389,7 +509,10 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
         dispatch_async(self.stateQueue, ^{
             if (!self.finished) {
                 NSError *manifestError = nil;
-                [self writeSessionManifest:&manifestError];
+                if (![self writeSessionManifest:&manifestError]) {
+                    [self emit:persistence_failure_event(@"麦克风首帧清单",
+                                                         manifestError)];
+                }
             }
         });
     }
@@ -427,13 +550,6 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
         return;
     }
 
-    NSError *startError = nil;
-    if (![engine startAndReturnError:&startError]) {
-        [self stopMicrophoneCapture];
-        [self emitMicrophoneResult:WSMicStartResultUnavailable];
-        return;
-    }
-
     self.microphoneConfigurationObserver = [[NSNotificationCenter defaultCenter]
         addObserverForName:AVAudioEngineConfigurationChangeNotification
                     object:engine
@@ -446,14 +562,19 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                         });
                     }
                 }];
+
+    NSError *startError = nil;
+    if (![engine startAndReturnError:&startError]) {
+        [self stopMicrophoneCapture];
+        [self emitMicrophoneResult:WSMicStartResultUnavailable];
+        return;
+    }
+
     self.microphoneStatus = @"active";
     NSError *manifestError = nil;
-    [self writeSessionManifest:&manifestError];
-    [self emit:@{
-        @"type" : @"source_status",
-        @"source" : @"microphone",
-        @"status" : @"active",
-    }];
+    const BOOL persisted = [self writeSessionManifest:&manifestError];
+    [self emitEvents:WSSourceStatusEventsAfterPersistence(
+                         persisted, @"microphone", @"active", manifestError)];
 }
 
 - (void)startMicrophone {
@@ -535,11 +656,14 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     [self stopMicrophoneCapture];
     [self closeWriter];
     NSError *manifestError = nil;
-    [self writeSessionManifest:&manifestError];
-    [self emit:@{
-        @"type" : @"fatal_error",
-        @"message" : error.localizedDescription ?: @"系统声音录制中断"
-    }];
+    if (![self writeSessionManifest:&manifestError]) {
+        [self emit:persistence_failure_event(@"系统声音中断清单", manifestError)];
+    } else {
+        [self emit:@{
+            @"type" : @"fatal_error",
+            @"message" : error.localizedDescription ?: @"系统声音录制中断"
+        }];
+    }
     SCStream *stream = self.stream;
     if (stream != nil) {
         [stream stopCaptureWithCompletionHandler:^(__unused NSError *stopError) {
@@ -679,7 +803,8 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                     self.systemStatus = @"active";
                     NSError *manifestError = nil;
                     if (![self writeSessionManifest:&manifestError]) {
-                        [self failDuringRecording:manifestError];
+                        [self emitEvents:WSSourceStatusEventsAfterPersistence(
+                                             NO, @"system", @"active", manifestError)];
                         return;
                     }
                     [self emit:@{
@@ -726,28 +851,16 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     self.systemStatus = @"stopped";
     [self stopMicrophoneCapture];
     [self closeWriter];
-    self.complete = YES;
-
-    NSError *manifestError = nil;
-    if (![self writeSessionManifest:&manifestError]) {
-        [self emit:@{
-            @"type" : @"fatal_error",
-            @"message" : [NSString stringWithFormat:@"无法完成会话清单：%@",
-                                                     manifestError.localizedDescription ?: @"未知错误"],
-        }];
-    }
 
     NSURL *systemTrackURL = [self sessionFileURL:@"system.caf"];
     NSURL *microphoneTrackURL = self.microphoneHasFrames
                                     ? [self sessionFileURL:@"microphone.caf"]
                                     : nil;
-    [self emit:@{
-        @"type" : @"stopped",
-        @"sessionDir" : self.sessionURL.path,
-        @"systemTrack" : systemTrackURL.path,
-        @"microphoneTrack" : microphoneTrackURL != nil ? microphoneTrackURL.path
-                                                        : NSNull.null,
-    }];
+    NSError *manifestError = nil;
+    const BOOL persisted = [self writeSessionManifest:&manifestError];
+    [self emitEvents:WSStopTerminalEventsAfterPersistence(
+                         persisted, self.sessionURL.path, systemTrackURL.path,
+                         microphoneTrackURL.path, manifestError)];
     self.stream = nil;
     clear_active_recorder(self);
 }
