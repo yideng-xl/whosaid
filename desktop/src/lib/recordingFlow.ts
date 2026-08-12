@@ -87,17 +87,35 @@ export function prependRecordingJob(
 export function mergeBackendRecordingSnapshot(
   current: RecordingSnapshot,
   incoming: RecordingSnapshot,
-  context: boolean | { submissionFailureTerminal?: boolean } = false,
+  context: boolean | {
+    submissionFailureTerminal?: boolean;
+    submissionFailureFinalPath?: string | null;
+  } = false,
 ): RecordingSnapshot {
   if (context === true) return current;
-  if (
-    typeof context === "object" &&
-    context.submissionFailureTerminal &&
-    current.phase === "failed" &&
-    Boolean(current.final_path) &&
-    ["ready", "mixing", "stopping", "recording"].includes(incoming.phase)
-  ) {
-    return current;
+  if (typeof context === "object" && context.submissionFailureTerminal) {
+    const protectedFinalPath =
+      context.submissionFailureFinalPath?.trim() ||
+      current.final_path?.trim() ||
+      null;
+    if (protectedFinalPath) {
+      if (["ready", "mixing", "stopping", "recording"].includes(incoming.phase)) {
+        return current;
+      }
+      if (incoming.phase === "failed") {
+        return {
+          ...incoming,
+          final_path: protectedFinalPath,
+          recoverable_paths: [
+            protectedFinalPath,
+            ...incoming.recoverable_paths.filter(
+              (path) => path.trim() && path.trim() !== protectedFinalPath,
+            ),
+          ],
+          error: incoming.error ?? current.error,
+        };
+      }
+    }
   }
   if (
     current.phase === "submitting" &&
@@ -140,7 +158,10 @@ export class RecordingSnapshotCoordinator {
 
   publishBackend(
     snapshot: RecordingSnapshot,
-    context: boolean | { submissionFailureTerminal?: boolean } = false,
+    context: boolean | {
+      submissionFailureTerminal?: boolean;
+      submissionFailureFinalPath?: string | null;
+    } = false,
   ): boolean {
     const merged = mergeBackendRecordingSnapshot(
       this.currentSnapshot,
@@ -328,6 +349,42 @@ export interface PendingRecordingSubmission {
   finalPath: string;
   busy: boolean;
   error: string | null;
+}
+
+export function completeAcceptedRecordingSubmission(
+  snapshot: RecordingSnapshot,
+  submissions: PendingRecordingSubmission[],
+  result: RecordingSubmissionResult,
+  submissionFailureFinalPath: string | null,
+): {
+  snapshot: RecordingSnapshot;
+  pending: PendingRecordingSubmission[];
+  submissionFailureFinalPath: string | null;
+} {
+  const acceptedPath = validateFinalPath(result.audioPath);
+  const protectedFinalPath = submissionFailureFinalPath?.trim() || null;
+  const currentFinalPath = snapshot.final_path?.trim() || null;
+  const settlesCurrentRecording = protectedFinalPath
+    ? protectedFinalPath === acceptedPath
+    : currentFinalPath === acceptedPath;
+
+  return {
+    snapshot: settlesCurrentRecording
+      ? {
+          ...snapshot,
+          phase: "idle",
+          elapsed_seconds: 0,
+          final_path: null,
+          recoverable_paths: [],
+          error: null,
+        }
+      : snapshot,
+    pending: submissions.filter(
+      (pending) => pending.finalPath.trim() !== acceptedPath,
+    ),
+    submissionFailureFinalPath:
+      protectedFinalPath === acceptedPath ? null : protectedFinalPath,
+  };
 }
 
 export function makeRecoverableRecordingItems(

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   beginRecoverableRecording,
+  completeAcceptedRecordingSubmission,
   completeRecoverableRecording,
   createRecordingJob,
   failRecoverableRecording,
@@ -142,6 +143,99 @@ describe("录音结束后的自动提交", () => {
         submissionFailureTerminal: false,
       }),
     ).toBe(starting);
+  });
+
+  it("重提期间持续保护最终文件，成功后稳定清理保护和pending", () => {
+    const finalPath = "/recordings/retry-cycle.m4a";
+    let current: RecordingSnapshot = {
+      ...recordingState(),
+      phase: "failed",
+      final_path: finalPath,
+      recoverable_paths: [finalPath],
+      error: "提交失败",
+    };
+    const pending: PendingRecordingSubmission[] = [{
+      key: `path:${finalPath}`,
+      label: "录音结果",
+      finalPath,
+      busy: true,
+      error: null,
+    }];
+    current = { ...current, phase: "submitting", error: null };
+
+    for (const phase of ["mixing", "recording", "ready"] as const) {
+      const incoming: RecordingSnapshot = {
+        ...recordingState(),
+        phase,
+        final_path: phase === "ready" ? finalPath : null,
+      };
+      const merged = mergeBackendRecordingSnapshot(current, incoming, {
+        submissionFailureTerminal: true,
+        submissionFailureFinalPath: finalPath,
+      });
+      expect(merged).toBe(current);
+      current = merged;
+    }
+
+    // 接纳成功不依赖当前快照是否仍带 final_path；保护路径才是该轮事务依据。
+    const completed = completeAcceptedRecordingSubmission(
+      { ...current, final_path: null },
+      pending,
+      { jobId: "job-retry", audioPath: finalPath },
+      finalPath,
+    );
+    expect(completed.snapshot).toMatchObject({
+      phase: "idle",
+      final_path: null,
+      recoverable_paths: [],
+      error: null,
+    });
+    expect(completed.pending).toEqual([]);
+    expect(completed.submissionFailureFinalPath).toBeNull();
+  });
+
+  it("重提失败后继续保护最终文件，原生fatal只更新错误", () => {
+    const finalPath = "/recordings/retry-failed.m4a";
+    const retained = retainFailedRecordingSubmission(
+      { ...recordingState(), phase: "submitting", final_path: finalPath },
+      [],
+      {
+        key: `path:${finalPath}`,
+        label: "录音结果",
+        finalPath,
+        error: new Error("仍然离线"),
+      },
+    );
+    const lateReady = {
+      ...recordingState(),
+      phase: "ready" as const,
+      final_path: finalPath,
+    };
+    expect(
+      mergeBackendRecordingSnapshot(retained.snapshot, lateReady, {
+        submissionFailureTerminal: true,
+        submissionFailureFinalPath: finalPath,
+      }),
+    ).toBe(retained.snapshot);
+
+    const nativeFatal = {
+      ...recordingState(),
+      phase: "failed" as const,
+      final_path: null,
+      error: "录音设备异常",
+    };
+    expect(
+      mergeBackendRecordingSnapshot(retained.snapshot, nativeFatal, {
+        submissionFailureTerminal: true,
+        submissionFailureFinalPath: finalPath,
+      }),
+    ).toMatchObject({
+      phase: "failed",
+      final_path: finalPath,
+      recoverable_paths: [finalPath],
+      error: "录音设备异常",
+    });
+    expect(retained.pending).toHaveLength(1);
   });
 });
 

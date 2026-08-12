@@ -22,6 +22,7 @@
   } from "$lib/recording";
   import {
     beginRecoverableRecording,
+    completeAcceptedRecordingSubmission,
     completeRecoverableRecording,
     createRecordingJob,
     failRecoverableRecording,
@@ -64,7 +65,7 @@
   let closeRequested = $state(false);
   let closePending = $state(false);
   let ignoreRecordingEvents = false;
-  let submissionFailureTerminal = false;
+  let submissionFailureFinalPath: string | null = null;
   let pageMounted = false;
   let finalizationInFlight: Promise<RecordingSubmissionResult> | null = null;
   const recordingSnapshots = new RecordingSnapshotCoordinator(recordingState());
@@ -136,7 +137,10 @@
       snapshot,
       ignoreRecordingEvents
         ? true
-        : { submissionFailureTerminal },
+        : {
+            submissionFailureTerminal: Boolean(submissionFailureFinalPath),
+            submissionFailureFinalPath,
+          },
     );
     if (!accepted) return;
     recordingSnapshot = recordingSnapshots.snapshot;
@@ -152,25 +156,22 @@
   }
 
   function acceptSubmissionResult(result: RecordingSubmissionResult) {
-    pendingRecordingSubmissions = pendingRecordingSubmissions.filter(
-      (pending) => pending.finalPath !== result.audioPath,
+    const completed = completeAcceptedRecordingSubmission(
+      recordingSnapshot,
+      pendingRecordingSubmissions,
+      result,
+      submissionFailureFinalPath,
     );
+    pendingRecordingSubmissions = completed.pending;
+    submissionFailureFinalPath = completed.submissionFailureFinalPath;
     const job = createRecordingJob(result);
     jobs = prependRecordingJob(jobs, job);
     selectedJobId = job.id;
     view = "transcript";
     subscribe(job);
-    if (recordingSnapshot.final_path?.trim() === result.audioPath) {
+    if (completed.snapshot !== recordingSnapshot) {
       ignoreRecordingEvents = true;
-      submissionFailureTerminal = false;
-      publishRecordingSnapshot({
-        ...recordingSnapshot,
-        phase: "idle",
-        elapsed_seconds: 0,
-        final_path: null,
-        recoverable_paths: [],
-        error: null,
-      });
+      publishRecordingSnapshot(completed.snapshot);
     }
   }
 
@@ -178,15 +179,15 @@
     const finalPath =
       error instanceof RecordingSubmissionError ? error.finalPath : null;
     const existingFinalPath = recordingSnapshot.final_path?.trim() || null;
-    if (finalPath ?? existingFinalPath) submissionFailureTerminal = true;
+    const retainedFinalPath =
+      finalPath ?? submissionFailureFinalPath ?? existingFinalPath;
+    if (retainedFinalPath) submissionFailureFinalPath = retainedFinalPath;
     publishRecordingSnapshot({
       ...recordingSnapshot,
       phase: "failed",
-      final_path: finalPath ?? existingFinalPath,
-      recoverable_paths: finalPath
-        ? [finalPath]
-        : existingFinalPath
-          ? [existingFinalPath]
+      final_path: retainedFinalPath,
+      recoverable_paths: retainedFinalPath
+        ? [retainedFinalPath]
           : recordingSnapshot.recoverable_paths.filter((path) => path.trim()),
       error: messageOf(error),
     });
@@ -278,7 +279,7 @@
   async function startDirectRecording() {
     if (recordingActionPending || recordingActive) return;
     ignoreRecordingEvents = false;
-    submissionFailureTerminal = false;
+    submissionFailureFinalPath = null;
     recordingActionPending = true;
     view = "recording";
     publishRecordingSnapshot({
@@ -449,7 +450,7 @@
           },
         );
         pendingRecordingSubmissions = retained.pending;
-        submissionFailureTerminal = true;
+        submissionFailureFinalPath = retained.snapshot.final_path;
         publishRecordingSnapshot(retained.snapshot);
         view = "recording";
       }
