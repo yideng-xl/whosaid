@@ -30,16 +30,15 @@
     failRecoverableRecording,
     makeRecoverableRecordingItems,
     prependRecordingJob,
+    prepareRecordingPreview,
     RecordingCloseGuard,
     RecordingSnapshotCoordinator,
-    RecordingSubmissionError,
     RecordingSubmissionKeyStore,
     RecordingSubmissionRegistry,
-    retainFailedRecordingSubmission,
     runRecordingCloseFlow,
+    saveRecordingForPreview,
     transitionRecordingSubmissionFailure,
     upsertPendingRecordingSubmission,
-    validateFinalPath,
     type PendingRecordingSubmission,
     type RecoverableRecordingItem,
     type RecordingSubmissionResult,
@@ -80,7 +79,7 @@
   let ignoreRecordingEvents = false;
   let submissionFailureFinalPath: string | null = null;
   let pageMounted = false;
-  let finalizationInFlight: Promise<RecordingSubmissionResult> | null = null;
+  let finalizationInFlight: Promise<PendingRecordingSubmission> | null = null;
   const recordingSnapshots = new RecordingSnapshotCoordinator(recordingState());
   const recordingSubmissions = new RecordingSubmissionRegistry();
   const recordingClose = new RecordingCloseGuard();
@@ -203,12 +202,11 @@
     view = "recording";
   }
 
-  async function performFinalization(): Promise<RecordingSubmissionResult> {
-    if (!api) throw new Error("转写服务尚未就绪");
+  async function performFinalization(): Promise<PendingRecordingSubmission> {
     recordingActionPending = true;
     view = "recording";
     try {
-      const stopped = await (async () => {
+      const pending = await saveRecordingForPreview(async () => {
         if (pageMounted) {
           publishRecordingSnapshot({
             ...recordingSnapshot,
@@ -216,38 +214,23 @@
             error: null,
           });
         }
-        const stopped = await recordingController.stop();
-        if (pageMounted) {
-          const stoppedFinalPath = stopped.final_path.trim() || null;
-          ignoreRecordingEvents = true;
-          publishRecordingSnapshot({
-            ...recordingSnapshot,
-            phase: "submitting",
-            final_path: stoppedFinalPath,
-            recoverable_paths: stoppedFinalPath ? [stoppedFinalPath] : [],
-            error: null,
-          });
-        }
-        return stopped;
-      })();
-      const submission = recordingSubmissionKeys.prepare(
-        stopped.final_path,
-        "录音结果",
-      );
-      const result = await recordingSubmissions.submitAndAccept(
-        stopped.final_path,
-        api,
-        (accepted) => completeRecordingAcceptance(
-          accepted,
-          recordingSubmissionKeys,
-          async (value) => {
-            if (!pageMounted) throw new Error("录音页面已销毁，暂缓接纳任务");
-            acceptSubmissionResult(value);
-          },
-        ),
-        submission.idempotencyKey,
-      );
-      return result;
+        return recordingController.stop();
+      }, recordingSubmissionKeys, "录音结果");
+      if (pageMounted) {
+        ignoreRecordingEvents = true;
+        pendingRecordingSubmissions = upsertPendingRecordingSubmission(
+          pendingRecordingSubmissions,
+          pending,
+        );
+        publishRecordingSnapshot({
+          ...recordingSnapshot,
+          phase: "ready",
+          final_path: pending.finalPath,
+          recoverable_paths: [pending.finalPath],
+          error: null,
+        });
+      }
+      return pending;
     } catch (error) {
       if (pageMounted) showRecordingFailure(error);
       throw error;
@@ -256,7 +239,7 @@
     }
   }
 
-  function finalizeRecordingOnce(): Promise<RecordingSubmissionResult> {
+  function finalizeRecordingOnce(): Promise<PendingRecordingSubmission> {
     if (finalizationInFlight) return finalizationInFlight;
     const task = performFinalization();
     finalizationInFlight = task;
@@ -268,38 +251,6 @@
       })
       .catch(() => undefined);
     return task;
-  }
-
-  async function retryFinalSubmission() {
-    if (!api || recordingActionPending || !recordingSnapshot.final_path) return;
-    const finalPath = recordingSnapshot.final_path;
-    const submission = recordingSubmissionKeys.prepare(finalPath, "录音结果");
-    recordingActionPending = true;
-    publishRecordingSnapshot({
-      ...recordingSnapshot,
-      phase: "submitting",
-      error: null,
-    });
-    try {
-      await recordingSubmissions.submitAndAccept(
-        finalPath,
-        api,
-        (accepted) => completeRecordingAcceptance(
-          accepted,
-          recordingSubmissionKeys,
-          async (value) => {
-            if (!pageMounted) throw new Error("录音页面已销毁，暂缓接纳任务");
-            acceptSubmissionResult(value);
-          },
-        ),
-        submission.idempotencyKey,
-      );
-    } catch (error) {
-      if (pageMounted) showRecordingFailure(error);
-      throw error;
-    } finally {
-      if (pageMounted) recordingActionPending = false;
-    }
   }
 
   async function startDirectRecording() {
@@ -356,73 +307,38 @@
   }
 
   async function recoverRecording(recording: RecoverableRecordingItem) {
-    if (!api || recording.busy || recordingActive) return;
+    if (recording.busy || recordingActive) return;
     recoverableRecordings = beginRecoverableRecording(
       recoverableRecordings,
       recording.sessionId,
     );
-    const pendingKey = `recover:${recording.sessionId}`;
     const label = `${recoverableStartedAt(recording)} 的录音`;
     try {
       const mixed = await retryRecordingMix(recording.sessionId);
       if (!pageMounted) return;
-      const finalPath = validateFinalPath(mixed.final_path);
-      const submission = recordingSubmissionKeys.prepare(finalPath, label);
-      // 混音已经成功并清理了 .incomplete；即使后续提交失败，也不能再展示一个
-      // 已不存在的恢复会话；每段最终文件进入独立待提交队列，不能覆盖别段结果。
+      const pending = prepareRecordingPreview(
+        mixed.final_path,
+        recordingSubmissionKeys,
+        label,
+      );
+      const finalPath = pending.finalPath;
+      // 混音成功后只进入试听待确认；每段最终文件独立保存，不能覆盖别段结果。
       recoverableRecordings = completeRecoverableRecording(
         recoverableRecordings,
         recording.sessionId,
       );
       pendingRecordingSubmissions = upsertPendingRecordingSubmission(
         pendingRecordingSubmissions,
-        {
-          key: pendingKey,
-          label,
-          finalPath,
-          idempotencyKey: submission.idempotencyKey,
-          busy: true,
-          error: null,
-        },
+        pending,
       );
-      await recordingSubmissions.submitAndAccept(
-        finalPath,
-        api,
-        (accepted) => completeRecordingAcceptance(
-          accepted,
-          recordingSubmissionKeys,
-          async (value) => {
-            if (!pageMounted) throw new Error("录音页面已销毁，暂缓接纳任务");
-            acceptSubmissionResult(value);
-          },
-        ),
-        submission.idempotencyKey,
-      );
-      if (!pageMounted) return;
+      view = "recording";
     } catch (error) {
       if (!pageMounted) return;
-      if (error instanceof RecordingSubmissionError) {
-        pendingRecordingSubmissions = upsertPendingRecordingSubmission(
-          pendingRecordingSubmissions,
-          {
-            key: pendingKey,
-            label,
-            finalPath: error.finalPath,
-            idempotencyKey: recordingSubmissionKeys.prepare(
-              error.finalPath,
-              label,
-            ).idempotencyKey,
-            busy: false,
-            error: messageOf(error),
-          },
-        );
-      } else {
-        recoverableRecordings = failRecoverableRecording(
-          recoverableRecordings,
-          recording.sessionId,
-          `恢复失败：${messageOf(error)}`,
-        );
-      }
+      recoverableRecordings = failRecoverableRecording(
+        recoverableRecordings,
+        recording.sessionId,
+        `恢复失败：${messageOf(error)}`,
+      );
       throw error;
     }
   }
@@ -463,7 +379,12 @@
       if (pageMounted) {
         pendingRecordingSubmissions = upsertPendingRecordingSubmission(
           pendingRecordingSubmissions,
-          { ...pending, busy: false, error: messageOf(error) },
+          {
+            ...pending,
+            idempotencyKey: submission.idempotencyKey,
+            busy: false,
+            error: messageOf(error),
+          },
         );
       }
       throw error;
@@ -479,49 +400,17 @@
     }
   }
 
-  async function submitFinalPathForClose(finalPath: string) {
-    if (!api) throw new Error("转写服务尚未就绪");
-    const submission = recordingSubmissionKeys.prepare(finalPath, "录音结果");
-    publishRecordingSnapshot({
-      ...recordingSnapshot,
-      phase: "submitting",
-      final_path: finalPath,
-      recoverable_paths: [finalPath],
-      error: null,
-    });
-    try {
-      await recordingSubmissions.submitAndAccept(
-        finalPath,
-        api,
-        (accepted) => completeRecordingAcceptance(
-          accepted,
-          recordingSubmissionKeys,
-          async (value) => {
-            if (!pageMounted) throw new Error("录音页面已销毁，暂缓接纳任务");
-            acceptSubmissionResult(value);
-          },
-        ),
-        submission.idempotencyKey,
+  async function persistFinalPathForClose(finalPath: string) {
+    const pending = prepareRecordingPreview(
+      finalPath,
+      recordingSubmissionKeys,
+      "录音结果",
+    );
+    if (pageMounted) {
+      pendingRecordingSubmissions = upsertPendingRecordingSubmission(
+        pendingRecordingSubmissions,
+        pending,
       );
-    } catch (error) {
-      if (pageMounted) {
-        const retained = retainFailedRecordingSubmission(
-          recordingSnapshot,
-          pendingRecordingSubmissions,
-          {
-            key: `final:${finalPath}`,
-            label: "录音结果",
-            finalPath,
-            idempotencyKey: submission.idempotencyKey,
-            error,
-          },
-        );
-        pendingRecordingSubmissions = retained.pending;
-        submissionFailureFinalPath = retained.snapshot.final_path;
-        publishRecordingSnapshot(retained.snapshot);
-        view = "recording";
-      }
-      throw error;
     }
   }
 
@@ -531,8 +420,8 @@
       let awaitedRevision = recordingSnapshots.revision;
       try {
         await runRecordingCloseFlow(recordingSnapshot, {
-          stopAndSubmit: async () => { await finalizeRecordingOnce(); },
-          submitFinalPath: submitFinalPathForClose,
+          stopAndSave: async () => { await finalizeRecordingOnce(); },
+          persistFinalPath: persistFinalPathForClose,
           waitForSnapshot: async () => {
             if (
               recordingSnapshot.phase === "submitting" &&
@@ -560,7 +449,7 @@
           close: closeAfterRecording,
         });
       } catch (error) {
-        // 保存、混音、提交、监听或等待任何一步失败都留在当前窗口。
+        // 保存、混音、持久化、监听或等待任何一步失败都留在当前窗口。
         if (pageMounted) {
           errorBanner = messageOf(error);
           closeRequested = false;
@@ -610,6 +499,7 @@
     void initializeDirectRecording(() => {
       if (cancelled) return;
       recordingAvailable = true;
+      if (pendingRecordingSubmissions.length > 0) view = "recording";
       disposeRecordingState = manageAsyncListener(
         recordingController.watch((snapshot) => {
           if (!cancelled) onRecordingSnapshot(snapshot);
@@ -844,27 +734,14 @@
         </div>
       {/each}
 
-      {#each recordingAvailable ? pendingRecordingSubmissions : [] as pending (pending.key)}
-        <div class="recovery-notice pending-submission" role="status">
-          <span>
-            {pending.label}已保存到 {pending.finalPath}，等待提交转写。
-            {#if pending.error}<small>{pending.error}</small>{/if}
-          </span>
-          <button
-            disabled={pending.busy}
-            aria-busy={pending.busy}
-            onclick={() => void retryPendingRecordingSubmission(pending).catch(() => undefined)}
-          >{pending.busy ? "正在提交…" : "重新提交转写"}</button>
-        </div>
-      {/each}
-
       {#if recordingAvailable && view === "recording"}
         <RecordingPanel
           snapshot={recordingSnapshot}
           onStop={async () => { await finalizeRecordingOnce(); }}
           {systemPermissionDenied}
           onOpenSystemSettings={openSystemRecordingSettings}
-          onRetrySubmit={recordingSnapshot.final_path ? retryFinalSubmission : undefined}
+          pendingRecordings={pendingRecordingSubmissions}
+          onConfirmTranscription={retryPendingRecordingSubmission}
         />
       {:else if view === "models" && api}
         <ModelManager {api} onClose={() => (view = "transcript")} />
@@ -934,11 +811,11 @@
           <div class="modal-title" id="recording-close-title">录音仍在进行</div>
           <p class="modal-body">
             {#if ["starting", "recording"].includes(recordingSnapshot.phase)}
-              关闭前需要先停止并保存录音。保存并提交成功后，whosaid 会自动关闭。
+              关闭前需要先停止并保存录音。保存成功后，whosaid 会自动关闭；下次启动可试听并确认转写。
             {:else if recordingSnapshot.phase === "requesting_permissions"}
               正在等待录音权限结果，完成后会继续保存并安全关闭。
             {:else}
-              录音正在保存或合成，完成并提交成功后会自动关闭。
+              录音正在保存或合成，保存成功后会自动关闭，不会自动开始转写。
             {/if}
           </p>
           <div class="modal-actions">
@@ -1058,15 +935,6 @@
     margin-top: 3px;
     color: var(--danger);
   }
-  .pending-submission {
-    border-color: color-mix(in srgb, var(--accent) 35%, var(--hairline));
-    background: color-mix(in srgb, var(--accent) 8%, var(--card));
-  }
-  .pending-submission button {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
   .boot {
     height: 100vh;
     display: flex;

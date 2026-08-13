@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
-  import type { RecordingSnapshot } from "./recording";
+  import { recordingAudioSrc, type RecordingSnapshot } from "./recording";
+  import type { PendingRecordingSubmission } from "./recordingFlow";
   import {
     formatElapsed,
     labelForPhase,
@@ -14,18 +15,24 @@
     onStop,
     systemPermissionDenied = false,
     onOpenSystemSettings = () => {},
-    onRetrySubmit,
+    pendingRecordings = [],
+    onConfirmTranscription = () => {},
+    toAudioSrc = recordingAudioSrc,
   }: {
     snapshot: RecordingSnapshot;
     onStop: () => void | Promise<void>;
     systemPermissionDenied?: boolean;
     onOpenSystemSettings?: () => void | Promise<void>;
-    onRetrySubmit?: () => void | Promise<void>;
+    pendingRecordings?: PendingRecordingSubmission[];
+    onConfirmTranscription?: (
+      recording: PendingRecordingSubmission,
+    ) => void | Promise<void>;
+    toAudioSrc?: (path: string) => string;
   } = $props();
 
   let stopPending = $state(false);
-  let retryPending = $state(false);
   let settingsPending = $state(false);
+  let confirmingPaths = $state<Set<string>>(new Set());
   const ui = $derived(reduceRecordingState(recordingState(), snapshot));
   const canStop = $derived(ui.phase === "recording");
 
@@ -40,16 +47,6 @@
     }
   }
 
-  async function retrySubmitOnce() {
-    if (retryPending || !onRetrySubmit) return;
-    retryPending = true;
-    try {
-      await onRetrySubmit();
-    } catch {
-      retryPending = false;
-    }
-  }
-
   async function openSettingsOnce() {
     if (settingsPending) return;
     settingsPending = true;
@@ -59,6 +56,24 @@
       // 上层负责展示具体错误；组件只保证按钮可再次操作。
     } finally {
       settingsPending = false;
+    }
+  }
+
+  function fileName(path: string): string {
+    const parts = path.split(/[\\/]/);
+    return parts.at(-1) || path;
+  }
+
+  async function confirmOnce(recording: PendingRecordingSubmission) {
+    const path = recording.finalPath.trim();
+    if (!path || recording.busy || confirmingPaths.has(path)) return;
+    confirmingPaths = new Set(confirmingPaths).add(path);
+    try {
+      await onConfirmTranscription(recording);
+    } catch {
+      const next = new Set(confirmingPaths);
+      next.delete(path);
+      confirmingPaths = next;
     }
   }
 </script>
@@ -139,20 +154,42 @@
         onclick={stopOnce}
       >
         <Icon name="stop" size={16} />
-        <span>{stopPending ? "正在停止…" : "停止并开始转写"}</span>
+        <span>{stopPending ? "正在停止…" : "停止并保存"}</span>
       </button>
     {:else if ["stopping", "mixing", "submitting"].includes(ui.phase)}
       <div class="working" aria-live="polite">
         <span class="spinner" aria-hidden="true"></span>
         {labelForPhase(ui.phase)}
       </div>
-    {:else if ui.final_path && onRetrySubmit}
-      <button
-        class="retry"
-        disabled={retryPending}
-        aria-busy={retryPending}
-        onclick={retrySubmitOnce}
-      >{retryPending ? "正在重新提交…" : "重新提交转写"}</button>
+    {/if}
+
+    {#if pendingRecordings.some((recording) => recording.finalPath.trim())}
+      <div class="previews" aria-label="待确认录音">
+        <h2>试听录音</h2>
+        <p class="preview-hint">确认声音没有问题后，再开始分人和转写。</p>
+        {#each pendingRecordings.filter((recording) => recording.finalPath.trim()) as recording (recording.finalPath)}
+          <article class="preview-item">
+            <strong>{recording.label || fileName(recording.finalPath)}</strong>
+            <span class="preview-name">{fileName(recording.finalPath)}</span>
+            <span class="preview-path">{recording.finalPath}</span>
+            <audio
+              controls
+              preload="metadata"
+              src={toAudioSrc(recording.finalPath)}
+              aria-label={`试听${recording.label || fileName(recording.finalPath)}`}
+            ></audio>
+            {#if recording.error}
+              <small class="preview-error" role="alert">{recording.error}</small>
+            {/if}
+            <button
+              class="confirm"
+              disabled={recording.busy || confirmingPaths.has(recording.finalPath.trim())}
+              aria-busy={recording.busy || confirmingPaths.has(recording.finalPath.trim())}
+              onclick={() => confirmOnce(recording)}
+            >{recording.busy || confirmingPaths.has(recording.finalPath.trim()) ? "正在提交…" : "确认无误，开始转写"}</button>
+          </article>
+        {/each}
+      </div>
     {/if}
   </div>
 </section>
@@ -176,6 +213,41 @@
     border-radius: var(--radius-modal);
     background: var(--card);
   }
+  .previews {
+    margin-top: var(--space-5);
+    display: grid;
+    gap: var(--space-3);
+  }
+  .previews h2 { margin: 0; font-size: 16px; }
+  .preview-hint { margin: calc(var(--space-2) * -1) 0 0; color: var(--muted); }
+  .preview-item {
+    display: grid;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-card);
+    background: color-mix(in srgb, var(--accent) 4%, var(--card));
+  }
+  .preview-name { font-size: 13px; }
+  .preview-path {
+    color: var(--muted);
+    overflow-wrap: anywhere;
+    font-family: ui-monospace, "SFMono-Regular", monospace;
+    font-size: 11px;
+  }
+  .preview-item audio { width: 100%; }
+  .preview-error { color: var(--danger); }
+  .confirm {
+    min-height: 38px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-btn);
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .confirm:disabled { cursor: default; opacity: 0.6; }
   .heading {
     display: flex;
     align-items: center;
@@ -275,8 +347,7 @@
     color: var(--muted);
     line-height: 1.5;
   }
-  .permission button,
-  .retry {
+  .permission button {
     min-height: 34px;
     padding: 6px 14px;
     border: 1px solid var(--accent);
@@ -287,8 +358,7 @@
     font-weight: 600;
     cursor: pointer;
   }
-  .permission button:disabled,
-  .retry:disabled { cursor: default; opacity: 0.6; }
+  .permission button:disabled { cursor: default; opacity: 0.6; }
   .failure {
     margin-top: var(--space-3);
     padding: var(--space-3);
@@ -306,7 +376,6 @@
     font-size: 11px;
   }
   .stop,
-  .retry,
   .working {
     width: 100%;
     min-height: 42px;
@@ -331,9 +400,6 @@
   }
   .stop:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .stop:disabled { cursor: default; opacity: 0.6; }
-  .retry:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 86%, black);
-  }
   .working {
     color: var(--muted);
     background: color-mix(in srgb, var(--muted) 8%, transparent);

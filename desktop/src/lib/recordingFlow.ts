@@ -70,6 +70,32 @@ export async function finalizeAndSubmit(
   return submitFinalizedRecording(finalPath, api);
 }
 
+/** 停止并持久化为待确认录音；这里绝不接触转写 API。 */
+export async function saveRecordingForPreview(
+  stop: () => Promise<{ final_path: string }>,
+  keyStore: RecordingSubmissionKeyStore,
+  label: string,
+): Promise<PendingRecordingSubmission> {
+  const { final_path: rawFinalPath } = await stop();
+  return prepareRecordingPreview(rawFinalPath, keyStore, label);
+}
+
+/** 停止结果和恢复混音结果共用同一待确认持久化边界。 */
+export function prepareRecordingPreview(
+  rawFinalPath: string,
+  keyStore: RecordingSubmissionKeyStore,
+  label: string,
+): PendingRecordingSubmission {
+  const finalPath = validateFinalPath(rawFinalPath);
+  const submission = keyStore.prepare(finalPath, label);
+  return {
+    ...submission,
+    key: `path:${finalPath}`,
+    busy: false,
+    error: null,
+  };
+}
+
 export function createRecordingJob(
   result: RecordingSubmissionResult,
   createdAt = Date.now() / 1000,
@@ -697,8 +723,8 @@ export function retainFailedRecordingSubmission(
 }
 
 export interface RecordingCloseDependencies {
-  stopAndSubmit(): Promise<void>;
-  submitFinalPath(path: string): Promise<void>;
+  stopAndSave(): Promise<void>;
+  persistFinalPath(path: string): Promise<void>;
   waitForSnapshot(): Promise<RecordingSnapshot>;
   close(): Promise<void>;
 }
@@ -721,7 +747,7 @@ export async function runRecordingCloseFlow(
     switch (snapshot.phase) {
       case "starting":
       case "recording":
-        await dependencies.stopAndSubmit();
+        await dependencies.stopAndSave();
         await dependencies.close();
         return;
       case "requesting_permissions":
@@ -736,7 +762,7 @@ export async function runRecordingCloseFlow(
           if (!finalPath) {
             throw new RecordingFlowError("录音已保存，但最终录音路径为空");
           }
-          await dependencies.submitFinalPath(finalPath);
+          await dependencies.persistFinalPath(finalPath);
         }
         await dependencies.close();
         return;

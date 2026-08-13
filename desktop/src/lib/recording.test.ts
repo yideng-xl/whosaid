@@ -2,10 +2,20 @@ import { describe, expect, it, vi } from "vitest";
 import {
   initializeDirectRecording,
   manageAsyncListener,
+  recordingAudioSrc,
 } from "./recording";
 import pageSource from "../routes/+page.svelte?raw";
 
 describe("直接录音平台门禁", () => {
+  it("播放器通过受控转换器生成本地资源地址，空路径不转换", () => {
+    const convert = vi.fn((path: string) => `asset://${path}`);
+    expect(recordingAudioSrc(" /recordings/a.m4a ", convert)).toBe(
+      "asset:///recordings/a.m4a",
+    );
+    expect(recordingAudioSrc("   ", convert)).toBe("");
+    expect(convert).toHaveBeenCalledOnce();
+  });
+
   it("不支持的平台不会执行任何录音初始化", async () => {
     const initialize = vi.fn();
 

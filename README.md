@@ -22,7 +22,7 @@
 - 👤 **人名统一**：规则推荐可能的人名，人工确认后一次统一正文和说话人显示名
 - 🇨🇳 **中文优先**：针对中文会议场景（转写默认 Belle 中文微调模型）
 - 🔧 **模型可换**：转写模型（whisper 各尺寸 / Belle 中文微调）与说话人分离引擎可下载/切换
-- 🎤 **直接录音**：在 macOS 13+ Apple Silicon 上录制全系统声音，可同时录入麦克风；停止后自动创建分人转写任务
+- 🎤 **直接录音**：在 macOS 13+ Apple Silicon 上录制全系统声音，可同时录入麦克风；停止后先试听，确认无误再开始分人转写
 
 底层：macOS 使用 [mlx-whisper](https://github.com/ml-explore/mlx-examples)，
 Windows 使用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)，
@@ -37,7 +37,7 @@ Windows 使用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)，
 | **二期尾 · Apple Silicon 打包** | 自包含 Python 运行时与 ffmpeg；模型首次运行下载 | ✅ v0.1.0 已发布 |
 | **三期 · Windows 版本** | faster-whisper CPU 后端 + 自包含运行时 + NSIS 安装包 | 🧪 首个候选包已生成，待实机转写验收 |
 | **后续 · 人名统一替换** | 候选词提取、人工确认、一键统一替换正文和说话人显示名 | ✅ 首版完成 |
-| 后续 · 直接录音 | macOS app 内直接录全系统声音和可选麦克风，停止后自动分人转写 | 🧪 自动验证与打包验收中 |
+| 后续 · 直接录音 | macOS app 内直接录全系统声音和可选麦克风，试听确认后手动开始分人转写 | 🧪 自动验证与打包验收中 |
 
 > Windows 首版支持 Windows 10/11 x64，默认使用 CPU；NVIDIA CUDA 加速放在后续阶段。
 
@@ -56,8 +56,9 @@ Windows 使用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)，
 授权后系统可能要求退出并重新打开 whosaid，按页面提示操作即可。whosaid 通过系统录音
 接口采集声音，**不录制或保存屏幕画面**。
 
-点击停止后，应用会先保存并合成 `.m4a`，再自动创建分人和转写任务。若保存或合成中断，
-下次启动时页面会提示恢复未完成录音；若音频已经保存但提交转写失败，可在页面重新提交。
+点击停止后，应用会先保存并合成 `.m4a`，并展示播放器、文件名和保存路径。试听确认无误后，
+点击“确认无误，开始转写”才会创建分人和转写任务。若保存或合成中断，下次启动时页面会
+提示恢复未完成录音；已经保存但尚未确认或提交失败的录音，也会恢复到试听确认列表。
 临时音轨保存在
 `~/Library/Application Support/whosaid/recordings/.incomplete/`，不要在恢复完成前手动删除；
 最终录音保存在其上一级 `recordings/` 目录。

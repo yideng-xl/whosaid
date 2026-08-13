@@ -10,6 +10,7 @@ import {
   makeRecoverableRecordingItems,
   mergeBackendRecordingSnapshot,
   prependRecordingJob,
+  prepareRecordingPreview,
   removePendingRecordingSubmission,
   RecordingCloseGuard,
   RecordingSnapshotCoordinator,
@@ -18,6 +19,7 @@ import {
   RecordingSubmissionRegistry,
   retainFailedRecordingSubmission,
   runRecordingCloseFlow,
+  saveRecordingForPreview,
   submitFinalizedRecording,
   transitionRecordingSubmissionFailure,
   upsertPendingRecordingSubmission,
@@ -26,13 +28,62 @@ import {
 import type { RecordingSnapshot } from "./recording";
 import { recordingState } from "./recordingState";
 
-describe("录音结束后的自动提交", () => {
+describe("录音结束后的试听确认", () => {
   class MemoryStorage {
     private values = new Map<string, string>();
     getItem(key: string) { return this.values.get(key) ?? null; }
     setItem(key: string, value: string) { this.values.set(key, value); }
     removeItem(key: string) { this.values.delete(key); }
   }
+
+  it("停止后只持久化待确认录音，不调用转写接口", async () => {
+    const storage = new MemoryStorage();
+    const keyStore = new RecordingSubmissionKeyStore(
+      storage,
+      () => "recording:preview",
+    );
+    const api = { submitJob: vi.fn() };
+
+    const pending = await saveRecordingForPreview(
+      async () => ({ final_path: " /recordings/preview.m4a " }),
+      keyStore,
+      "录音结果",
+    );
+
+    expect(api.submitJob).not.toHaveBeenCalled();
+    expect(pending).toMatchObject({
+      finalPath: "/recordings/preview.m4a",
+      idempotencyKey: "recording:preview",
+      busy: false,
+      error: null,
+    });
+    expect(new RecordingSubmissionKeyStore(storage).list()).toEqual([
+      expect.objectContaining({
+        finalPath: "/recordings/preview.m4a",
+        idempotencyKey: "recording:preview",
+      }),
+    ]);
+  });
+
+  it("恢复混音成功也只生成待确认录音，不调用转写接口", () => {
+    const storage = new MemoryStorage();
+    const keyStore = new RecordingSubmissionKeyStore(
+      storage,
+      () => "recording:recovered",
+    );
+    const api = { submitJob: vi.fn() };
+    expect(
+      prepareRecordingPreview(
+        "/recordings/recovered.m4a",
+        keyStore,
+        "10:30 的录音",
+      ),
+    ).toMatchObject({
+      finalPath: "/recordings/recovered.m4a",
+      idempotencyKey: "recording:recovered",
+    });
+    expect(api.submitJob).not.toHaveBeenCalled();
+  });
 
   it("提交最终文件并返回新任务", async () => {
     const api = { submitJob: vi.fn().mockResolvedValue("job-recorded") };
@@ -556,29 +607,29 @@ describe("多段恢复录音", () => {
 });
 
 describe("录音关闭流程", () => {
-  it("录音中只停止一次并在提交成功后关闭", async () => {
+  it("录音中只停止保存，不提交，保存成功后关闭", async () => {
     const order: string[] = [];
     await runRecordingCloseFlow(
       { ...recordingState(), phase: "recording" },
       {
-        stopAndSubmit: vi.fn(async () => { order.push("stop-submit"); }),
-        submitFinalPath: vi.fn(),
+        stopAndSave: vi.fn(async () => { order.push("stop-save"); }),
+        persistFinalPath: vi.fn(),
         waitForSnapshot: vi.fn(),
         close: vi.fn(async () => { order.push("close"); }),
       },
     );
-    expect(order).toEqual(["stop-submit", "close"]);
+    expect(order).toEqual(["stop-save", "close"]);
   });
 
   it("保存或混音中等待现有流程，不重复停止", async () => {
-    const stopAndSubmit = vi.fn();
-    const submitFinalPath = vi.fn().mockResolvedValue(undefined);
+    const stopAndSave = vi.fn();
+    const persistFinalPath = vi.fn().mockResolvedValue(undefined);
     const close = vi.fn().mockResolvedValue(undefined);
     await runRecordingCloseFlow(
       { ...recordingState(), phase: "mixing" },
       {
-        stopAndSubmit,
-        submitFinalPath,
+        stopAndSave,
+        persistFinalPath,
         waitForSnapshot: vi.fn().mockResolvedValue({
           ...recordingState(),
           phase: "ready",
@@ -587,18 +638,18 @@ describe("录音关闭流程", () => {
         close,
       },
     );
-    expect(stopAndSubmit).not.toHaveBeenCalled();
-    expect(submitFinalPath).toHaveBeenCalledWith("/recordings/meeting.m4a");
+    expect(stopAndSave).not.toHaveBeenCalled();
+    expect(persistFinalPath).toHaveBeenCalledWith("/recordings/meeting.m4a");
     expect(close).toHaveBeenCalledOnce();
   });
 
   it("请求权限时等待，进入录音后才停止", async () => {
-    const stopAndSubmit = vi.fn().mockResolvedValue(undefined);
+    const stopAndSave = vi.fn().mockResolvedValue(undefined);
     await runRecordingCloseFlow(
       { ...recordingState(), phase: "requesting_permissions" },
       {
-        stopAndSubmit,
-        submitFinalPath: vi.fn(),
+        stopAndSave,
+        persistFinalPath: vi.fn(),
         waitForSnapshot: vi.fn().mockResolvedValue({
           ...recordingState(),
           phase: "starting",
@@ -606,7 +657,7 @@ describe("录音关闭流程", () => {
         close: vi.fn().mockResolvedValue(undefined),
       },
     );
-    expect(stopAndSubmit).toHaveBeenCalledOnce();
+    expect(stopAndSave).toHaveBeenCalledOnce();
   });
 
   it("保存失败不关闭，空闲异常关闭事件直接安全关闭", async () => {
@@ -615,8 +666,8 @@ describe("录音关闭流程", () => {
       runRecordingCloseFlow(
         { ...recordingState(), phase: "stopping" },
         {
-          stopAndSubmit: vi.fn(),
-          submitFinalPath: vi.fn(),
+          stopAndSave: vi.fn(),
+          persistFinalPath: vi.fn(),
           waitForSnapshot: vi.fn().mockResolvedValue({
             ...recordingState(),
             phase: "failed",
@@ -629,8 +680,8 @@ describe("录音关闭流程", () => {
     expect(close).not.toHaveBeenCalled();
 
     await runRecordingCloseFlow(recordingState(), {
-      stopAndSubmit: vi.fn(),
-      submitFinalPath: vi.fn(),
+      stopAndSave: vi.fn(),
+      persistFinalPath: vi.fn(),
       waitForSnapshot: vi.fn(),
       close,
     });
@@ -646,8 +697,8 @@ describe("录音状态发布通道", () => {
     });
     const close = vi.fn();
     const flow = runRecordingCloseFlow(channel.snapshot, {
-      stopAndSubmit: vi.fn(),
-      submitFinalPath: vi.fn(),
+      stopAndSave: vi.fn(),
+      persistFinalPath: vi.fn(),
       waitForSnapshot: () => channel.waitForAdvance(channel.revision, 100),
       close,
     });
@@ -693,8 +744,8 @@ describe("录音状态发布通道", () => {
     const close = vi.fn();
     await expect(
       runRecordingCloseFlow(channel.snapshot, {
-        stopAndSubmit: vi.fn(),
-        submitFinalPath: vi.fn(),
+        stopAndSave: vi.fn(),
+        persistFinalPath: vi.fn(),
         waitForSnapshot: () => channel.waitForAdvance(0, 5),
         close,
       }),
@@ -954,11 +1005,11 @@ describe("提交和关闭单飞", () => {
       channel.publishLocal(recordingState());
       return result;
     });
-    const submitFinalPath = vi.fn();
+    const persistFinalPath = vi.fn();
     const close = vi.fn().mockResolvedValue(undefined);
     const flow = runRecordingCloseFlow(channel.snapshot, {
-      stopAndSubmit: vi.fn(),
-      submitFinalPath,
+      stopAndSave: vi.fn(),
+      persistFinalPath,
       waitForSnapshot: async () => {
         await registry.get(path);
         return channel.snapshot;
@@ -976,76 +1027,31 @@ describe("提交和关闭单飞", () => {
     await flow;
 
     expect(api.submitJob).toHaveBeenCalledOnce();
-    expect(submitFinalPath).not.toHaveBeenCalled();
+    expect(persistFinalPath).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it("重载后接管混音，ready提交失败会保留重提入口并阻止关闭", async () => {
+  it("重载后接管混音，ready只持久化待确认录音后关闭", async () => {
     const path = "/recordings/reloaded.m4a";
-    const api = { submitJob: vi.fn().mockRejectedValue(new Error("offline")) };
-    const registry = new RecordingSubmissionRegistry();
-    let snapshot: RecordingSnapshot = {
-      ...recordingState(),
-      phase: "mixing",
-    };
-    let pending: PendingRecordingSubmission[] = [];
-    const close = vi.fn();
-
-    await expect(
-      runRecordingCloseFlow(snapshot, {
-        stopAndSubmit: vi.fn(),
+    const persistFinalPath = vi.fn().mockResolvedValue(undefined);
+    const close = vi.fn().mockResolvedValue(undefined);
+    await runRecordingCloseFlow(
+      { ...recordingState(), phase: "mixing" },
+      {
+        stopAndSave: vi.fn(),
         waitForSnapshot: vi.fn().mockResolvedValue({
           ...recordingState(),
           phase: "ready",
           final_path: path,
         }),
-        submitFinalPath: async (finalPath) => {
-          snapshot = {
-            ...snapshot,
-            phase: "submitting",
-            final_path: finalPath,
-          };
-          try {
-            await registry.submit(finalPath, api);
-          } catch (error) {
-            const retained = retainFailedRecordingSubmission(
-              snapshot,
-              pending,
-              {
-                key: `final:${finalPath}`,
-                label: "录音结果",
-                finalPath,
-                error,
-              },
-            );
-            snapshot = retained.snapshot;
-            pending = retained.pending;
-            throw error;
-          }
-        },
+        persistFinalPath,
         close,
-      }),
-    ).rejects.toMatchObject({ finalPath: path });
-
-    expect(snapshot).toMatchObject({
-      phase: "failed",
-      final_path: path,
-      recoverable_paths: [path],
-    });
-    expect(pending).toEqual([
-      expect.objectContaining({
-        finalPath: path,
-        busy: false,
-        error: expect.stringContaining("offline"),
-      }),
-    ]);
-    expect(close).not.toHaveBeenCalled();
-
-    const retryApi = { submitJob: vi.fn().mockResolvedValue("job-reloaded") };
-    await expect(registry.submit(path, retryApi)).resolves.toMatchObject({
-      jobId: "job-reloaded",
-    });
-    expect(retryApi.submitJob).toHaveBeenCalledOnce();
+      },
+    );
+    expect(persistFinalPath).toHaveBeenCalledWith(path);
+    expect(close).toHaveBeenCalledOnce();
+    const api = { submitJob: vi.fn() };
+    expect(api.submitJob).not.toHaveBeenCalled();
   });
 
   it("重复关闭复用同一流程，失败后允许重试", async () => {

@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
 import RecordingPanel from "./RecordingPanel.svelte";
 import type { RecordingSnapshot } from "./recording";
+import type { PendingRecordingSubmission } from "./recordingFlow";
 
 const snapshot = (
   values: Partial<RecordingSnapshot> = {},
@@ -26,7 +27,7 @@ describe("RecordingPanel", () => {
     expect(screen.getByText("00:42")).toBeTruthy();
 
     await fireEvent.click(
-      screen.getByRole("button", { name: "停止并开始转写" }),
+      screen.getByRole("button", { name: "停止并保存" }),
     );
     expect(onStop).toHaveBeenCalledOnce();
   });
@@ -50,7 +51,7 @@ describe("RecordingPanel", () => {
       () => new Promise<void>((resolve) => (finish = resolve)),
     );
     render(RecordingPanel, { snapshot: snapshot(), onStop });
-    const button = screen.getByRole("button", { name: "停止并开始转写" });
+    const button = screen.getByRole("button", { name: "停止并保存" });
 
     await fireEvent.click(button);
     await fireEvent.click(button);
@@ -65,14 +66,14 @@ describe("RecordingPanel", () => {
     render(RecordingPanel, { snapshot: snapshot(), onStop });
 
     const button = screen.getByRole("button", {
-      name: "停止并开始转写",
+      name: "停止并保存",
     }) as HTMLButtonElement;
     await fireEvent.click(button);
     await Promise.resolve();
 
     expect(onStop).toHaveBeenCalledOnce();
     expect(button.disabled).toBe(false);
-    expect(button.textContent).toContain("停止并开始转写");
+    expect(button.textContent).toContain("停止并保存");
   });
 
   it("失败时展示错误和全部可恢复文件路径", () => {
@@ -96,7 +97,7 @@ describe("RecordingPanel", () => {
       screen.getByText("/recordings/.incomplete/one/microphone.caf"),
     ).toBeTruthy();
     expect(
-      screen.queryByRole("button", { name: "停止并开始转写" }),
+      screen.queryByRole("button", { name: "停止并保存" }),
     ).toBeNull();
   });
 
@@ -120,11 +121,19 @@ describe("RecordingPanel", () => {
     expect(onOpenSystemSettings).toHaveBeenCalledOnce();
   });
 
-  it("最终文件提交失败时提供重新提交且防止双击", async () => {
+  it("最终文件提交失败时保留播放器和确认按钮供重试", async () => {
     let finish!: () => void;
-    const onRetrySubmit = vi.fn(
+    const onConfirmTranscription = vi.fn(
       () => new Promise<void>((resolve) => (finish = resolve)),
     );
+    const pending = {
+      key: "path:/recordings/meeting.m4a",
+      label: "录音结果",
+      finalPath: "/recordings/meeting.m4a",
+      idempotencyKey: "recording:stable",
+      busy: false,
+      error: "录音已保存，但提交转写失败",
+    };
     render(RecordingPanel, {
       snapshot: snapshot({
         phase: "failed",
@@ -133,15 +142,83 @@ describe("RecordingPanel", () => {
         error: "录音已保存，但提交转写失败",
       }),
       onStop: vi.fn(),
-      onRetrySubmit,
+      pendingRecordings: [pending],
+      onConfirmTranscription,
+      toAudioSrc: (path: string) => `asset://${path}`,
     });
 
-    const button = screen.getByRole("button", { name: "重新提交转写" });
+    expect(screen.getByLabelText("试听录音结果")).toBeTruthy();
+    const button = screen.getByRole("button", {
+      name: "确认无误，开始转写",
+    });
     await fireEvent.click(button);
     await fireEvent.click(button);
 
-    expect(onRetrySubmit).toHaveBeenCalledOnce();
+    expect(onConfirmTranscription).toHaveBeenCalledOnce();
+    expect(onConfirmTranscription).toHaveBeenCalledWith(pending);
     expect((button as HTMLButtonElement).disabled).toBe(true);
     finish();
+  });
+
+  it("逐条展示可播放录音，只有确认按钮才请求转写且防止双击", async () => {
+    let finish!: () => void;
+    const onConfirmTranscription = vi.fn(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    const pendingRecordings: PendingRecordingSubmission[] = [
+      {
+        key: "path:/recordings/one.m4a",
+        label: "第一段录音",
+        finalPath: "/recordings/one.m4a",
+        idempotencyKey: "recording:one",
+        busy: false,
+        error: null,
+      },
+      {
+        key: "path:/recordings/two.m4a",
+        label: "第二段录音",
+        finalPath: "/recordings/two.m4a",
+        idempotencyKey: "recording:two",
+        busy: false,
+        error: null,
+      },
+    ];
+    render(RecordingPanel, {
+      snapshot: snapshot({ phase: "ready", final_path: "/recordings/one.m4a" }),
+      onStop: vi.fn(),
+      pendingRecordings,
+      onConfirmTranscription,
+      toAudioSrc: (path: string) => `asset://${path}`,
+    });
+
+    const players = screen.getAllByLabelText(/试听/);
+    expect(players).toHaveLength(2);
+    expect(players[0].getAttribute("src")).toBe("asset:///recordings/one.m4a");
+    expect(screen.getByText("/recordings/two.m4a")).toBeTruthy();
+    const buttons = screen.getAllByRole("button", {
+      name: "确认无误，开始转写",
+    });
+    await fireEvent.click(buttons[0]);
+    await fireEvent.click(buttons[0]);
+    expect(onConfirmTranscription).toHaveBeenCalledOnce();
+    expect(onConfirmTranscription).toHaveBeenCalledWith(pendingRecordings[0]);
+    expect((buttons[0] as HTMLButtonElement).disabled).toBe(true);
+    finish();
+  });
+
+  it("空路径不展示播放器", () => {
+    render(RecordingPanel, {
+      snapshot: snapshot({ phase: "ready" }),
+      onStop: vi.fn(),
+      pendingRecordings: [{
+        key: "blank",
+        label: "空录音",
+        finalPath: "   ",
+        busy: false,
+        error: null,
+      }],
+      onConfirmTranscription: vi.fn(),
+    });
+    expect(screen.queryByLabelText(/试听/)).toBeNull();
   });
 });

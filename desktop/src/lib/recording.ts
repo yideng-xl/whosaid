@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type RecordingPhase =
@@ -113,6 +113,15 @@ export const retryRecordingMix = (sessionId: string) =>
 
 export const closeAfterRecording = () =>
   invoke<void>("close_after_recording");
+
+/** 将受控的本地录音路径转换成 WebView 可播放的安全资源地址。 */
+export function recordingAudioSrc(
+  path: string,
+  convert: (localPath: string) => string = convertFileSrc,
+): string {
+  const normalizedPath = path.trim();
+  return normalizedPath ? convert(normalizedPath) : "";
+}
 
 // Tauri 2 的 listen 异步返回取消监听函数；调用方必须等待此 Promise 后再保存/调用 unlisten。
 export const watchRecording = (
