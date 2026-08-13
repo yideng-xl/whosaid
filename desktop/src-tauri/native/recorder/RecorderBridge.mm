@@ -336,6 +336,79 @@ typedef NS_ENUM(NSInteger, WSRecorderTerminalState) {
 
 @end
 
+@interface WSMicrophoneReconnectController : NSObject {
+    NSInteger _maximumAttempts;
+    NSInteger _attempts;
+    NSUInteger _generation;
+    BOOL _active;
+}
+- (instancetype)initWithMaximumAttempts:(NSInteger)maximumAttempts;
+- (NSUInteger)begin;
+- (BOOL)shouldAttemptGeneration:(NSUInteger)generation;
+- (BOOL)recordFailureForGeneration:(NSUInteger)generation;
+- (BOOL)recordSuccessForGeneration:(NSUInteger)generation;
+- (void)cancel;
+@end
+
+@implementation WSMicrophoneReconnectController
+
+- (instancetype)initWithMaximumAttempts:(NSInteger)maximumAttempts {
+    self = [super init];
+    if (self != nil) {
+        _maximumAttempts = MAX(1, maximumAttempts);
+    }
+    return self;
+}
+
+- (NSUInteger)begin {
+    @synchronized(self) {
+        _generation += 1;
+        _attempts = 0;
+        _active = YES;
+        return _generation;
+    }
+}
+
+- (BOOL)shouldAttemptGeneration:(NSUInteger)generation {
+    @synchronized(self) {
+        return _active && generation == _generation && _attempts < _maximumAttempts;
+    }
+}
+
+- (BOOL)recordFailureForGeneration:(NSUInteger)generation {
+    @synchronized(self) {
+        if (!_active || generation != _generation) {
+            return NO;
+        }
+        _attempts += 1;
+        if (_attempts >= _maximumAttempts) {
+            _active = NO;
+            return NO;
+        }
+        return YES;
+    }
+}
+
+- (BOOL)recordSuccessForGeneration:(NSUInteger)generation {
+    @synchronized(self) {
+        if (!_active || generation != _generation) {
+            return NO;
+        }
+        _active = NO;
+        return YES;
+    }
+}
+
+- (void)cancel {
+    @synchronized(self) {
+        _generation += 1;
+        _attempts = 0;
+        _active = NO;
+    }
+}
+
+@end
+
 void WSFinalizeSystemAudioOutput(dispatch_block_t removeOutput,
                                  dispatch_queue_t audioQueue,
                                  dispatch_block_t closeWriter) {
@@ -440,6 +513,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 @property(nonatomic, strong) id microphoneConfigurationObserver;
 @property(nonatomic, strong) WSRecorderTerminalController *terminalController;
 @property(nonatomic, strong) WSRecorderActivityController *activityController;
+@property(nonatomic, strong) WSMicrophoneReconnectController *microphoneReconnectController;
 @property(nonatomic, strong) dispatch_queue_t stateQueue;
 @property(nonatomic, strong) dispatch_queue_t audioQueue;
 @property(nonatomic, strong) dispatch_source_t elapsedTimer;
@@ -461,6 +535,11 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 - (BOOL)begin;
 - (void)stop;
 - (void)finalizeCaptureResources;
+- (void)stopMicrophoneEngineClosingWriter:(BOOL)closeWriter;
+- (void)scheduleMicrophoneReconnectGeneration:(NSUInteger)generation
+                                         delay:(NSTimeInterval)delay;
+- (void)interruptMicrophoneAndReconnect;
+- (BOOL)startMicrophoneEngineEmittingFailure:(BOOL)emitFailure;
 @end
 
 @implementation WSSystemAudioRecorder
@@ -494,6 +573,8 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                  end:^(id activity) {
                      [[NSProcessInfo processInfo] endActivity:activity];
                  }];
+    _microphoneReconnectController =
+        [[WSMicrophoneReconnectController alloc] initWithMaximumAttempts:3];
     _stateQueue = dispatch_queue_create("com.yideng.whosaid.recorder.state",
                                         DISPATCH_QUEUE_SERIAL);
     _audioQueue = dispatch_queue_create("com.yideng.whosaid.recorder.system-audio",
@@ -637,7 +718,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     }
 }
 
-- (void)stopMicrophoneCapture {
+- (void)stopMicrophoneEngineClosingWriter:(BOOL)closeWriter {
     self.microphoneStopping = YES;
     if (self.microphoneConfigurationObserver != nil) {
         [[NSNotificationCenter defaultCenter]
@@ -655,18 +736,59 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     }
     [engine stop];
     self.microphoneEngine = nil;
-    [self closeMicrophoneWriter];
+    self.microphoneConverter = nil;
+    if (closeWriter) {
+        [self closeMicrophoneWriter];
+    }
 }
 
-- (void)interruptMicrophone {
+- (void)stopMicrophoneCapture {
+    [self.microphoneReconnectController cancel];
+    [self stopMicrophoneEngineClosingWriter:YES];
+}
+
+- (void)scheduleMicrophoneReconnectGeneration:(NSUInteger)generation
+                                         delay:(NSTimeInterval)delay {
+    __weak WSSystemAudioRecorder *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(delay * NSEC_PER_SEC)),
+                   self.stateQueue, ^{
+                       WSSystemAudioRecorder *strongSelf = weakSelf;
+                       if (strongSelf == nil || strongSelf.stopping || strongSelf.finished ||
+                           ![strongSelf.microphoneReconnectController
+                               shouldAttemptGeneration:generation]) {
+                           return;
+                       }
+                       if ([strongSelf startMicrophoneEngineEmittingFailure:NO]) {
+                           [strongSelf.microphoneReconnectController
+                               recordSuccessForGeneration:generation];
+                           return;
+                       }
+                       if (strongSelf.stopping || strongSelf.finished) {
+                           return;
+                       }
+                       if ([strongSelf.microphoneReconnectController
+                               recordFailureForGeneration:generation]) {
+                           [strongSelf scheduleMicrophoneReconnectGeneration:generation
+                                                                       delay:0.75];
+                       } else {
+                           [strongSelf emitMicrophoneResult:WSMicStartResultUnavailable];
+                       }
+                   });
+}
+
+- (void)interruptMicrophoneAndReconnect {
     if (self.stopping || self.finished ||
-        [self.microphoneStatus isEqualToString:@"interrupted"] ||
         [self.microphoneStatus isEqualToString:@"denied"] ||
         [self.microphoneStatus isEqualToString:@"unavailable"]) {
         return;
     }
-    [self stopMicrophoneCapture];
+    NSUInteger generation = [self.microphoneReconnectController begin];
+    [self stopMicrophoneEngineClosingWriter:NO];
     [self emitMicrophoneResult:WSMicStartResultInterrupted];
+    if (!self.stopping && !self.finished) {
+        [self scheduleMicrophoneReconnectGeneration:generation delay:0.35];
+    }
 }
 
 - (void)appendMicrophoneBuffer:(AVAudioPCMBuffer *)buffer receivedAt:(uint64_t)hostNs {
@@ -752,7 +874,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     if (failure != nil) {
         self.microphoneStopping = YES;
         dispatch_async(self.stateQueue, ^{
-            [self interruptMicrophone];
+            [self interruptMicrophoneAndReconnect];
         });
         return;
     }
@@ -770,17 +892,19 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     }
 }
 
-- (void)startMicrophoneEngine {
+- (BOOL)startMicrophoneEngineEmittingFailure:(BOOL)emitFailure {
     if (self.stopping || self.finished) {
-        return;
+        return NO;
     }
 
     AVAudioEngine *engine = [AVAudioEngine new];
     AVAudioInputNode *inputNode = engine.inputNode;
     AVAudioFormat *format = [inputNode inputFormatForBus:0];
     if (format.sampleRate <= 0 || format.channelCount == 0) {
-        [self emitMicrophoneResult:WSMicStartResultUnavailable];
-        return;
+        if (emitFailure) {
+            [self emitMicrophoneResult:WSMicStartResultUnavailable];
+        }
+        return NO;
     }
 
     self.microphoneEngine = engine;
@@ -797,9 +921,11 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                             }];
         self.microphoneTapInstalled = YES;
     } @catch (__unused NSException *exception) {
-        [self stopMicrophoneCapture];
-        [self emitMicrophoneResult:WSMicStartResultUnavailable];
-        return;
+        [self stopMicrophoneEngineClosingWriter:emitFailure];
+        if (emitFailure) {
+            [self emitMicrophoneResult:WSMicStartResultUnavailable];
+        }
+        return NO;
     }
 
     self.microphoneConfigurationObserver = [[NSNotificationCenter defaultCenter]
@@ -810,16 +936,18 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                     WSSystemAudioRecorder *strongSelf = weakSelf;
                     if (strongSelf != nil) {
                         dispatch_async(strongSelf.stateQueue, ^{
-                            [strongSelf interruptMicrophone];
+                            [strongSelf interruptMicrophoneAndReconnect];
                         });
                     }
                 }];
 
     NSError *startError = nil;
     if (![engine startAndReturnError:&startError]) {
-        [self stopMicrophoneCapture];
-        [self emitMicrophoneResult:WSMicStartResultUnavailable];
-        return;
+        [self stopMicrophoneEngineClosingWriter:emitFailure];
+        if (emitFailure) {
+            [self emitMicrophoneResult:WSMicStartResultUnavailable];
+        }
+        return NO;
     }
 
     self.microphoneStatus = @"active";
@@ -828,12 +956,17 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     if (!persisted) {
         [self terminateForPersistenceContext:@"microphone active 状态"
                                       error:manifestError];
-        return;
+        return NO;
     }
     if ([self.terminalController allowsSuccess]) {
         [self emitEvents:WSSourceStatusEventsAfterPersistence(
                              YES, @"microphone", @"active", nil)];
     }
+    return YES;
+}
+
+- (void)startMicrophoneEngine {
+    [self startMicrophoneEngineEmittingFailure:YES];
 }
 
 - (void)startMicrophone {

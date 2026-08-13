@@ -10,6 +10,8 @@ export interface RecordingUiState extends RecordingSnapshot {
 
 const MICROPHONE_WARNING =
   "没有录到你的麦克风声音。你可以继续会议，系统声音不会中断。";
+const MICROPHONE_RECONNECTING_WARNING =
+  "麦克风设备切换中，正在重新连接；系统声音不会中断。";
 
 const PHASE_LABELS: Record<RecordingPhase, string> = {
   idle: "准备录音",
@@ -46,7 +48,7 @@ export function sourceLabel(status: SourceStatus): string {
     active: "录制中",
     unavailable: "不可用",
     denied: "未授权",
-    interrupted: "已中断",
+    interrupted: "重新连接中",
   };
   return labels[status];
 }
@@ -68,12 +70,15 @@ export function reduceRecordingState(
   const microphoneDegraded = ["unavailable", "denied", "interrupted"].includes(
     next.microphone,
   );
-  const warning =
+  const showMicrophoneWarning =
     next.system_audio === "active" &&
     microphoneDegraded &&
-    ["recording", "stopping"].includes(next.phase)
-      ? MICROPHONE_WARNING
-      : null;
+    ["recording", "stopping"].includes(next.phase);
+  const warning = showMicrophoneWarning
+    ? next.microphone === "interrupted"
+      ? MICROPHONE_RECONNECTING_WARNING
+      : MICROPHONE_WARNING
+    : null;
 
   return { ...next, warning };
 }

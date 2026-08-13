@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { labelForPhase, recordingState, reduceRecordingState } from "./recordingState";
+import {
+  labelForPhase,
+  recordingState,
+  reduceRecordingState,
+  sourceLabel,
+} from "./recordingState";
 
 describe("录音界面状态", () => {
   it("麦克风不可用时仍保持系统声音录制", () => {
@@ -29,6 +34,11 @@ describe("录音界面状态", () => {
     const recovered = reduceRecordingState(degraded, { microphone: "active" });
 
     expect(recovered.elapsed_seconds).toBe(18);
+    expect(degraded.warning).toContain("正在重新连接");
     expect(recovered.warning).toBeNull();
+  });
+
+  it("设备切换时显示麦克风重新连接中", () => {
+    expect(sourceLabel("interrupted")).toBe("重新连接中");
   });
 });

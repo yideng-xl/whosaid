@@ -55,6 +55,15 @@ NSArray<NSDictionary<NSString *, id> *> *WSStopTerminalEventsAfterPersistence(
 - (void)end;
 @end
 
+@interface WSMicrophoneReconnectController : NSObject
+- (instancetype)initWithMaximumAttempts:(NSInteger)maximumAttempts;
+- (NSUInteger)begin;
+- (BOOL)shouldAttemptGeneration:(NSUInteger)generation;
+- (BOOL)recordFailureForGeneration:(NSUInteger)generation;
+- (BOOL)recordSuccessForGeneration:(NSUInteger)generation;
+- (void)cancel;
+@end
+
 void WSFinalizeSystemAudioOutput(dispatch_block_t removeOutput,
                                  dispatch_queue_t audioQueue,
                                  dispatch_block_t closeWriter);
@@ -380,6 +389,30 @@ int main() {
             assert(destructionActivityBegins == 1);
         }
         assert(destructionActivityEnds == 1);
+
+        WSMicrophoneReconnectController *reconnect =
+            [[WSMicrophoneReconnectController alloc] initWithMaximumAttempts:3];
+        NSUInteger firstGeneration = [reconnect begin];
+        assert([reconnect shouldAttemptGeneration:firstGeneration]);
+        assert([reconnect recordFailureForGeneration:firstGeneration]);
+        assert([reconnect shouldAttemptGeneration:firstGeneration]);
+        assert([reconnect recordSuccessForGeneration:firstGeneration]);
+        assert(![reconnect shouldAttemptGeneration:firstGeneration]);
+
+        NSUInteger staleGeneration = [reconnect begin];
+        NSUInteger currentGeneration = [reconnect begin];
+        assert(![reconnect shouldAttemptGeneration:staleGeneration]);
+        assert(![reconnect recordFailureForGeneration:staleGeneration]);
+        assert([reconnect shouldAttemptGeneration:currentGeneration]);
+        assert([reconnect recordFailureForGeneration:currentGeneration]);
+        assert([reconnect recordFailureForGeneration:currentGeneration]);
+        assert(![reconnect recordFailureForGeneration:currentGeneration]);
+        assert(![reconnect shouldAttemptGeneration:currentGeneration]);
+
+        NSUInteger cancelledGeneration = [reconnect begin];
+        [reconnect cancel];
+        assert(![reconnect shouldAttemptGeneration:cancelledGeneration]);
+        assert(![reconnect recordSuccessForGeneration:cancelledGeneration]);
 
         assert(std::strcmp(whosaid_system_audio_permission_state(true, false), "granted") == 0);
         assert(std::strcmp(whosaid_system_audio_permission_state(true, true), "granted") == 0);
