@@ -33,6 +33,11 @@ bool WSMicFailureIsFatal(WSMicStartResult result) {
     return true;
 }
 
+bool WSMicrophoneFailureAllowsReconnect(bool writerCreationAttempted,
+                                        bool writerAppendAttempted) {
+    return !writerCreationAttempted && !writerAppendAttempted;
+}
+
 namespace {
 
 NSError *recorder_error(NSInteger code, NSString *message) {
@@ -362,6 +367,9 @@ typedef NS_ENUM(NSInteger, WSRecorderTerminalState) {
 
 - (NSUInteger)begin {
     @synchronized(self) {
+        if (_active) {
+            return _generation;
+        }
         _generation += 1;
         _attempts = 0;
         _active = YES;
@@ -791,16 +799,20 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     }
 }
 
-- (void)appendMicrophoneBuffer:(AVAudioPCMBuffer *)buffer receivedAt:(uint64_t)hostNs {
+- (void)appendMicrophoneBuffer:(AVAudioPCMBuffer *)buffer
+                    receivedAt:(uint64_t)hostNs
+                        engine:(AVAudioEngine *)engine {
     if (buffer == nil || buffer.frameLength == 0 || self.microphoneStopping ||
-        self.stopping) {
+        self.stopping || self.microphoneEngine != engine) {
         return;
     }
 
     __block NSError *failure = nil;
     __block BOOL firstValidFrames = NO;
+    __block BOOL writerCreationAttempted = NO;
+    __block BOOL writerAppendAttempted = NO;
     @synchronized(self.microphoneLock) {
-        if (self.microphoneStopping || self.stopping) {
+        if (self.microphoneStopping || self.stopping || self.microphoneEngine != engine) {
             return;
         }
 
@@ -835,6 +847,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 
         if (failure == nil && converted.frameLength > 0) {
             if (self.microphoneWriter == nil) {
+                writerCreationAttempted = YES;
                 NSURL *microphoneURL = [self sessionFileURL:@"microphone.caf"];
                 self.microphoneWriter = [[WSTimelineWriter alloc]
                     initWithURL:microphoneURL
@@ -842,10 +855,11 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                    sessionStart:self.sessionStartNs
                           error:&failure];
             }
-            if (self.microphoneWriter != nil &&
+            writerAppendAttempted = self.microphoneWriter != nil;
+            if (writerAppendAttempted &&
                 ![self.microphoneWriter appendBuffer:converted
-                                          receivedAt:hostNs
-                                               error:&failure]) {
+                                           receivedAt:hostNs
+                                                error:&failure]) {
                 if (failure == nil) {
                     failure = [NSError errorWithDomain:@"com.yideng.whosaid.recorder"
                                                    code:17
@@ -862,7 +876,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
             } else if (self.microphoneWriter == nil && failure == nil) {
                 failure = [NSError errorWithDomain:@"com.yideng.whosaid.recorder"
                                                code:18
-                                           userInfo:@{NSLocalizedDescriptionKey : @"无法创建麦克风音轨"}];
+                                       userInfo:@{NSLocalizedDescriptionKey : @"无法创建麦克风音轨"}];
             } else if (failure == nil && self.microphoneWriter != nil &&
                        !self.microphoneHasFrames) {
                 self.microphoneHasFrames = YES;
@@ -872,9 +886,19 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     }
 
     if (failure != nil) {
+        const BOOL reconnectAllowed = WSMicrophoneFailureAllowsReconnect(
+            writerCreationAttempted, writerAppendAttempted);
         self.microphoneStopping = YES;
         dispatch_async(self.stateQueue, ^{
-            [self interruptMicrophoneAndReconnect];
+            if (self.microphoneEngine != engine || self.stopping || self.finished) {
+                return;
+            }
+            if (reconnectAllowed) {
+                [self interruptMicrophoneAndReconnect];
+            } else {
+                [self stopMicrophoneEngineClosingWriter:NO];
+                [self emitMicrophoneResult:WSMicStartResultUnavailable];
+            }
         });
         return;
     }
@@ -917,7 +941,8 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                             block:^(AVAudioPCMBuffer *buffer, __unused AVAudioTime *when) {
                                 WSSystemAudioRecorder *strongSelf = weakSelf;
                                 [strongSelf appendMicrophoneBuffer:buffer
-                                                       receivedAt:monotonic_nanoseconds()];
+                                                       receivedAt:monotonic_nanoseconds()
+                                                           engine:engine];
                             }];
         self.microphoneTapInstalled = YES;
     } @catch (__unused NSException *exception) {
@@ -936,7 +961,9 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                     WSSystemAudioRecorder *strongSelf = weakSelf;
                     if (strongSelf != nil) {
                         dispatch_async(strongSelf.stateQueue, ^{
-                            [strongSelf interruptMicrophoneAndReconnect];
+                            if (strongSelf.microphoneEngine == engine) {
+                                [strongSelf interruptMicrophoneAndReconnect];
+                            }
                         });
                     }
                 }];

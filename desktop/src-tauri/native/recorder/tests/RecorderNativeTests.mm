@@ -18,6 +18,8 @@ enum WSMicStartResult {
 };
 
 bool WSMicFailureIsFatal(WSMicStartResult result);
+bool WSMicrophoneFailureAllowsReconnect(bool writerCreationAttempted,
+                                        bool writerAppendAttempted);
 AVAudioPCMBuffer *WSConvertMicrophoneBuffer(AVAudioPCMBuffer *buffer, NSError **error);
 NSDictionary<NSString *, id> *WSSessionManifest(NSString *sessionID,
                                                  NSNumber *startedAt,
@@ -75,6 +77,9 @@ int main() {
         assert(!WSMicFailureIsFatal(WSMicStartResultDenied));
         assert(!WSMicFailureIsFatal(WSMicStartResultUnavailable));
         assert(!WSMicFailureIsFatal(WSMicStartResultInterrupted));
+        assert(WSMicrophoneFailureAllowsReconnect(false, false));
+        assert(!WSMicrophoneFailureAllowsReconnect(true, false));
+        assert(!WSMicrophoneFailureAllowsReconnect(false, true));
 
         AVAudioFormat *stereo44100 = [[AVAudioFormat alloc]
             initStandardFormatWithSampleRate:44'100
@@ -399,15 +404,19 @@ int main() {
         assert([reconnect recordSuccessForGeneration:firstGeneration]);
         assert(![reconnect shouldAttemptGeneration:firstGeneration]);
 
-        NSUInteger staleGeneration = [reconnect begin];
         NSUInteger currentGeneration = [reconnect begin];
-        assert(![reconnect shouldAttemptGeneration:staleGeneration]);
-        assert(![reconnect recordFailureForGeneration:staleGeneration]);
+        NSUInteger repeatedNotificationGeneration = [reconnect begin];
+        assert(repeatedNotificationGeneration == currentGeneration);
         assert([reconnect shouldAttemptGeneration:currentGeneration]);
         assert([reconnect recordFailureForGeneration:currentGeneration]);
         assert([reconnect recordFailureForGeneration:currentGeneration]);
         assert(![reconnect recordFailureForGeneration:currentGeneration]);
         assert(![reconnect shouldAttemptGeneration:currentGeneration]);
+
+        NSUInteger replacementGeneration = [reconnect begin];
+        assert(replacementGeneration != currentGeneration);
+        assert(![reconnect recordFailureForGeneration:currentGeneration]);
+        assert([reconnect shouldAttemptGeneration:replacementGeneration]);
 
         NSUInteger cancelledGeneration = [reconnect begin];
         [reconnect cancel];
