@@ -928,7 +928,7 @@
       </div>
     {/if}
 
-    {#if closeRequested}
+    {#if recordingAvailable && closeRequested}
       <div class="modal-backdrop" role="presentation">
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="recording-close-title">
           <div class="modal-title" id="recording-close-title">录音仍在进行</div>

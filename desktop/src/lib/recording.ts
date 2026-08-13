@@ -61,7 +61,15 @@ export interface AppCapabilities {
 }
 
 export const getAppCapabilities = () =>
-  invoke<AppCapabilities>("get_app_capabilities");
+  invoke<unknown>("get_app_capabilities");
+
+export function hasDirectRecordingCapability(value: unknown): boolean {
+  return value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    "directRecording" in value &&
+    value.directRecording === true;
+}
 
 /**
  * 录音是平台专属能力：只有 Rust 明确确认支持后才允许页面注册监听或读取录音状态。
@@ -69,15 +77,15 @@ export const getAppCapabilities = () =>
  */
 export async function initializeDirectRecording(
   initialize: () => void,
-  getCapabilities: () => Promise<AppCapabilities> = getAppCapabilities,
+  getCapabilities: () => Promise<unknown> = getAppCapabilities,
 ): Promise<boolean> {
-  let capabilities: AppCapabilities;
+  let capabilities: unknown;
   try {
     capabilities = await getCapabilities();
   } catch {
     return false;
   }
-  if (!capabilities.directRecording) return false;
+  if (!hasDirectRecordingCapability(capabilities)) return false;
   initialize();
   return true;
 }

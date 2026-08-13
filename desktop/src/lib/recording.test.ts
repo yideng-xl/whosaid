@@ -3,6 +3,7 @@ import {
   initializeDirectRecording,
   manageAsyncListener,
 } from "./recording";
+import pageSource from "../routes/+page.svelte?raw";
 
 describe("直接录音平台门禁", () => {
   it("不支持的平台不会执行任何录音初始化", async () => {
@@ -36,6 +37,31 @@ describe("直接录音平台门禁", () => {
     )).resolves.toBe(true);
 
     expect(initialize).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    null,
+    undefined,
+    [],
+    "false",
+    1,
+    {},
+    { directRecording: false },
+    { directRecording: "true" },
+    { directRecording: 1 },
+  ])("异常能力值 %# 必须关闭功能", async (value) => {
+    const initialize = vi.fn();
+
+    await expect(initializeDirectRecording(
+      initialize,
+      async () => value as never,
+    )).resolves.toBe(false);
+
+    expect(initialize).not.toHaveBeenCalled();
+  });
+
+  it("退出确认框同时受平台能力和确认状态控制", () => {
+    expect(pageSource).toContain("{#if recordingAvailable && closeRequested}");
   });
 });
 
