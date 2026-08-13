@@ -450,12 +450,17 @@ export function pendingSubmissionsFromPreviews(
     } catch {
       continue;
     }
-    const parts = finalPath.split(/[\\/]/);
-    const label = parts.at(-1) || "录音结果";
+    const timestamp = Number.isFinite(preview.createdAt) && preview.createdAt > 0
+      ? new Date(preview.createdAt * 1000).toLocaleString("zh-CN", {
+          hour12: false,
+        })
+      : "未知时间";
+    const label = `录音时间 ${timestamp}`;
     try {
       const submission = keyStore.prepare(finalPath, label);
       pending.push({
         ...submission,
+        label,
         previewId: preview.id,
         key: `path:${finalPath}`,
         busy: false,
@@ -622,7 +627,7 @@ export async function completeRecordingAcceptance(
   keyStore.complete(result.audioPath);
 }
 
-/** 后端 preview 凭据是权威入口：先确认移除成功，再接纳任务并清理辅助幂等键。 */
+/** 先接纳页面任务，再移除后端 preview；两步成功后才清理辅助幂等键。 */
 export async function completeRecordingPreviewAcceptance(
   result: RecordingSubmissionResult,
   previewId: string,
@@ -632,8 +637,10 @@ export async function completeRecordingPreviewAcceptance(
 ): Promise<void> {
   const id = previewId.trim();
   if (!id) throw new RecordingFlowError("待确认录音缺少后端标识");
+  await accept(result);
   await acknowledge(id);
-  await completeRecordingAcceptance(result, keyStore, accept);
+  // 服务端任务、页面任务和后端 preview 都已完成；本地键只做 best-effort 清理。
+  keyStore.complete(result.audioPath);
 }
 
 export function completeAcceptedRecordingSubmission(

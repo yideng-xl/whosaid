@@ -64,6 +64,18 @@
     return parts.at(-1) || path;
   }
 
+  function visibleLabel(recording: PendingRecordingSubmission): string {
+    const name = fileName(recording.finalPath);
+    const label = recording.label.trim();
+    return label && label !== name ? label : "待确认录音";
+  }
+
+  function accessibleRecordingName(recording: PendingRecordingSubmission): string {
+    const name = fileName(recording.finalPath);
+    const label = recording.label.trim();
+    return label && label !== name ? `${label} ${name}` : name;
+  }
+
   async function confirmOnce(recording: PendingRecordingSubmission) {
     const path = recording.finalPath.trim();
     if (!path || recording.busy || confirmingPaths.has(path)) return;
@@ -169,21 +181,21 @@
         <p class="preview-hint">确认声音没有问题后，再开始分人和转写。</p>
         {#each pendingRecordings.filter((recording) => recording.finalPath.trim()) as recording (recording.finalPath)}
           <article class="preview-item">
-            <strong>{recording.label || fileName(recording.finalPath)}</strong>
+            <strong>{visibleLabel(recording)}</strong>
             <span class="preview-name">{fileName(recording.finalPath)}</span>
             <span class="preview-path">{recording.finalPath}</span>
             <audio
               controls
               preload="metadata"
               src={toAudioSrc(recording.finalPath)}
-              aria-label={`试听${recording.label || fileName(recording.finalPath)}`}
+              aria-label={`试听${accessibleRecordingName(recording)}`}
             ></audio>
             {#if recording.error}
               <small class="preview-error" role="alert">{recording.error}</small>
             {/if}
             <button
               class="confirm"
-              aria-label={`确认${recording.label || fileName(recording.finalPath)}无误，开始转写`}
+              aria-label={`确认${accessibleRecordingName(recording)}无误，开始转写`}
               disabled={recording.busy || confirmingPaths.has(recording.finalPath.trim())}
               aria-busy={recording.busy || confirmingPaths.has(recording.finalPath.trim())}
               onclick={() => confirmOnce(recording)}

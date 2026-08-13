@@ -147,9 +147,9 @@ describe("RecordingPanel", () => {
       toAudioSrc: (path: string) => `asset://${path}`,
     });
 
-    expect(screen.getByLabelText("试听录音结果")).toBeTruthy();
+    expect(screen.getByLabelText("试听录音结果 meeting.m4a")).toBeTruthy();
     const button = screen.getByRole("button", {
-      name: "确认录音结果无误，开始转写",
+      name: "确认录音结果 meeting.m4a无误，开始转写",
     });
     await fireEvent.click(button);
     await fireEvent.click(button);
@@ -168,7 +168,7 @@ describe("RecordingPanel", () => {
     const pendingRecordings: PendingRecordingSubmission[] = [
       {
         key: "path:/recordings/one.m4a",
-        label: "第一段录音",
+        label: "one.m4a",
         finalPath: "/recordings/one.m4a",
         idempotencyKey: "recording:one",
         busy: false,
@@ -194,6 +194,7 @@ describe("RecordingPanel", () => {
     const players = screen.getAllByLabelText(/试听/);
     expect(players).toHaveLength(2);
     expect(players[0].getAttribute("src")).toBe("asset:///recordings/one.m4a");
+    expect(screen.getAllByText("one.m4a")).toHaveLength(1);
     expect(screen.getByText("/recordings/two.m4a")).toBeTruthy();
     const buttons = screen.getAllByRole("button", {
       name: /确认.+无误，开始转写/,

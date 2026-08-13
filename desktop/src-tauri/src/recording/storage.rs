@@ -997,6 +997,43 @@ mod tests {
     }
 
     #[test]
+    fn legacy_receipt_without_created_at_uses_receipt_mtime() {
+        let root = tempdir().unwrap();
+        let store = RecordingStore::new(root.path().to_path_buf());
+        let session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let final_path = root.path().join("legacy.m4a");
+        fs::write(&final_path, b"legacy audio").unwrap();
+        let (final_size, final_sha256) = RecordingStore::artifact_fingerprint(&final_path).unwrap();
+        let completed = root.path().join(COMPLETED_DIRECTORY);
+        fs::create_dir(&completed).unwrap();
+        let receipt_path = completed.join(format!("{session_id}.json"));
+        fs::write(
+            &receipt_path,
+            serde_json::json!({
+                "sessionId": session_id,
+                "finalPath": path_string(&fs::canonicalize(&final_path).unwrap()),
+                "finalSize": final_size,
+                "finalSha256": final_sha256
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let receipt_mtime = receipt_path
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        let previews = store.pending_previews().unwrap();
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].id, session_id);
+        assert!((previews[0].created_at - receipt_mtime).abs() < 0.001);
+    }
+
+    #[test]
     fn multiple_pending_previews_acknowledge_only_selected_receipt() {
         let root = tempdir().unwrap();
         let store = RecordingStore::new(root.path().to_path_buf());

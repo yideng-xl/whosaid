@@ -91,6 +91,7 @@ describe("录音结束后的试听确认", () => {
     const storage = new MemoryStorage();
     const keys = new RecordingSubmissionKeyStore(storage, () => "recording:ghost");
     keys.prepare("/recordings/ghost.m4a", "旧孤儿");
+    keys.prepare("/recordings/one.m4a", "one.m4a");
     const restored = pendingSubmissionsFromPreviews(
       [
         { id: "one", finalPath: "/recordings/one.m4a", createdAt: 100 },
@@ -103,6 +104,7 @@ describe("录音结束后的试听确认", () => {
       "/recordings/two.m4a",
     ]);
     expect(restored.map((item) => item.previewId)).toEqual(["one", "two"]);
+    expect(restored[0].label).toMatch(/^录音时间 /);
   });
 
   it("localStorage写失败仍恢复后端preview，但不生成可提交幂等键", () => {
@@ -224,34 +226,100 @@ describe("录音结束后的试听确认", () => {
     expect(api.submitJob).toHaveBeenCalledWith("/imports/a.m4a");
   });
 
-  it("后端ack成功后才接纳任务并清幂等键，ack失败全部保留", async () => {
+  it("页面接纳失败时不ack且保留幂等键", async () => {
     const storage = new MemoryStorage();
     const keyStore = new RecordingSubmissionKeyStore(storage, () => "recording:key");
     const pending = keyStore.prepare("/recordings/a.m4a", "a.m4a");
     const result = { jobId: "job-a", audioPath: pending.finalPath };
-    const accept = vi.fn();
+    const acknowledge = vi.fn();
 
     await expect(
       completeRecordingPreviewAcceptance(
         result,
         "preview-a",
         keyStore,
-        vi.fn().mockRejectedValue(new Error("ack failed")),
-        accept,
+        acknowledge,
+        vi.fn().mockRejectedValue(new Error("subscribe failed")),
       ),
-    ).rejects.toThrow("ack failed");
-    expect(accept).not.toHaveBeenCalled();
+    ).rejects.toThrow("subscribe failed");
+    expect(acknowledge).not.toHaveBeenCalled();
     expect(keyStore.list()).toEqual([pending]);
+  });
+
+  it("ack失败时任务已接纳，但receipt与幂等键仍保留", async () => {
+    const storage = new MemoryStorage();
+    const keyStore = new RecordingSubmissionKeyStore(storage, () => "recording:key");
+    const pending = keyStore.prepare("/recordings/a.m4a", "a.m4a");
+    const result = { jobId: "job-a", audioPath: pending.finalPath };
+    const accept = vi.fn();
 
     const order: string[] = [];
-    await completeRecordingPreviewAcceptance(
-      result,
+    await expect(completeRecordingPreviewAcceptance(
+      result, "preview-a", keyStore,
+      async () => { order.push("ack"); throw new Error("ack failed"); },
+      async () => { order.push("accept"); accept(); },
+    )).rejects.toThrow("ack failed");
+    expect(order).toEqual(["accept", "ack"]);
+    expect(accept).toHaveBeenCalledOnce();
+    expect(keyStore.list()).toEqual([pending]);
+  });
+
+  it("ack失败后用同一key重试只保留一个任务和订阅，ack成功才清key", async () => {
+    const storage = new MemoryStorage();
+    const keyStore = new RecordingSubmissionKeyStore(storage, () => "recording:stable");
+    const pending = keyStore.prepare("/recordings/a.m4a", "a.m4a");
+    const api = { submitJob: vi.fn().mockResolvedValue("job-existing") };
+    const registry = new RecordingSubmissionRegistry();
+    const jobs: ReturnType<typeof createRecordingJob>[] = [];
+    const watching = new Set<string>();
+    const subscribe = vi.fn((jobId: string) => watching.add(jobId));
+    const acceptIdempotently = (result: { jobId: string; audioPath: string }) => {
+      const job = createRecordingJob(result, 100);
+      jobs.splice(0, jobs.length, ...prependRecordingJob(jobs, job));
+      if (!watching.has(job.id)) subscribe(job.id);
+    };
+    const acknowledge = vi.fn()
+      .mockRejectedValueOnce(new Error("ack failed"))
+      .mockResolvedValueOnce(undefined);
+
+    const run = () => registry.submitAndAccept(
+      pending.finalPath,
+      api,
+      (result) => completeRecordingPreviewAcceptance(
+        result, "preview-a", keyStore, acknowledge, acceptIdempotently,
+      ),
+      pending.idempotencyKey,
+    );
+    await expect(run()).rejects.toThrow("ack failed");
+    await expect(run()).resolves.toMatchObject({ jobId: "job-existing" });
+
+    expect(api.submitJob).toHaveBeenCalledTimes(2);
+    expect(api.submitJob).toHaveBeenNthCalledWith(
+      2, pending.finalPath, undefined, pending.idempotencyKey,
+    );
+    expect(jobs).toHaveLength(1);
+    expect(subscribe).toHaveBeenCalledOnce();
+    expect(acknowledge).toHaveBeenCalledTimes(2);
+    expect(keyStore.list()).toEqual([]);
+  });
+
+  it("ack成功后本地key清理失败不把已接纳任务改判为失败", async () => {
+    const storage = new MemoryStorage();
+    const keyStore = new RecordingSubmissionKeyStore(storage, () => "recording:key");
+    keyStore.prepare("/recordings/a.m4a", "a.m4a");
+    storage.removeItem = () => { throw new Error("remove denied"); };
+    const accept = vi.fn();
+    const acknowledge = vi.fn().mockResolvedValue(undefined);
+
+    await expect(completeRecordingPreviewAcceptance(
+      { jobId: "job-a", audioPath: "/recordings/a.m4a" },
       "preview-a",
       keyStore,
-      async () => { order.push("ack"); },
-      async () => { order.push("accept"); },
-    );
-    expect(order).toEqual(["ack", "accept"]);
+      acknowledge,
+      accept,
+    )).resolves.toBeUndefined();
+    expect(accept).toHaveBeenCalledOnce();
+    expect(acknowledge).toHaveBeenCalledOnce();
     expect(keyStore.list()).toEqual([]);
   });
 
