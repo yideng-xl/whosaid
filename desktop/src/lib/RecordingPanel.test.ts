@@ -149,7 +149,7 @@ describe("RecordingPanel", () => {
 
     expect(screen.getByLabelText("试听录音结果")).toBeTruthy();
     const button = screen.getByRole("button", {
-      name: "确认无误，开始转写",
+      name: "确认录音结果无误，开始转写",
     });
     await fireEvent.click(button);
     await fireEvent.click(button);
@@ -196,7 +196,7 @@ describe("RecordingPanel", () => {
     expect(players[0].getAttribute("src")).toBe("asset:///recordings/one.m4a");
     expect(screen.getByText("/recordings/two.m4a")).toBeTruthy();
     const buttons = screen.getAllByRole("button", {
-      name: "确认无误，开始转写",
+      name: /确认.+无误，开始转写/,
     });
     await fireEvent.click(buttons[0]);
     await fireEvent.click(buttons[0]);

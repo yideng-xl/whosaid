@@ -8,10 +8,12 @@
   import RecordingPanel from "$lib/RecordingPanel.svelte";
   import { createApi, type JobSummary } from "$lib/api";
   import {
+    acknowledgeRecordingPreview,
     closeAfterRecording,
     getRecordingPermissions,
     getRecordingState,
     initializeDirectRecording,
+    listPendingRecordingPreviews,
     listRecoverableRecordings,
     manageAsyncListener,
     openRecordingSettings,
@@ -20,23 +22,23 @@
     watchRecordingCloseRequested,
     type RecordingPermissions,
     type RecordingSnapshot,
+    type RecordingStopResult,
   } from "$lib/recording";
   import {
     beginRecoverableRecording,
     completeAcceptedRecordingSubmission,
-    completeRecordingAcceptance,
+    completeRecordingPreviewAcceptance,
     completeRecoverableRecording,
     createRecordingJob,
     failRecoverableRecording,
     makeRecoverableRecordingItems,
     prependRecordingJob,
-    prepareRecordingPreview,
+    pendingSubmissionsFromPreviews,
     RecordingCloseGuard,
     RecordingSnapshotCoordinator,
     RecordingSubmissionKeyStore,
     RecordingSubmissionRegistry,
     runRecordingCloseFlow,
-    saveRecordingForPreview,
     transitionRecordingSubmissionFailure,
     upsertPendingRecordingSubmission,
     type PendingRecordingSubmission,
@@ -64,14 +66,7 @@
   let recordingSnapshot = $state<RecordingSnapshot>(recordingState());
   let recordingPermissions = $state<RecordingPermissions | null>(null);
   let recoverableRecordings = $state<RecoverableRecordingItem[]>([]);
-  let pendingRecordingSubmissions = $state<PendingRecordingSubmission[]>(
-    recordingSubmissionKeys.list().map((submission) => ({
-      ...submission,
-      key: `path:${submission.finalPath}`,
-      busy: false,
-      error: null,
-    })),
-  );
+  let pendingRecordingSubmissions = $state<PendingRecordingSubmission[]>([]);
   let recordingActionPending = $state(false);
   let recordingAvailable = $state(false);
   let closeRequested = $state(false);
@@ -79,7 +74,7 @@
   let ignoreRecordingEvents = false;
   let submissionFailureFinalPath: string | null = null;
   let pageMounted = false;
-  let finalizationInFlight: Promise<PendingRecordingSubmission> | null = null;
+  let finalizationInFlight: Promise<RecordingStopResult> | null = null;
   const recordingSnapshots = new RecordingSnapshotCoordinator(recordingState());
   const recordingSubmissions = new RecordingSubmissionRegistry();
   const recordingClose = new RecordingCloseGuard();
@@ -202,35 +197,43 @@
     view = "recording";
   }
 
-  async function performFinalization(): Promise<PendingRecordingSubmission> {
+  async function refreshPendingRecordingPreviews() {
+    const previews = await listPendingRecordingPreviews();
+    const restored = pendingSubmissionsFromPreviews(
+      previews,
+      recordingSubmissionKeys,
+    );
+    if (pageMounted) {
+      pendingRecordingSubmissions = restored;
+      if (restored.length > 0) view = "recording";
+    }
+    return { previews, restored };
+  }
+
+  async function performFinalization(): Promise<RecordingStopResult> {
     recordingActionPending = true;
     view = "recording";
     try {
-      const pending = await saveRecordingForPreview(async () => {
-        if (pageMounted) {
-          publishRecordingSnapshot({
-            ...recordingSnapshot,
-            phase: "stopping",
-            error: null,
-          });
-        }
-        return recordingController.stop();
-      }, recordingSubmissionKeys, "录音结果");
       if (pageMounted) {
-        ignoreRecordingEvents = true;
-        pendingRecordingSubmissions = upsertPendingRecordingSubmission(
-          pendingRecordingSubmissions,
-          pending,
-        );
         publishRecordingSnapshot({
           ...recordingSnapshot,
-          phase: "ready",
-          final_path: pending.finalPath,
-          recoverable_paths: [pending.finalPath],
+          phase: "stopping",
           error: null,
         });
       }
-      return pending;
+      const stopped = await recordingController.stop();
+      if (pageMounted) {
+        ignoreRecordingEvents = true;
+        await refreshPendingRecordingPreviews();
+        publishRecordingSnapshot({
+          ...recordingSnapshot,
+          phase: "ready",
+          final_path: stopped.final_path,
+          recoverable_paths: [stopped.final_path],
+          error: null,
+        });
+      }
+      return stopped;
     } catch (error) {
       if (pageMounted) showRecordingFailure(error);
       throw error;
@@ -239,7 +242,7 @@
     }
   }
 
-  function finalizeRecordingOnce(): Promise<PendingRecordingSubmission> {
+  function finalizeRecordingOnce(): Promise<RecordingStopResult> {
     if (finalizationInFlight) return finalizationInFlight;
     const task = performFinalization();
     finalizationInFlight = task;
@@ -312,25 +315,15 @@
       recoverableRecordings,
       recording.sessionId,
     );
-    const label = `${recoverableStartedAt(recording)} 的录音`;
     try {
-      const mixed = await retryRecordingMix(recording.sessionId);
+      await retryRecordingMix(recording.sessionId);
       if (!pageMounted) return;
-      const pending = prepareRecordingPreview(
-        mixed.final_path,
-        recordingSubmissionKeys,
-        label,
-      );
-      const finalPath = pending.finalPath;
       // 混音成功后只进入试听待确认；每段最终文件独立保存，不能覆盖别段结果。
       recoverableRecordings = completeRecoverableRecording(
         recoverableRecordings,
         recording.sessionId,
       );
-      pendingRecordingSubmissions = upsertPendingRecordingSubmission(
-        pendingRecordingSubmissions,
-        pending,
-      );
+      await refreshPendingRecordingPreviews();
       view = "recording";
     } catch (error) {
       if (!pageMounted) return;
@@ -347,10 +340,19 @@
     pending: PendingRecordingSubmission,
   ) {
     if (!api || pending.busy) return;
-    const submission = recordingSubmissionKeys.prepare(
-      pending.finalPath,
-      pending.label,
-    );
+    let submission;
+    try {
+      submission = recordingSubmissionKeys.prepare(
+        pending.finalPath,
+        pending.label,
+      );
+    } catch (error) {
+      pendingRecordingSubmissions = upsertPendingRecordingSubmission(
+        pendingRecordingSubmissions,
+        { ...pending, busy: false, error: messageOf(error) },
+      );
+      throw error;
+    }
     pendingRecordingSubmissions = upsertPendingRecordingSubmission(
       pendingRecordingSubmissions,
       {
@@ -364,9 +366,11 @@
       await recordingSubmissions.submitAndAccept(
         pending.finalPath,
         api,
-        (accepted) => completeRecordingAcceptance(
+        (accepted) => completeRecordingPreviewAcceptance(
           accepted,
+          pending.previewId ?? "",
           recordingSubmissionKeys,
+          acknowledgeRecordingPreview,
           async (value) => {
             if (!pageMounted) throw new Error("录音页面已销毁，暂缓接纳任务");
             acceptSubmissionResult(value);
@@ -401,16 +405,9 @@
   }
 
   async function persistFinalPathForClose(finalPath: string) {
-    const pending = prepareRecordingPreview(
-      finalPath,
-      recordingSubmissionKeys,
-      "录音结果",
-    );
-    if (pageMounted) {
-      pendingRecordingSubmissions = upsertPendingRecordingSubmission(
-        pendingRecordingSubmissions,
-        pending,
-      );
+    const { previews } = await refreshPendingRecordingPreviews();
+    if (!previews.some((preview) => preview.finalPath.trim() === finalPath.trim())) {
+      throw new Error("录音已保存，但后端待确认凭据尚未持久化");
     }
   }
 
@@ -499,7 +496,6 @@
     void initializeDirectRecording(() => {
       if (cancelled) return;
       recordingAvailable = true;
-      if (pendingRecordingSubmissions.length > 0) view = "recording";
       disposeRecordingState = manageAsyncListener(
         recordingController.watch((snapshot) => {
           if (!cancelled) onRecordingSnapshot(snapshot);
@@ -549,6 +545,9 @@
         .catch((error) => {
           if (!cancelled) errorBanner = `扫描未完成录音失败：${messageOf(error)}`;
         });
+      void refreshPendingRecordingPreviews().catch((error) => {
+        if (!cancelled) errorBanner = `读取待确认录音失败：${messageOf(error)}`;
+      });
     });
 
     // 0) 最先注册拖放监听：不依赖端口/服务，避免任何加载失败导致监听器注册不上。

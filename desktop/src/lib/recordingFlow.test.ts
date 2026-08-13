@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   beginRecoverableRecording,
   completeAcceptedRecordingSubmission,
+  completeRecordingPreviewAcceptance,
   completeRecordingAcceptance,
   completeRecoverableRecording,
   createRecordingJob,
   failRecoverableRecording,
   finalizeAndSubmit,
   makeRecoverableRecordingItems,
+  pendingSubmissionsFromPreviews,
   mergeBackendRecordingSnapshot,
   prependRecordingJob,
   prepareRecordingPreview,
@@ -83,6 +85,42 @@ describe("录音结束后的试听确认", () => {
       idempotencyKey: "recording:recovered",
     });
     expect(api.submitJob).not.toHaveBeenCalled();
+  });
+
+  it("重启只以后端preview为权威，忽略localStorage孤儿并恢复多条", () => {
+    const storage = new MemoryStorage();
+    const keys = new RecordingSubmissionKeyStore(storage, () => "recording:ghost");
+    keys.prepare("/recordings/ghost.m4a", "旧孤儿");
+    const restored = pendingSubmissionsFromPreviews(
+      [
+        { id: "one", finalPath: "/recordings/one.m4a", createdAt: 100 },
+        { id: "two", finalPath: "/recordings/two.m4a", createdAt: 200 },
+      ],
+      keys,
+    );
+    expect(restored.map((item) => item.finalPath)).toEqual([
+      "/recordings/one.m4a",
+      "/recordings/two.m4a",
+    ]);
+    expect(restored.map((item) => item.previewId)).toEqual(["one", "two"]);
+  });
+
+  it("localStorage写失败仍恢复后端preview，但不生成可提交幂等键", () => {
+    const storage = new MemoryStorage();
+    storage.setItem = () => { throw new Error("quota exceeded"); };
+    const keys = new RecordingSubmissionKeyStore(storage, () => "recording:key");
+    const restored = pendingSubmissionsFromPreviews(
+      [{ id: "one", finalPath: "/recordings/one.m4a", createdAt: 100 }],
+      keys,
+    );
+    expect(restored).toEqual([
+      expect.objectContaining({
+        previewId: "one",
+        finalPath: "/recordings/one.m4a",
+        idempotencyKey: undefined,
+        error: expect.stringContaining("quota exceeded"),
+      }),
+    ]);
   });
 
   it("提交最终文件并返回新任务", async () => {
@@ -184,6 +222,37 @@ describe("录音结束后的试听确认", () => {
     const api = { submitJob: vi.fn().mockResolvedValue("job-manual") };
     await submitFinalizedRecording("/imports/a.m4a", api);
     expect(api.submitJob).toHaveBeenCalledWith("/imports/a.m4a");
+  });
+
+  it("后端ack成功后才接纳任务并清幂等键，ack失败全部保留", async () => {
+    const storage = new MemoryStorage();
+    const keyStore = new RecordingSubmissionKeyStore(storage, () => "recording:key");
+    const pending = keyStore.prepare("/recordings/a.m4a", "a.m4a");
+    const result = { jobId: "job-a", audioPath: pending.finalPath };
+    const accept = vi.fn();
+
+    await expect(
+      completeRecordingPreviewAcceptance(
+        result,
+        "preview-a",
+        keyStore,
+        vi.fn().mockRejectedValue(new Error("ack failed")),
+        accept,
+      ),
+    ).rejects.toThrow("ack failed");
+    expect(accept).not.toHaveBeenCalled();
+    expect(keyStore.list()).toEqual([pending]);
+
+    const order: string[] = [];
+    await completeRecordingPreviewAcceptance(
+      result,
+      "preview-a",
+      keyStore,
+      async () => { order.push("ack"); },
+      async () => { order.push("accept"); },
+    );
+    expect(order).toEqual(["ack", "accept"]);
+    expect(keyStore.list()).toEqual([]);
   });
 
   it("持久化介质写失败时先阻止POST，当前最终路径仍保留重提入口", async () => {
@@ -641,6 +710,26 @@ describe("录音关闭流程", () => {
     expect(stopAndSave).not.toHaveBeenCalled();
     expect(persistFinalPath).toHaveBeenCalledWith("/recordings/meeting.m4a");
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("后端待确认凭据校验失败时不关闭", async () => {
+    const close = vi.fn();
+    await expect(
+      runRecordingCloseFlow(
+        { ...recordingState(), phase: "mixing" },
+        {
+          stopAndSave: vi.fn(),
+          persistFinalPath: vi.fn().mockRejectedValue(new Error("receipt write failed")),
+          waitForSnapshot: vi.fn().mockResolvedValue({
+            ...recordingState(),
+            phase: "ready",
+            final_path: "/recordings/meeting.m4a",
+          }),
+          close,
+        },
+      ),
+    ).rejects.toThrow("receipt write failed");
+    expect(close).not.toHaveBeenCalled();
   });
 
   it("请求权限时等待，进入录音后才停止", async () => {

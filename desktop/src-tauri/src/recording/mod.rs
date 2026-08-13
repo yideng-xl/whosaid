@@ -15,7 +15,7 @@ use state::{
     NativeEvent, PermissionSnapshot, RecordingError, RecordingPhase, RecordingSnapshot,
     RecordingState, RecordingStopResult as StoppedTracks, SettingsPane,
 };
-use storage::{RecordingStore, RecoverableRecording, RetryRecording};
+use storage::{PendingRecordingPreview, RecordingStore, RecoverableRecording, RetryRecording};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const STATE_EVENT: &str = "recording://state";
@@ -545,6 +545,16 @@ impl RecordingManager {
         Ok(pending)
     }
 
+    fn list_pending_previews(&self) -> Result<Vec<PendingRecordingPreview>, RecordingError> {
+        let _guard = self.coordination_lock.lock().unwrap();
+        self.store.pending_previews()
+    }
+
+    fn acknowledge_preview(&self, id: &str) -> Result<(), RecordingError> {
+        let _guard = self.coordination_lock.lock().unwrap();
+        self.store.acknowledge_preview(id)
+    }
+
     fn mix_recording(
         &self,
         recording: &RecoverableRecording,
@@ -629,6 +639,25 @@ pub fn list_recoverable_recordings(
 ) -> Result<Vec<RecoverableRecording>, String> {
     manager
         .list_recoverable()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_pending_recording_previews(
+    manager: State<'_, RecordingManager>,
+) -> Result<Vec<PendingRecordingPreview>, String> {
+    manager
+        .list_pending_previews()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn acknowledge_recording_preview(
+    id: String,
+    manager: State<'_, RecordingManager>,
+) -> Result<(), String> {
+    manager
+        .acknowledge_preview(&id)
         .map_err(|error| error.to_string())
 }
 

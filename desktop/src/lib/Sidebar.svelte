@@ -93,13 +93,13 @@
       aria-label={recordingActive
         ? `录音进行中，${formatElapsed(recordingElapsed)}`
         : recordingResultPending
-          ? "录音已保存，等待提交转写"
+          ? "录音已保存，等待试听确认"
         : "开始录音"}
       onclick={onStartRecording}
     >
       {#if recordingActive}<span class="recording-dot" aria-hidden="true"></span>{/if}
       <Icon name={recordingActive ? "record" : recordingResultPending ? "warning" : "microphone"} size={16} />
-      <span>{recordingActive ? "正在录音" : recordingResultPending ? "录音待提交" : "开始录音"}</span>
+      <span>{recordingActive ? "正在录音" : recordingResultPending ? "录音待确认" : "开始录音"}</span>
       {#if recordingActive}
         <time>{formatElapsed(recordingElapsed)}</time>
       {/if}

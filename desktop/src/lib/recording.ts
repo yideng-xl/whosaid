@@ -50,6 +50,12 @@ export interface RecoverableRecording {
   microphoneTrack: string | null;
 }
 
+export interface PendingRecordingPreview {
+  id: string;
+  finalPath: string;
+  createdAt: number;
+}
+
 export interface RecordingController {
   start: typeof startRecording;
   stop: typeof stopRecording;
@@ -107,6 +113,12 @@ export const openRecordingSettings = (pane: RecordingSettingsPane) =>
 
 export const listRecoverableRecordings = () =>
   invoke<RecoverableRecording[]>("list_recoverable_recordings");
+
+export const listPendingRecordingPreviews = () =>
+  invoke<PendingRecordingPreview[]>("list_pending_recording_previews");
+
+export const acknowledgeRecordingPreview = (id: string) =>
+  invoke<void>("acknowledge_recording_preview", { id });
 
 export const retryRecordingMix = (sessionId: string) =>
   invoke<RecordingStopResult>("retry_recording_mix", { sessionId });

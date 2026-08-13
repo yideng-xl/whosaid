@@ -1,5 +1,6 @@
 import type { JobSummary } from "./api";
 import type {
+  PendingRecordingPreview,
   RecoverableRecording,
   RecordingSnapshot,
 } from "./recording";
@@ -428,12 +429,51 @@ export interface RecoverableRecordingItem extends RecoverableRecording {
 }
 
 export interface PendingRecordingSubmission {
+  previewId?: string;
   key: string;
   label: string;
   finalPath: string;
   idempotencyKey?: string;
   busy: boolean;
   error: string | null;
+}
+
+export function pendingSubmissionsFromPreviews(
+  previews: PendingRecordingPreview[],
+  keyStore: RecordingSubmissionKeyStore,
+): PendingRecordingSubmission[] {
+  const pending: PendingRecordingSubmission[] = [];
+  for (const preview of previews) {
+    let finalPath: string;
+    try {
+      finalPath = validateFinalPath(preview.finalPath);
+    } catch {
+      continue;
+    }
+    const parts = finalPath.split(/[\\/]/);
+    const label = parts.at(-1) || "录音结果";
+    try {
+      const submission = keyStore.prepare(finalPath, label);
+      pending.push({
+        ...submission,
+        previewId: preview.id,
+        key: `path:${finalPath}`,
+        busy: false,
+        error: null,
+      });
+    } catch (error) {
+      pending.push({
+        previewId: preview.id,
+        key: `path:${finalPath}`,
+        label,
+        finalPath,
+        idempotencyKey: undefined,
+        busy: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return pending;
 }
 
 interface RecordingSubmissionStorage {
@@ -580,6 +620,20 @@ export async function completeRecordingAcceptance(
 ): Promise<void> {
   await accept(result);
   keyStore.complete(result.audioPath);
+}
+
+/** 后端 preview 凭据是权威入口：先确认移除成功，再接纳任务并清理辅助幂等键。 */
+export async function completeRecordingPreviewAcceptance(
+  result: RecordingSubmissionResult,
+  previewId: string,
+  keyStore: RecordingSubmissionKeyStore,
+  acknowledge: (id: string) => Promise<void>,
+  accept: (result: RecordingSubmissionResult) => void | Promise<void>,
+): Promise<void> {
+  const id = previewId.trim();
+  if (!id) throw new RecordingFlowError("待确认录音缺少后端标识");
+  await acknowledge(id);
+  await completeRecordingAcceptance(result, keyStore, accept);
 }
 
 export function completeAcceptedRecordingSubmission(

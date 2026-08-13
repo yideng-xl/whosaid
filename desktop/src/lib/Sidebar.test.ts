@@ -32,10 +32,10 @@ describe("Sidebar 录音入口", () => {
     });
 
     const entry = screen.getByRole("button", {
-      name: "录音已保存，等待提交转写",
+      name: "录音已保存，等待试听确认",
     });
     expect((entry as HTMLButtonElement).disabled).toBe(false);
-    expect(entry.textContent).toContain("录音待提交");
+    expect(entry.textContent).toContain("录音待确认");
 
     await fireEvent.click(entry);
     expect(onStartRecording).toHaveBeenCalledOnce();

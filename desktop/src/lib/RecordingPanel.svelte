@@ -183,6 +183,7 @@
             {/if}
             <button
               class="confirm"
+              aria-label={`确认${recording.label || fileName(recording.finalPath)}无误，开始转写`}
               disabled={recording.busy || confirmingPaths.has(recording.finalPath.trim())}
               aria-busy={recording.busy || confirmingPaths.has(recording.finalPath.trim())}
               onclick={() => confirmOnce(recording)}

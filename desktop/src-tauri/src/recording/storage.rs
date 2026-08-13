@@ -37,6 +37,14 @@ pub struct RecoverableRecording {
     pub microphone_track: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingRecordingPreview {
+    pub id: String,
+    pub final_path: String,
+    pub created_at: f64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RetryRecording {
     Pending(RecoverableRecording),
@@ -81,6 +89,8 @@ struct CompletionReceipt {
     final_path: String,
     final_size: u64,
     final_sha256: String,
+    #[serde(default)]
+    created_at: f64,
 }
 
 impl RecordingStore {
@@ -169,6 +179,75 @@ impl RecordingStore {
     ) -> Result<Option<PathBuf>, RecordingError> {
         validate_session_id(session_id)?;
         self.load_receipt(session_id)
+    }
+
+    pub fn pending_previews(&self) -> Result<Vec<PendingRecordingPreview>, RecordingError> {
+        let completed = match self.secure_completed_root(false) {
+            Ok(path) => path,
+            Err(RecordingError::Io(message)) if message.contains("不存在") => {
+                return Ok(Vec::new())
+            }
+            Err(error) => return Err(error),
+        };
+        let mut previews = Vec::new();
+        for entry in fs::read_dir(&completed).map_err(io_error)? {
+            let Ok(entry) = entry else { continue };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() || file_type.is_symlink() {
+                continue;
+            }
+            let Some(filename) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(session_id) = filename.strip_suffix(".json") else {
+                continue;
+            };
+            if validate_session_id(session_id).is_err() {
+                continue;
+            }
+            match self.read_receipt(session_id) {
+                Ok(Some((receipt, receipt_path))) => {
+                    let created_at = if receipt.created_at.is_finite() && receipt.created_at > 0.0 {
+                        receipt.created_at
+                    } else {
+                        receipt_path
+                            .metadata()
+                            .ok()
+                            .and_then(|metadata| metadata.modified().ok())
+                            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|duration| duration.as_secs_f64())
+                            .unwrap_or(1.0)
+                    };
+                    previews.push(PendingRecordingPreview {
+                        id: receipt.session_id,
+                        final_path: receipt.final_path,
+                        created_at,
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("[whosaid] 忽略损坏的待确认录音 {session_id}：{error}");
+                }
+            }
+        }
+        previews.sort_by(|left, right| {
+            left.created_at
+                .total_cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(previews)
+    }
+
+    pub fn acknowledge_preview(&self, id: &str) -> Result<(), RecordingError> {
+        validate_session_id(id)?;
+        let completed = self.secure_completed_root(false)?;
+        let receipt_path = completed.join(format!("{id}.json"));
+        // 先完整校验凭据及最终文件；验证失败绝不移除入口。
+        self.read_receipt(id)?
+            .ok_or_else(|| RecordingError::Io("待确认录音不存在".into()))?;
+        fs::remove_file(receipt_path).map_err(io_error)
     }
 
     pub(crate) fn reconcile_completed_session(
@@ -388,6 +467,7 @@ impl RecordingStore {
             final_path: path_string(&final_path),
             final_size: size,
             final_sha256: sha256.clone(),
+            created_at: recording.started_at,
         };
         // 先落长期完成凭据，再标记/删除临时会话。任一点强杀后都至少保留一条
         // 可按 session id 找回的已校验 final path。
@@ -571,6 +651,16 @@ impl RecordingStore {
     }
 
     fn load_receipt(&self, session_id: &str) -> Result<Option<PathBuf>, RecordingError> {
+        Ok(self
+            .read_receipt(session_id)?
+            .map(|(receipt, _)| PathBuf::from(receipt.final_path)))
+    }
+
+    fn read_receipt(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(CompletionReceipt, PathBuf)>, RecordingError> {
+        validate_session_id(session_id)?;
         let completed = match self.secure_completed_root(false) {
             Ok(path) => path,
             Err(RecordingError::Io(message)) if message.contains("不存在") => return Ok(None),
@@ -585,7 +675,7 @@ impl RecordingStore {
             }
             Ok(_) => {}
         }
-        let receipt: CompletionReceipt =
+        let mut receipt: CompletionReceipt =
             serde_json::from_slice(&fs::read(&receipt_path).map_err(io_error)?)
                 .map_err(|error| RecordingError::Io(format!("无法读取录音完成凭据：{error}")))?;
         if receipt.session_id != session_id {
@@ -597,7 +687,9 @@ impl RecordingStore {
         {
             return Err(RecordingError::Io("录音完成凭据对应文件已变化".into()));
         }
-        Ok(Some(final_path))
+        // 规范化后再回填，调用者永远拿不到凭据中未经校验的原始路径。
+        receipt.final_path = path_string(&final_path);
+        Ok(Some((receipt, receipt_path)))
     }
 
     fn secure_roots(&self, create: bool) -> Result<(PathBuf, PathBuf), RecordingError> {
@@ -874,6 +966,105 @@ mod tests {
 
         let recording = store.recoverable_by_id(directory_id).unwrap();
         assert_eq!(recording.session_id, directory_id);
+    }
+
+    #[test]
+    fn completed_receipt_is_authoritative_pending_preview_across_restart() {
+        let root = tempdir().unwrap();
+        let store = RecordingStore::new(root.path().to_path_buf());
+        let session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let incomplete = root.path().join(".incomplete");
+        fs::create_dir_all(&incomplete).unwrap();
+        write_session(&incomplete, session_id, false);
+        let recording = store.recoverable_by_id(session_id).unwrap();
+        let final_path = root.path().join("meeting.m4a");
+        fs::write(&final_path, b"final audio").unwrap();
+
+        store
+            .complete_with_receipt(&recording, &final_path)
+            .unwrap();
+        store.remove_completed_session(&recording).unwrap();
+
+        let restarted = RecordingStore::new(root.path().to_path_buf());
+        assert_eq!(
+            restarted.pending_previews().unwrap(),
+            vec![PendingRecordingPreview {
+                id: session_id.into(),
+                final_path: path_string(&fs::canonicalize(&final_path).unwrap()),
+                created_at: 1786492215.0,
+            },]
+        );
+    }
+
+    #[test]
+    fn multiple_pending_previews_acknowledge_only_selected_receipt() {
+        let root = tempdir().unwrap();
+        let store = RecordingStore::new(root.path().to_path_buf());
+        let incomplete = root.path().join(".incomplete");
+        fs::create_dir_all(&incomplete).unwrap();
+        for (session_id, filename) in [
+            ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "one.m4a"),
+            ("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "two.m4a"),
+        ] {
+            write_session(&incomplete, session_id, false);
+            let recording = store.recoverable_by_id(session_id).unwrap();
+            let final_path = root.path().join(filename);
+            fs::write(&final_path, filename.as_bytes()).unwrap();
+            store
+                .complete_with_receipt(&recording, &final_path)
+                .unwrap();
+            store.remove_completed_session(&recording).unwrap();
+        }
+
+        assert_eq!(store.pending_previews().unwrap().len(), 2);
+        store
+            .acknowledge_preview("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap();
+        let remaining = store.pending_previews().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    }
+
+    #[test]
+    fn receipt_persistence_failure_keeps_session_materials() {
+        let root = tempdir().unwrap();
+        let store = RecordingStore::new(root.path().to_path_buf());
+        let session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let incomplete = root.path().join(".incomplete");
+        fs::create_dir_all(&incomplete).unwrap();
+        write_session(&incomplete, session_id, false);
+        let recording = store.recoverable_by_id(session_id).unwrap();
+        let final_path = root.path().join("meeting.m4a");
+        fs::write(&final_path, b"final audio").unwrap();
+        fs::write(root.path().join(COMPLETED_DIRECTORY), b"blocked").unwrap();
+
+        assert!(store
+            .complete_with_receipt(&recording, &final_path)
+            .is_err());
+        assert!(Path::new(&recording.session_dir).is_dir());
+        assert!(Path::new(&recording.system_track).is_file());
+        assert!(store.recoverable_by_id(session_id).is_ok());
+    }
+
+    #[test]
+    fn failed_acknowledgement_keeps_pending_preview() {
+        let root = tempdir().unwrap();
+        let store = RecordingStore::new(root.path().to_path_buf());
+        let incomplete = root.path().join(".incomplete");
+        let session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        fs::create_dir_all(&incomplete).unwrap();
+        write_session(&incomplete, session_id, false);
+        let recording = store.recoverable_by_id(session_id).unwrap();
+        let final_path = root.path().join("meeting.m4a");
+        fs::write(&final_path, b"final audio").unwrap();
+        store
+            .complete_with_receipt(&recording, &final_path)
+            .unwrap();
+
+        assert!(store
+            .acknowledge_preview("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+            .is_err());
+        assert_eq!(store.pending_previews().unwrap().len(), 1);
     }
 
     fn write_session(root: &std::path::Path, session_id: &str, complete: bool) {

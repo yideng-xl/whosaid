@@ -238,6 +238,8 @@ pub fn run() {
             recording::stop_recording,
             recording::open_recording_settings,
             recording::list_recoverable_recordings,
+            recording::list_pending_recording_previews,
+            recording::acknowledge_recording_preview,
             recording::retry_recording_mix,
             close_after_recording
         ])
@@ -347,6 +349,12 @@ fn kill_service(app: &tauri::AppHandle) {
 mod path_tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn tauri_enables_local_asset_protocol_for_recording_preview() {
+        let manifest = include_str!("../Cargo.toml");
+        assert!(manifest.contains("protocol-asset"));
+    }
 
     #[test]
     fn close_allowance_is_consumed_once_per_window() {
