@@ -12,6 +12,7 @@
     onOpenModels,
     onDelete,
     onStartRecording = () => {},
+    recordingAvailable = false,
     recordingActive = false,
     recordingResultPending = false,
     recordingElapsed = 0,
@@ -25,6 +26,7 @@
     onOpenModels: () => void;
     onDelete: (id: string) => void;
     onStartRecording?: () => void;
+    recordingAvailable?: boolean;
     recordingActive?: boolean;
     recordingResultPending?: boolean;
     recordingElapsed?: number;
@@ -83,24 +85,26 @@
 </script>
 
 <aside class="sidebar">
-  <button
-    class="recording-entry"
-    class:active={recordingActive}
-    disabled={recordingActive}
-    aria-label={recordingActive
-      ? `录音进行中，${formatElapsed(recordingElapsed)}`
-      : recordingResultPending
-        ? "录音已保存，等待提交转写"
-      : "开始录音"}
-    onclick={onStartRecording}
-  >
-    {#if recordingActive}<span class="recording-dot" aria-hidden="true"></span>{/if}
-    <Icon name={recordingActive ? "record" : recordingResultPending ? "warning" : "microphone"} size={16} />
-    <span>{recordingActive ? "正在录音" : recordingResultPending ? "录音待提交" : "开始录音"}</span>
-    {#if recordingActive}
-      <time>{formatElapsed(recordingElapsed)}</time>
-    {/if}
-  </button>
+  {#if recordingAvailable}
+    <button
+      class="recording-entry"
+      class:active={recordingActive}
+      disabled={recordingActive}
+      aria-label={recordingActive
+        ? `录音进行中，${formatElapsed(recordingElapsed)}`
+        : recordingResultPending
+          ? "录音已保存，等待提交转写"
+        : "开始录音"}
+      onclick={onStartRecording}
+    >
+      {#if recordingActive}<span class="recording-dot" aria-hidden="true"></span>{/if}
+      <Icon name={recordingActive ? "record" : recordingResultPending ? "warning" : "microphone"} size={16} />
+      <span>{recordingActive ? "正在录音" : recordingResultPending ? "录音待提交" : "开始录音"}</span>
+      {#if recordingActive}
+        <time>{formatElapsed(recordingElapsed)}</time>
+      {/if}
+    </button>
+  {/if}
 
   <div class="drop-hint" class:active={dragging}>
     把音频文件拖进窗口开始转写

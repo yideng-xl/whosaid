@@ -28,7 +28,10 @@ REST/WS 与内核通信。本目录不含任何转写/说话人分离逻辑，�
 
 ## macOS 直接录音
 
-直接录音当前支持 **macOS 13+ Apple Silicon**。它使用 ScreenCaptureKit 采集全系统
+直接录音仅在 **macOS 13+ Apple Silicon** 构建中开放。Windows、Intel Mac 和其他平台
+不会显示入口，也不会注册录音监听、扫描恢复会话或请求录音权限；Rust 会按编译目标向
+前端提供能力标记。底层兼容命令仍作为防御层保留，不代表这些平台开放录音功能。
+支持的平台使用 ScreenCaptureKit 采集全系统
 声音，并可通过 AVFoundation 同时采集麦克风：
 
 - 首次使用需要允许系统录音权限；录入本人发言还需要麦克风权限。授权后 macOS 可能

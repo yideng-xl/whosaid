@@ -11,6 +11,7 @@
     closeAfterRecording,
     getRecordingPermissions,
     getRecordingState,
+    initializeDirectRecording,
     listRecoverableRecordings,
     manageAsyncListener,
     openRecordingSettings,
@@ -73,6 +74,7 @@
     })),
   );
   let recordingActionPending = $state(false);
+  let recordingAvailable = $state(false);
   let closeRequested = $state(false);
   let closePending = $state(false);
   let ignoreRecordingEvents = false;
@@ -596,6 +598,8 @@
   onMount(() => {
     let cancelled = false;
     let unlistenDrop: (() => void) | null = null;
+    let disposeRecordingState = () => {};
+    let disposeCloseRequested = () => {};
     const mountedAt = Date.now();
     pageMounted = true;
 
@@ -603,55 +607,59 @@
     theme = resolveInitialTheme();
     applyTheme(theme);
 
-    const disposeRecordingState = manageAsyncListener(
-      recordingController.watch((snapshot) => {
-        if (!cancelled) onRecordingSnapshot(snapshot);
-      }),
-      (error) => {
-        if (!cancelled) {
-          recordingSnapshots.fail(error);
-          errorBanner = `录音状态监听失败：${messageOf(error)}`;
-        }
-      },
-    );
-    const disposeCloseRequested = manageAsyncListener(
-      watchRecordingCloseRequested(() => {
-        if (!cancelled) onRecordingCloseRequested();
-      }),
-      (error) => {
-        if (!cancelled) errorBanner = `退出保护监听失败：${messageOf(error)}`;
-      },
-    );
+    void initializeDirectRecording(() => {
+      if (cancelled) return;
+      recordingAvailable = true;
+      disposeRecordingState = manageAsyncListener(
+        recordingController.watch((snapshot) => {
+          if (!cancelled) onRecordingSnapshot(snapshot);
+        }),
+        (error) => {
+          if (!cancelled) {
+            recordingSnapshots.fail(error);
+            errorBanner = `录音状态监听失败：${messageOf(error)}`;
+          }
+        },
+      );
+      disposeCloseRequested = manageAsyncListener(
+        watchRecordingCloseRequested(() => {
+          if (!cancelled) onRecordingCloseRequested();
+        }),
+        (error) => {
+          if (!cancelled) errorBanner = `退出保护监听失败：${messageOf(error)}`;
+        },
+      );
 
-    // 录音状态、权限和遗留会话不依赖 Python 转写服务，启动即并行读取，不能阻塞
-    // 现有任务列表和拖放入口。revision guard 避免晚到快照覆盖已收到的实时事件。
-    const initialRevision = recordingSnapshots.revision;
-    void getRecordingState()
-      .then((snapshot) => {
-        if (cancelled || recordingSnapshots.revision !== initialRevision) return;
-        if (!recordingSnapshots.publishBackend(snapshot, ignoreRecordingEvents)) return;
-        recordingSnapshot = recordingSnapshots.snapshot;
-        if (["requesting_permissions", "starting", "recording", "stopping", "mixing"].includes(snapshot.phase)) {
-          view = "recording";
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) errorBanner = `读取录音状态失败：${messageOf(error)}`;
-      });
-    void getRecordingPermissions()
-      .then((permissions) => {
-        if (!cancelled) recordingPermissions = permissions;
-      })
-      .catch(() => undefined);
-    void listRecoverableRecordings()
-      .then((recordings) => {
-        if (!cancelled) {
-          recoverableRecordings = makeRecoverableRecordingItems(recordings);
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) errorBanner = `扫描未完成录音失败：${messageOf(error)}`;
-      });
+      // 录音状态、权限和遗留会话只在 Rust 明确确认平台支持后读取。revision guard
+      // 避免晚到快照覆盖已经收到的实时事件。
+      const initialRevision = recordingSnapshots.revision;
+      void getRecordingState()
+        .then((snapshot) => {
+          if (cancelled || recordingSnapshots.revision !== initialRevision) return;
+          if (!recordingSnapshots.publishBackend(snapshot, ignoreRecordingEvents)) return;
+          recordingSnapshot = recordingSnapshots.snapshot;
+          if (["requesting_permissions", "starting", "recording", "stopping", "mixing"].includes(snapshot.phase)) {
+            view = "recording";
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) errorBanner = `读取录音状态失败：${messageOf(error)}`;
+        });
+      void getRecordingPermissions()
+        .then((permissions) => {
+          if (!cancelled) recordingPermissions = permissions;
+        })
+        .catch(() => undefined);
+      void listRecoverableRecordings()
+        .then((recordings) => {
+          if (!cancelled) {
+            recoverableRecordings = makeRecoverableRecordingItems(recordings);
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) errorBanner = `扫描未完成录音失败：${messageOf(error)}`;
+        });
+    });
 
     // 0) 最先注册拖放监听：不依赖端口/服务，避免任何加载失败导致监听器注册不上。
     //    submit() 内部已 guard（api 未就绪时提示），所以早注册是安全的。
@@ -809,6 +817,7 @@
       {onSelect}
       onOpenModels={() => (view = "models")}
       onStartRecording={openRecordingEntry}
+      {recordingAvailable}
       {recordingActive}
       recordingResultPending={Boolean(recordingSnapshot.final_path) || pendingRecordingSubmissions.length > 0}
       recordingElapsed={recordingSnapshot.elapsed_seconds}
@@ -821,7 +830,7 @@
       }}
     />
     <main class="content">
-      {#each recoverableRecordings as recovery (recovery.sessionId)}
+      {#each recordingAvailable ? recoverableRecordings : [] as recovery (recovery.sessionId)}
         <div class="recovery-notice" role="status">
           <span>
             发现一段未完成录音（开始于 {recoverableStartedAt(recovery)}），可尝试恢复。
@@ -835,7 +844,7 @@
         </div>
       {/each}
 
-      {#each pendingRecordingSubmissions as pending (pending.key)}
+      {#each recordingAvailable ? pendingRecordingSubmissions : [] as pending (pending.key)}
         <div class="recovery-notice pending-submission" role="status">
           <span>
             {pending.label}已保存到 {pending.finalPath}，等待提交转写。
@@ -849,7 +858,7 @@
         </div>
       {/each}
 
-      {#if view === "recording"}
+      {#if recordingAvailable && view === "recording"}
         <RecordingPanel
           snapshot={recordingSnapshot}
           onStop={async () => { await finalizeRecordingOnce(); }}

@@ -45,7 +45,10 @@ Windows 使用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)，
 
 ## macOS 直接录音
 
-直接录音当前面向 **macOS 13+ Apple Silicon**。从左侧进入录音页后，whosaid 会录制
+直接录音仅在 **macOS 13+ Apple Silicon** 构建中提供。Windows、Intel Mac 和其他平台
+不会显示录音入口，也不会初始化录音监听、扫描恢复会话或请求录音权限。平台能力由 Rust
+按应用编译目标明确告知前端；底层保留兼容命令作为防御层，不代表这些平台开放该功能。
+从左侧进入录音页后，whosaid 会录制
 全系统声音，并在麦克风可用且已授权时同时录入你的发言。麦克风被腾讯会议等应用占用、
 未授权或不可用时，系统声音仍会继续录制。
 

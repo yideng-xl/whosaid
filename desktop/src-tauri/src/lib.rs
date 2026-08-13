@@ -11,6 +11,25 @@ use tauri::{Emitter, Manager};
 
 const CLOSE_REQUESTED_EVENT: &str = "recording://close-requested";
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppCapabilities {
+    direct_recording: bool,
+}
+
+fn direct_recording_supported(is_macos: bool, is_arm64: bool) -> bool {
+    is_macos && is_arm64
+}
+
+fn app_capabilities() -> AppCapabilities {
+    AppCapabilities {
+        direct_recording: direct_recording_supported(
+            cfg!(target_os = "macos"),
+            cfg!(target_arch = "aarch64"),
+        ),
+    }
+}
+
 /// 持有 Python 子进程句柄，退出时 kill；用 Mutex<Option<..>> 便于 setup 后填入。
 struct ServiceProcess(Mutex<Option<std::process::Child>>);
 
@@ -158,6 +177,12 @@ fn get_service_port(state: tauri::State<'_, ServicePort>) -> Option<u16> {
     *state.0.lock().unwrap()
 }
 
+/// 前端以 Rust 编译目标为准决定是否初始化平台专属功能，读取失败时应隐藏该功能。
+#[tauri::command]
+fn get_app_capabilities() -> AppCapabilities {
+    app_capabilities()
+}
+
 /// 导出用：弹系统保存对话框，返回用户选择的路径（取消则 None）。
 #[tauri::command]
 async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Option<String> {
@@ -204,6 +229,7 @@ pub fn run() {
         .manage(CloseGuardState::default())
         .invoke_handler(tauri::generate_handler![
             get_service_port,
+            get_app_capabilities,
             pick_save_path,
             write_file,
             recording::get_recording_state,
@@ -438,6 +464,22 @@ mod path_tests {
         assert_eq!(
             got,
             PathBuf::from(r"C:\Users\test\AppData\Roaming\com.yideng.whosaid")
+        );
+    }
+
+    #[test]
+    fn direct_recording_requires_macos_on_arm64() {
+        assert!(direct_recording_supported(true, true));
+        assert!(!direct_recording_supported(true, false));
+        assert!(!direct_recording_supported(false, true));
+        assert!(!direct_recording_supported(false, false));
+    }
+
+    #[test]
+    fn compiled_recording_capability_matches_target() {
+        assert_eq!(
+            app_capabilities().direct_recording,
+            cfg!(target_os = "macos") && cfg!(target_arch = "aarch64")
         );
     }
 

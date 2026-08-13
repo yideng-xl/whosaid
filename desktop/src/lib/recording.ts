@@ -56,6 +56,32 @@ export interface RecordingController {
   watch: typeof watchRecording;
 }
 
+export interface AppCapabilities {
+  directRecording: boolean;
+}
+
+export const getAppCapabilities = () =>
+  invoke<AppCapabilities>("get_app_capabilities");
+
+/**
+ * 录音是平台专属能力：只有 Rust 明确确认支持后才允许页面注册监听或读取录音状态。
+ * 能力读取失败时按不支持处理，避免其他平台短暂显示入口或误触权限请求。
+ */
+export async function initializeDirectRecording(
+  initialize: () => void,
+  getCapabilities: () => Promise<AppCapabilities> = getAppCapabilities,
+): Promise<boolean> {
+  let capabilities: AppCapabilities;
+  try {
+    capabilities = await getCapabilities();
+  } catch {
+    return false;
+  }
+  if (!capabilities.directRecording) return false;
+  initialize();
+  return true;
+}
+
 export const startRecording = () =>
   invoke<RecordingSnapshot>("start_recording");
 

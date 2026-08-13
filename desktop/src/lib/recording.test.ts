@@ -1,5 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
-import { manageAsyncListener } from "./recording";
+import {
+  initializeDirectRecording,
+  manageAsyncListener,
+} from "./recording";
+
+describe("直接录音平台门禁", () => {
+  it("不支持的平台不会执行任何录音初始化", async () => {
+    const initialize = vi.fn();
+
+    await expect(initializeDirectRecording(
+      initialize,
+      async () => ({ directRecording: false }),
+    )).resolves.toBe(false);
+
+    expect(initialize).not.toHaveBeenCalled();
+  });
+
+  it("能力读取失败时关闭功能且不执行任何录音初始化", async () => {
+    const initialize = vi.fn();
+
+    await expect(initializeDirectRecording(
+      initialize,
+      async () => { throw new Error("capability unavailable"); },
+    )).resolves.toBe(false);
+
+    expect(initialize).not.toHaveBeenCalled();
+  });
+
+  it("支持的平台才执行录音初始化", async () => {
+    const initialize = vi.fn();
+
+    await expect(initializeDirectRecording(
+      initialize,
+      async () => ({ directRecording: true }),
+    )).resolves.toBe(true);
+
+    expect(initialize).toHaveBeenCalledOnce();
+  });
+});
 
 describe("录音事件监听生命周期", () => {
   it("组件先销毁时，晚返回的监听器会立即解除", async () => {

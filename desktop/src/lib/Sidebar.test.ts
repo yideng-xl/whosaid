@@ -3,6 +3,20 @@ import { describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar.svelte";
 
 describe("Sidebar 录音入口", () => {
+  it("能力确认前和不支持的平台不显示录音入口", () => {
+    render(Sidebar, {
+      jobs: [],
+      selectedJobId: null,
+      dragging: false,
+      onSelect: vi.fn(),
+      onOpenModels: vi.fn(),
+      onDelete: vi.fn(),
+      recordingAvailable: false,
+    });
+
+    expect(screen.queryByRole("button", { name: "开始录音" })).toBeNull();
+  });
+
   it("最终文件待提交时保留可返回录音结果的入口", async () => {
     const onStartRecording = vi.fn();
     render(Sidebar, {
@@ -13,6 +27,7 @@ describe("Sidebar 录音入口", () => {
       onOpenModels: vi.fn(),
       onDelete: vi.fn(),
       onStartRecording,
+      recordingAvailable: true,
       recordingResultPending: true,
     });
 
