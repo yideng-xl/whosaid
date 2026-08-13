@@ -118,6 +118,28 @@ export function prependRecordingJob(
   return [job, ...jobs.filter((existing) => existing.id !== job.id)];
 }
 
+export function acceptRecordingJobById(
+  jobs: JobSummary[],
+  result: RecordingSubmissionResult,
+  createdAt = Date.now() / 1000,
+): { jobs: JobSummary[]; job: JobSummary; inserted: boolean } {
+  const existing = jobs.find((job) => job.id === result.jobId);
+  if (existing) return { jobs, job: existing, inserted: false };
+  const job = createRecordingJob(result, createdAt);
+  return { jobs: [job, ...jobs], job, inserted: true };
+}
+
+export function shouldSubscribeRecordingJob(
+  job: JobSummary,
+  watching: ReadonlySet<string>,
+): boolean {
+  return (
+    job.status !== "done" &&
+    job.status !== "failed" &&
+    !watching.has(job.id)
+  );
+}
+
 export function mergeBackendRecordingSnapshot(
   current: RecordingSnapshot,
   incoming: RecordingSnapshot,

@@ -25,20 +25,20 @@
     type RecordingStopResult,
   } from "$lib/recording";
   import {
+    acceptRecordingJobById,
     beginRecoverableRecording,
     completeAcceptedRecordingSubmission,
     completeRecordingPreviewAcceptance,
     completeRecoverableRecording,
-    createRecordingJob,
     failRecoverableRecording,
     makeRecoverableRecordingItems,
-    prependRecordingJob,
     pendingSubmissionsFromPreviews,
     RecordingCloseGuard,
     RecordingSnapshotCoordinator,
     RecordingSubmissionKeyStore,
     RecordingSubmissionRegistry,
     runRecordingCloseFlow,
+    shouldSubscribeRecordingJob,
     transitionRecordingSubmissionFailure,
     upsertPendingRecordingSubmission,
     type PendingRecordingSubmission,
@@ -171,8 +171,9 @@
     );
     pendingRecordingSubmissions = completed.pending;
     submissionFailureFinalPath = completed.submissionFailureFinalPath;
-    const job = createRecordingJob(result);
-    jobs = prependRecordingJob(jobs, job);
+    const acceptedJob = acceptRecordingJobById(jobs, result);
+    jobs = acceptedJob.jobs;
+    const job = acceptedJob.job;
     selectedJobId = job.id;
     view = "transcript";
     subscribe(job);
@@ -629,8 +630,7 @@
   });
 
   function subscribe(job: JobSummary) {
-    if (!api || watching.has(job.id)) return;
-    if (job.status === "done" || job.status === "failed") return;
+    if (!api || !shouldSubscribeRecordingJob(job, watching)) return;
     watching.add(job.id);
     try {
       api.watchProgress(job.id, (m) => {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  acceptRecordingJobById,
   beginRecoverableRecording,
   completeAcceptedRecordingSubmission,
   completeRecordingPreviewAcceptance,
@@ -22,6 +23,7 @@ import {
   retainFailedRecordingSubmission,
   runRecordingCloseFlow,
   saveRecordingForPreview,
+  shouldSubscribeRecordingJob,
   submitFinalizedRecording,
   transitionRecordingSubmissionFailure,
   upsertPendingRecordingSubmission,
@@ -466,6 +468,67 @@ describe("录音结束后的试听确认", () => {
       created_at: 1_723_438_800,
     });
     expect(prependRecordingJob([job], job)).toEqual([job]);
+  });
+
+  it("相同jobId已有进度时保留全部状态、顺序和对象", () => {
+    const existing = {
+      id: "job-existing",
+      status: "transcribing",
+      progress: 0.68,
+      error: "一次可恢复警告",
+      audio_path: "/recordings/original.m4a",
+      created_at: 100,
+    };
+    const other = { ...existing, id: "job-newer", created_at: 200 };
+    const jobs = [other, existing];
+
+    const accepted = acceptRecordingJobById(
+      jobs,
+      { jobId: existing.id, audioPath: "/recordings/retry.m4a" },
+      999,
+    );
+
+    expect(accepted.inserted).toBe(false);
+    expect(accepted.jobs).toBe(jobs);
+    expect(accepted.job).toBe(existing);
+    expect(accepted.jobs).toEqual([other, existing]);
+  });
+
+  it("相同jobId已完成时不重置为queued且不重新订阅", () => {
+    const completed = {
+      id: "job-done",
+      status: "done",
+      progress: 1,
+      error: null,
+      audio_path: "/recordings/done.m4a",
+      created_at: 321,
+    };
+    const accepted = acceptRecordingJobById(
+      [completed],
+      { jobId: completed.id, audioPath: "/recordings/retry.m4a" },
+      999,
+    );
+
+    expect(accepted.job).toBe(completed);
+    expect(accepted.jobs).toEqual([completed]);
+    expect(shouldSubscribeRecordingJob(completed, new Set())).toBe(false);
+  });
+
+  it("已有非终态任务未订阅时可补订阅，watching中不重复", () => {
+    const job = {
+      id: "job-running",
+      status: "diarizing",
+      progress: 0.8,
+      error: null,
+      audio_path: "/recordings/running.m4a",
+      created_at: 123,
+    };
+
+    expect(shouldSubscribeRecordingJob(job, new Set())).toBe(true);
+    expect(shouldSubscribeRecordingJob(job, new Set([job.id]))).toBe(false);
+    expect(shouldSubscribeRecordingJob(
+      { ...job, status: "failed" }, new Set(),
+    )).toBe(false);
   });
 
   it("忽略提交期间或提交结束后晚到的快照", () => {
