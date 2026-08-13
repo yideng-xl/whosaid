@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from .jobs import IdempotencyConflict, JobQueue
@@ -14,7 +14,12 @@ from .models import ModelRegistry
 class SubmitReq(BaseModel):
     audio_path: str
     num_speakers: int | None = None  # 用户预计说话人数，约束 pyannote 分离（缺省=自动）
-    idempotency_key: str | None = None
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
 
 class RenameReq(BaseModel):

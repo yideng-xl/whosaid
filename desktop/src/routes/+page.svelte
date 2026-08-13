@@ -23,6 +23,7 @@
   import {
     beginRecoverableRecording,
     completeAcceptedRecordingSubmission,
+    completeRecordingAcceptance,
     completeRecoverableRecording,
     createRecordingJob,
     failRecoverableRecording,
@@ -166,7 +167,6 @@
   }
 
   function acceptSubmissionResult(result: RecordingSubmissionResult) {
-    recordingSubmissionKeys.complete(result.audioPath);
     const completed = completeAcceptedRecordingSubmission(
       recordingSnapshot,
       pendingRecordingSubmissions,
@@ -235,9 +235,14 @@
       const result = await recordingSubmissions.submitAndAccept(
         stopped.final_path,
         api,
-        async (accepted) => {
-          if (pageMounted) acceptSubmissionResult(accepted);
-        },
+        (accepted) => completeRecordingAcceptance(
+          accepted,
+          recordingSubmissionKeys,
+          async (value) => {
+            if (!pageMounted) throw new Error("录音页面已销毁，暂缓接纳任务");
+            acceptSubmissionResult(value);
+          },
+        ),
         submission.idempotencyKey,
       );
       return result;
@@ -277,9 +282,14 @@
       await recordingSubmissions.submitAndAccept(
         finalPath,
         api,
-        async (accepted) => {
-          if (pageMounted) acceptSubmissionResult(accepted);
-        },
+        (accepted) => completeRecordingAcceptance(
+          accepted,
+          recordingSubmissionKeys,
+          async (value) => {
+            if (!pageMounted) throw new Error("录音页面已销毁，暂缓接纳任务");
+            acceptSubmissionResult(value);
+          },
+        ),
         submission.idempotencyKey,
       );
     } catch (error) {
@@ -376,9 +386,14 @@
       await recordingSubmissions.submitAndAccept(
         finalPath,
         api,
-        async (accepted) => {
-          if (pageMounted) acceptSubmissionResult(accepted);
-        },
+        (accepted) => completeRecordingAcceptance(
+          accepted,
+          recordingSubmissionKeys,
+          async (value) => {
+            if (!pageMounted) throw new Error("录音页面已销毁，暂缓接纳任务");
+            acceptSubmissionResult(value);
+          },
+        ),
         submission.idempotencyKey,
       );
       if (!pageMounted) return;
@@ -431,9 +446,14 @@
       await recordingSubmissions.submitAndAccept(
         pending.finalPath,
         api,
-        async (accepted) => {
-          if (pageMounted) acceptSubmissionResult(accepted);
-        },
+        (accepted) => completeRecordingAcceptance(
+          accepted,
+          recordingSubmissionKeys,
+          async (value) => {
+            if (!pageMounted) throw new Error("录音页面已销毁，暂缓接纳任务");
+            acceptSubmissionResult(value);
+          },
+        ),
         submission.idempotencyKey,
       );
       if (!pageMounted) return;
@@ -471,9 +491,14 @@
       await recordingSubmissions.submitAndAccept(
         finalPath,
         api,
-        async (accepted) => {
-          if (pageMounted) acceptSubmissionResult(accepted);
-        },
+        (accepted) => completeRecordingAcceptance(
+          accepted,
+          recordingSubmissionKeys,
+          async (value) => {
+            if (!pageMounted) throw new Error("录音页面已销毁，暂缓接纳任务");
+            acceptSubmissionResult(value);
+          },
+        ),
         submission.idempotencyKey,
       );
     } catch (error) {
@@ -710,12 +735,18 @@
     if (!api || watching.has(job.id)) return;
     if (job.status === "done" || job.status === "failed") return;
     watching.add(job.id);
-    api.watchProgress(job.id, (m) => {
-      jobs = jobs.map((j) =>
-        j.id === job.id ? { ...j, status: m.status, progress: m.progress, error: m.error } : j
-      );
-      if (m.status === "done" || m.status === "failed") watching.delete(job.id);
-    });
+    try {
+      api.watchProgress(job.id, (m) => {
+        jobs = jobs.map((j) =>
+          j.id === job.id ? { ...j, status: m.status, progress: m.progress, error: m.error } : j
+        );
+        if (m.status === "done" || m.status === "failed") watching.delete(job.id);
+      });
+    } catch (error) {
+      // WebSocket 构造同步失败时撤销占位，让同一幂等任务重试接纳时能再次订阅。
+      watching.delete(job.id);
+      throw error;
+    }
   }
 
   async function submit(path: string) {

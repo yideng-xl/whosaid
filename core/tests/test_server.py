@@ -60,8 +60,10 @@ def test_submit_and_fetch_job(tmp_path):
 
 def test_submit_accepts_optional_idempotency_key_and_returns_existing_job(tmp_path):
     c = make_client(tmp_path)
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"audio")
     payload = {
-        "audio_path": "/recordings/meeting.m4a",
+        "audio_path": str(audio),
         "idempotency_key": "recording:response-lost",
     }
     # 首次响应由客户端丢弃；再次 POST 必须接回同一服务端任务。
@@ -80,14 +82,27 @@ def test_submit_without_key_remains_non_idempotent(tmp_path):
 
 def test_reusing_key_for_different_audio_is_rejected(tmp_path):
     c = make_client(tmp_path)
+    first = tmp_path / "a.m4a"
+    second = tmp_path / "b.m4a"
+    first.write_bytes(b"a")
+    second.write_bytes(b"b")
     key = "recording:one-operation"
     assert c.post(
-        "/jobs", json={"audio_path": "/x/a.m4a", "idempotency_key": key}
+        "/jobs", json={"audio_path": str(first), "idempotency_key": key}
     ).status_code == 200
     response = c.post(
-        "/jobs", json={"audio_path": "/x/b.m4a", "idempotency_key": key}
+        "/jobs", json={"audio_path": str(second), "idempotency_key": key}
     )
     assert response.status_code == 409
+
+
+def test_submit_rejects_invalid_idempotency_keys(tmp_path):
+    c = make_client(tmp_path)
+    for key in ("", "has space", "中文", "x" * 129):
+        response = c.post(
+            "/jobs", json={"audio_path": "/x/a.m4a", "idempotency_key": key}
+        )
+        assert response.status_code == 422
 
 
 def test_get_job_returns_plain_txt_without_speaker_prefix(tmp_path):

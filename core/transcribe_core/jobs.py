@@ -4,9 +4,11 @@ from __future__ import annotations
 import itertools
 import os
 import queue as _q
+import re
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from .backend import InferenceBackend
@@ -21,6 +23,7 @@ _ids = itertools.count(1)
 # 全局单并发闸门：本机算力/显存有限，任意时刻至多一个 run_job 处于推理段
 # （transcribe + diarize），避免多任务并发同时抢占本地模型资源。
 _infer_gate = threading.Semaphore(1)
+_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 @dataclass
@@ -53,6 +56,7 @@ class JobQueue:
                  on_change: Callable[[Job], None] | None = None,
                  duration_fn: Callable[[str], float] | None = None,
                  extract_fn: Callable[[str, float, float], str] | None = None,
+                 thread_factory: Callable[..., threading.Thread] = threading.Thread,
                  chunk_sec: float = 120.0):
         # backend：固定后端（向后兼容原有调用方式）
         # backend_factory + registry：按"当前启用模型"动态构造后端，
@@ -67,6 +71,7 @@ class JobQueue:
         # duration_fn/extract_fn：可注入的音频 IO 钩子（便于测试；默认惰性 import 真实实现）
         self._duration_fn = duration_fn
         self._extract_fn = extract_fn
+        self._thread_factory = thread_factory
         self._chunk_sec = chunk_sec
         self._jobs: dict[str, Job] = {}
         self._subscribers: dict[str, list] = {}
@@ -154,9 +159,12 @@ class JobQueue:
     def submit_async(self, audio_path: str, num_speakers: int | None = None,
                      idempotency_key: str | None = None) -> str:
         """提交任务并立即返回 job_id，实际转写在后台线程执行，可通过 subscribe 拿进度。"""
-        key = idempotency_key.strip() if idempotency_key is not None else None
-        if idempotency_key is not None and not key:
-            raise ValueError("幂等键不能为空")
+        key = idempotency_key
+        if key is not None and _IDEMPOTENCY_KEY.fullmatch(key) is None:
+            raise ValueError("幂等键只能包含字母、数字、点、下划线、冒号或连字符，且最长 128 字符")
+        canonical_audio_path = (
+            self._canonical_audio_path(audio_path) if key is not None else audio_path
+        )
         with self._lock:
             if key is not None:
                 existing_id = self._idempotency_jobs.get(key)
@@ -165,15 +173,15 @@ class JobQueue:
                     if existing is None:
                         # 防御旧版直接改 _jobs 的调用；删除任务后键不能永久占位。
                         del self._idempotency_jobs[key]
-                    elif (existing.audio_path, existing.num_speakers) != (
-                        audio_path, num_speakers
+                    elif (self._existing_audio_identity(existing.audio_path), existing.num_speakers) != (
+                        canonical_audio_path, num_speakers
                     ):
                         raise IdempotencyConflict("幂等键已用于不同的转写参数")
                     else:
                         return existing_id
 
             jid = self._new_id()
-            job = Job(id=jid, audio_path=audio_path, status="queued",
+            job = Job(id=jid, audio_path=canonical_audio_path, status="queued",
                       progress=0.0, transcript=None, error=None, created_at=time.time(),
                       num_speakers=num_speakers, idempotency_key=key)
             self._jobs[jid] = job
@@ -191,8 +199,44 @@ class JobQueue:
                 if key is not None:
                     self._idempotency_jobs.pop(key, None)
                 raise
-        threading.Thread(target=self.run_job, args=(job, self._emit), daemon=True).start()
+            worker = self._thread_factory(
+                target=self.run_job, args=(job, self._emit), daemon=True
+            )
+            try:
+                # start 也属于提交事务：锁未释放前，不允许同键请求观察到尚未启动的 queued。
+                worker.start()
+            except Exception as error:
+                self._inflight.discard(jid)
+                if key is not None and self._idempotency_jobs.get(key) == jid:
+                    del self._idempotency_jobs[key]
+                job.idempotency_key = None
+                job.status = "failed"
+                job.error = f"无法启动转写线程：{error}"
+                try:
+                    self._notify(job)
+                except Exception:
+                    # 内存已解除幂等键；旧 queued 落盘即使未能覆盖，load_all 也会清除其键。
+                    pass
+                raise
         return jid
+
+    @staticmethod
+    def _canonical_audio_path(audio_path: str) -> str:
+        try:
+            resolved = Path(audio_path).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ValueError(f"音频文件不存在或无法解析：{audio_path}") from error
+        if not resolved.is_file():
+            raise ValueError(f"音频路径不是普通文件：{audio_path}")
+        return str(resolved)
+
+    @staticmethod
+    def _existing_audio_identity(audio_path: str) -> str | None:
+        """旧 Job 路径仍存在时升级为真实路径；已失效时无法证明与新文件相同。"""
+        try:
+            return str(Path(audio_path).expanduser().resolve(strict=True))
+        except (OSError, RuntimeError):
+            return None
 
     def remove(self, job_id: str) -> Job | None:
         """移除终态任务，并同步释放其幂等键。调用方负责先校验任务状态。"""

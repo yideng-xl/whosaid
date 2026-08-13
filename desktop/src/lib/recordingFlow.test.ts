@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   beginRecoverableRecording,
   completeAcceptedRecordingSubmission,
+  completeRecordingAcceptance,
   completeRecoverableRecording,
   createRecordingJob,
   failRecoverableRecording,
@@ -176,6 +177,91 @@ describe("录音结束后的自动提交", () => {
     const second = keyStore.prepare("/recordings/b/meeting.m4a", "第二段");
     expect(first.idempotencyKey).not.toBe(second.idempotencyKey);
     expect(keyStore.list()).toEqual([first, second]);
+  });
+
+  it("读取存储异常时模块初始化不崩，并可在当前会话继续建立提交", () => {
+    const storage = new MemoryStorage();
+    storage.getItem = () => { throw new Error("storage denied"); };
+    const keyStore = new RecordingSubmissionKeyStore(
+      storage,
+      () => "recording:memory-session",
+    );
+    expect(keyStore.list()).toEqual([]);
+    expect(keyStore.prepare("/recordings/memory.m4a", "录音结果")).toMatchObject({
+      idempotencyKey: "recording:memory-session",
+    });
+  });
+
+  it("清理存储异常不回滚已接纳任务，当前会话不会再次显示pending", async () => {
+    const storage = new MemoryStorage();
+    const keyStore = new RecordingSubmissionKeyStore(storage, () => "recording:key");
+    keyStore.prepare("/recordings/accepted.m4a", "录音结果");
+    storage.removeItem = () => { throw new Error("remove denied"); };
+    const effect = vi.fn();
+    await expect(completeRecordingAcceptance(
+      { jobId: "job-one", audioPath: "/recordings/accepted.m4a" },
+      keyStore,
+      effect,
+    )).resolves.toBeUndefined();
+    expect(effect).toHaveBeenCalledOnce();
+    expect(keyStore.list()).toEqual([]);
+  });
+
+  it("接纳一条后更新剩余清单写失败，也不回滚任务接纳", async () => {
+    const storage = new MemoryStorage();
+    const keys = ["recording:first", "recording:second"];
+    const keyStore = new RecordingSubmissionKeyStore(
+      storage,
+      () => keys.shift()!,
+    );
+    keyStore.prepare("/recordings/first.m4a", "第一段");
+    const second = keyStore.prepare("/recordings/second.m4a", "第二段");
+    storage.setItem = () => { throw new Error("write denied"); };
+    const effect = vi.fn();
+    await expect(completeRecordingAcceptance(
+      { jobId: "job-first", audioPath: "/recordings/first.m4a" },
+      keyStore,
+      effect,
+    )).resolves.toBeUndefined();
+    expect(effect).toHaveBeenCalledOnce();
+    expect(keyStore.list()).toEqual([second]);
+  });
+
+  it("接纳副作用失败时保留key，重试接回原job且最终只接纳一次", async () => {
+    const storage = new MemoryStorage();
+    const keyStore = new RecordingSubmissionKeyStore(
+      storage,
+      () => "recording:accept-retry",
+    );
+    const pending = keyStore.prepare("/recordings/accept.m4a", "录音结果");
+    const api = { submitJob: vi.fn().mockResolvedValue("job-existing") };
+    const registry = new RecordingSubmissionRegistry();
+    const failedEffect = vi.fn(() => { throw new Error("subscribe failed"); });
+
+    await expect(registry.submitAndAccept(
+      pending.finalPath,
+      api,
+      (result) => completeRecordingAcceptance(result, keyStore, failedEffect),
+      pending.idempotencyKey,
+    )).rejects.toThrow("subscribe failed");
+    expect(keyStore.list()).toEqual([pending]);
+
+    const successfulEffect = vi.fn();
+    await registry.submitAndAccept(
+      pending.finalPath,
+      api,
+      (result) => completeRecordingAcceptance(result, keyStore, successfulEffect),
+      pending.idempotencyKey,
+    );
+    expect(api.submitJob).toHaveBeenCalledTimes(2);
+    expect(api.submitJob).toHaveBeenNthCalledWith(
+      1, pending.finalPath, undefined, pending.idempotencyKey,
+    );
+    expect(api.submitJob).toHaveBeenNthCalledWith(
+      2, pending.finalPath, undefined, pending.idempotencyKey,
+    );
+    expect(successfulEffect).toHaveBeenCalledOnce();
+    expect(keyStore.list()).toEqual([]);
   });
 
   it("创建与拖入音频一致的排队任务并避免重复插入", () => {

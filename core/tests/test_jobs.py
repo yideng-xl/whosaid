@@ -174,6 +174,8 @@ def test_same_idempotency_key_creates_one_job_and_one_runner(tmp_path):
             return super().diarize(audio_path, num_speakers)
 
     store = JobStore(str(tmp_path))
+    audio = tmp_path / "a.m4a"
+    audio.write_bytes(b"audio")
     q = JobQueue(
         BlockingBackend(),
         on_change=store.save,
@@ -181,9 +183,9 @@ def test_same_idempotency_key_creates_one_job_and_one_runner(tmp_path):
         extract_fn=lambda src, start, dur: src,
     )
     try:
-        first = q.submit_async("/recordings/a.m4a", idempotency_key="recording:req-1")
+        first = q.submit_async(str(audio), idempotency_key="recording:req-1")
         assert entered.wait(timeout=1)
-        retried = q.submit_async("/recordings/a.m4a", idempotency_key="recording:req-1")
+        retried = q.submit_async(str(audio), idempotency_key="recording:req-1")
         assert retried == first
         assert len(q.list()) == 1
         assert calls == 1
@@ -205,6 +207,8 @@ def test_concurrent_same_idempotency_key_is_atomic(tmp_path):
             return super().diarize(audio_path, num_speakers)
 
     store = JobStore(str(tmp_path))
+    audio = tmp_path / "a.m4a"
+    audio.write_bytes(b"audio")
     q = JobQueue(
         BlockingBackend(),
         on_change=store.save,
@@ -216,7 +220,7 @@ def test_concurrent_same_idempotency_key_is_atomic(tmp_path):
 
     def submit_once():
         barrier.wait()
-        ids.append(q.submit_async("/recordings/a.m4a", idempotency_key="recording:req-race"))
+        ids.append(q.submit_async(str(audio), idempotency_key="recording:req-race"))
 
     threads = [threading.Thread(target=submit_once) for _ in range(8)]
     for thread in threads:
@@ -239,6 +243,8 @@ def test_concurrent_same_idempotency_key_is_atomic(tmp_path):
 def test_idempotency_key_survives_restart_without_new_runner(tmp_path):
     release = threading.Event()
     store = JobStore(str(tmp_path))
+    audio = tmp_path / "a.m4a"
+    audio.write_bytes(b"audio")
 
     class BlockingBackend(FakeBackend):
         def diarize(self, audio_path, num_speakers):
@@ -252,7 +258,7 @@ def test_idempotency_key_survives_restart_without_new_runner(tmp_path):
         extract_fn=lambda src, start, dur: src,
     )
     first_id = first_queue.submit_async(
-        "/recordings/a.m4a", idempotency_key="recording:req-restart"
+        str(audio), idempotency_key="recording:req-restart"
     )
     loaded = JobStore(str(tmp_path)).load_all()
     second_calls = 0
@@ -272,7 +278,7 @@ def test_idempotency_key_survives_restart_without_new_runner(tmp_path):
     second_queue.preload(loaded)
     try:
         assert second_queue.submit_async(
-            "/recordings/a.m4a", idempotency_key="recording:req-restart"
+            str(audio), idempotency_key="recording:req-restart"
         ) == first_id
         assert second_calls == 0
         assert len(second_queue.list()) == 1
@@ -280,17 +286,121 @@ def test_idempotency_key_survives_restart_without_new_runner(tmp_path):
         release.set()
 
 
-def test_different_or_missing_keys_keep_existing_submit_behavior():
+def test_different_or_missing_keys_keep_existing_submit_behavior(tmp_path):
+    audio = tmp_path / "a.m4a"
+    audio.write_bytes(b"audio")
     q = JobQueue(
         FakeBackend(),
         duration_fn=lambda p: 1.0,
         extract_fn=lambda src, start, dur: src,
     )
-    keyed_a = q.submit_async("/recordings/a.m4a", idempotency_key="recording:a")
-    keyed_b = q.submit_async("/recordings/a.m4a", idempotency_key="recording:b")
-    legacy_a = q.submit_async("/recordings/a.m4a")
-    legacy_b = q.submit_async("/recordings/a.m4a")
+    keyed_a = q.submit_async(str(audio), idempotency_key="recording:a")
+    keyed_b = q.submit_async(str(audio), idempotency_key="recording:b")
+    legacy_a = q.submit_async(str(audio))
+    legacy_b = q.submit_async(str(audio))
     assert len({keyed_a, keyed_b, legacy_a, legacy_b}) == 4
+
+
+def test_thread_start_failure_rolls_back_key_and_retry_starts_new_runner(tmp_path):
+    audio = tmp_path / "recording.m4a"
+    audio.write_bytes(b"audio")
+    store = JobStore(str(tmp_path / "data"))
+    starts = 0
+
+    class FailingThread:
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    def thread_factory(*, target, args, daemon):
+        nonlocal starts
+        starts += 1
+        if starts == 1:
+            return FailingThread()
+        return threading.Thread(target=target, args=args, daemon=daemon)
+
+    q = JobQueue(
+        FakeBackend(), on_change=store.save, thread_factory=thread_factory,
+        duration_fn=lambda p: 1.0, extract_fn=lambda src, start, dur: src,
+    )
+    with pytest.raises(RuntimeError, match="thread unavailable"):
+        q.submit_async(str(audio), idempotency_key="recording:start-failure")
+
+    failed = q.list()[0]
+    assert failed.status == "failed"
+    assert "无法启动转写线程" in failed.error
+    assert failed.idempotency_key is None
+    assert failed.id not in q._inflight
+
+    reloaded = JobStore(str(tmp_path / "data")).load_all()
+    assert len(reloaded) == 1
+    assert reloaded[0].status == "failed"
+    assert reloaded[0].idempotency_key is None
+
+    retry_id = q.submit_async(
+        str(audio), idempotency_key="recording:start-failure"
+    )
+    assert retry_id != failed.id
+    for _ in range(50):
+        if q.get(retry_id).status in ("done", "failed"):
+            break
+        time.sleep(0.01)
+    assert q.get(retry_id).status == "done"
+    assert starts == 2
+
+
+def test_keyed_submit_uses_canonical_path_identity(tmp_path):
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"audio")
+    q = JobQueue(
+        FakeBackend(), duration_fn=lambda p: 1.0,
+        extract_fn=lambda src, start, dur: src,
+    )
+    first = q.submit_async(
+        str(folder / ".." / "meeting.m4a"), idempotency_key="recording:path"
+    )
+    second = q.submit_async(str(audio), idempotency_key="recording:path")
+    assert second == first
+    assert q.get(first).audio_path == str(audio.resolve(strict=True))
+
+
+def test_retargeted_symlink_conflicts_with_existing_key(tmp_path):
+    first_audio = tmp_path / "first.m4a"
+    second_audio = tmp_path / "second.m4a"
+    first_audio.write_bytes(b"first")
+    second_audio.write_bytes(b"second")
+    alias = tmp_path / "current.m4a"
+    alias.symlink_to(first_audio)
+    q = JobQueue(
+        FakeBackend(), duration_fn=lambda p: 1.0,
+        extract_fn=lambda src, start, dur: src,
+    )
+    q.submit_async(str(alias), idempotency_key="recording:retarget")
+    alias.unlink()
+    alias.symlink_to(second_audio)
+    with pytest.raises(ValueError, match="不同的转写参数"):
+        q.submit_async(str(alias), idempotency_key="recording:retarget")
+
+
+def test_missing_legacy_job_path_conflicts_instead_of_reusing_key(tmp_path):
+    audio = tmp_path / "replacement.m4a"
+    audio.write_bytes(b"new")
+    q = JobQueue(FakeBackend())
+    q.preload([Job(
+        id="legacy", audio_path=str(tmp_path / "missing.m4a"), status="failed",
+        progress=0.0, transcript=None, error="old",
+        idempotency_key="recording:legacy-path",
+    )])
+    with pytest.raises(ValueError, match="不同的转写参数"):
+        q.submit_async(str(audio), idempotency_key="recording:legacy-path")
+
+
+@pytest.mark.parametrize("key", ["", "has space", "中文", "x" * 129])
+def test_queue_rejects_invalid_idempotency_key(key):
+    q = JobQueue(FakeBackend())
+    with pytest.raises(ValueError, match="幂等键"):
+        q.submit_async("/x/a.m4a", idempotency_key=key)
 
 
 def test_chunked_run_covers_full_duration_with_offsets():

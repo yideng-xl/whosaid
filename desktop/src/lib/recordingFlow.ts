@@ -430,6 +430,9 @@ const RECORDING_SUBMISSIONS_STORAGE_KEY =
  * 这里不接管普通拖入文件，避免把“同一路径再次手工转写”误判成重复请求。
  */
 export class RecordingSubmissionKeyStore {
+  private memory: PersistedRecordingSubmission[] | null = null;
+  private storageReadable = true;
+
   constructor(
     private readonly storage: RecordingSubmissionStorage,
     private readonly makeKey: () => string = () =>
@@ -437,11 +440,25 @@ export class RecordingSubmissionKeyStore {
   ) {}
 
   list(): PersistedRecordingSubmission[] {
-    const encoded = this.storage.getItem(RECORDING_SUBMISSIONS_STORAGE_KEY);
-    if (!encoded) return [];
+    if (this.memory !== null) return [...this.memory];
+    let encoded: string | null;
+    try {
+      encoded = this.storage.getItem(RECORDING_SUBMISSIONS_STORAGE_KEY);
+    } catch {
+      this.storageReadable = false;
+      this.memory = [];
+      return [];
+    }
+    if (!encoded) {
+      this.memory = [];
+      return [];
+    }
     try {
       const decoded: unknown = JSON.parse(encoded);
-      if (!Array.isArray(decoded)) return [];
+      if (!Array.isArray(decoded)) {
+        this.memory = [];
+        return [];
+      }
       const byPath = new Map<string, PersistedRecordingSubmission>();
       for (const candidate of decoded) {
         if (!candidate || typeof candidate !== "object") continue;
@@ -458,8 +475,10 @@ export class RecordingSubmissionKeyStore {
         if (!finalPath || !idempotencyKey) continue;
         byPath.set(finalPath, { finalPath, idempotencyKey, label });
       }
-      return [...byPath.values()];
+      this.memory = [...byPath.values()];
+      return [...this.memory];
     } catch {
+      this.memory = [];
       return [];
     }
   }
@@ -485,23 +504,56 @@ export class RecordingSubmissionKeyStore {
 
   complete(finalPath: string): void {
     const normalizedPath = validateFinalPath(finalPath);
-    this.persist(
-      this.list().filter(
-        (submission) => submission.finalPath !== normalizedPath,
-      ),
+    const remaining = this.list().filter(
+      (submission) => submission.finalPath !== normalizedPath,
     );
+    // HTTP 已被服务端接纳且页面副作用已完成：持久清理只能 best-effort，不能反向
+    // 把成功改判为失败。当前会话立即以内存清单为准，避免再次展示/提交。
+    this.memory = remaining;
+    if (!this.storageReadable) return;
+    try {
+      if (remaining.length === 0) {
+        this.storage.removeItem(RECORDING_SUBMISSIONS_STORAGE_KEY);
+      } else {
+        this.storage.setItem(
+          RECORDING_SUBMISSIONS_STORAGE_KEY,
+          JSON.stringify(remaining),
+        );
+      }
+    } catch {
+      this.storageReadable = false;
+    }
   }
 
   private persist(submissions: PersistedRecordingSubmission[]): void {
+    const previous = this.memory === null ? this.list() : [...this.memory];
+    this.memory = [...submissions];
+    if (!this.storageReadable) return;
     if (submissions.length === 0) {
       this.storage.removeItem(RECORDING_SUBMISSIONS_STORAGE_KEY);
       return;
     }
-    this.storage.setItem(
-      RECORDING_SUBMISSIONS_STORAGE_KEY,
-      JSON.stringify(submissions),
-    );
+    try {
+      this.storage.setItem(
+        RECORDING_SUBMISSIONS_STORAGE_KEY,
+        JSON.stringify(submissions),
+      );
+    } catch (error) {
+      // 首次提交键若未持久化，不能继续 POST；恢复旧内存态供当前页面保留重提入口。
+      this.memory = previous;
+      throw error;
+    }
   }
+}
+
+/** 只有页面的全部接纳副作用成功后，才清理本次录音的持久化提交键。 */
+export async function completeRecordingAcceptance(
+  result: RecordingSubmissionResult,
+  keyStore: RecordingSubmissionKeyStore,
+  accept: (result: RecordingSubmissionResult) => void | Promise<void>,
+): Promise<void> {
+  await accept(result);
+  keyStore.complete(result.audioPath);
 }
 
 export function completeAcceptedRecordingSubmission(

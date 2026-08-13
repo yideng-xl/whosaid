@@ -37,6 +37,19 @@ def test_idempotency_key_roundtrips_and_old_job_defaults_to_none(tmp_path):
     assert jobs["legacy"].idempotency_key is None
 
 
+def test_interrupted_started_job_keeps_idempotency_key(tmp_path):
+    """正常启动后应用中断，任务虽改判失败，仍须接回原提交而不是重复创建。"""
+    store = JobStore(str(tmp_path))
+    store.save(Job(
+        id="ghost", audio_path="/missing/old.m4a", status="queued",
+        progress=0.0, transcript=None, error=None,
+        idempotency_key="recording:old-ghost",
+    ))
+    loaded = JobStore(str(tmp_path)).load_all()[0]
+    assert loaded.status == "failed"
+    assert loaded.idempotency_key == "recording:old-ghost"
+
+
 def test_running_job_marked_failed_on_load(tmp_path):
     store = JobStore(str(tmp_path))
     store.save(Job(id="job2", audio_path="/x/b.m4a", status="running",
