@@ -259,7 +259,7 @@
     try {
       const text = await (await fetch(api.exportUrl(jobId, fmt))).text();
       // plain（逐字稿）本质也是纯文本，落盘后缀仍用 .txt；文件名加「-逐字稿」
-      // 区分于「导出文字稿」的默认名，避免同一任务两种稿子建议同名覆盖。
+      // 区分于会话稿的默认名，避免同一任务两种稿子建议同名覆盖。
       const defaultName =
         fmt === "plain"
           ? `${basename(audioPath)}-逐字稿.txt`
@@ -380,12 +380,12 @@
     <div class="toolbar">
       <div class="fname">{basename(audioPath)}</div>
       <div class="actions">
-        <button disabled={exporting} title="纯文字：说话人＋内容，适合阅读/存档/复制进文档"
-          onclick={() => exportAs("txt")}>导出文字稿</button>
-        <button disabled={exporting} title="带时间轴字幕(SRT)：适合配录像字幕、按时间定位"
-          onclick={() => exportAs("srt")}>导出字幕稿</button>
         <button disabled={exporting} title="逐字稿：带时间戳、不分说话人，适合快速通读/校对"
           onclick={() => exportAs("plain")}>导出逐字稿</button>
+        <button disabled={exporting} title="带时间轴字幕(SRT)：适合配录像字幕、按时间定位"
+          onclick={() => exportAs("srt")}>导出字幕稿</button>
+        <button disabled={exporting} title="会话稿：说话人＋内容，适合阅读、存档或复制进文档"
+          onclick={() => exportAs("txt")}>导出会话稿</button>
       </div>
     </div>
 
