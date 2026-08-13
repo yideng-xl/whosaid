@@ -37,8 +37,8 @@ def test_idempotency_key_roundtrips_and_old_job_defaults_to_none(tmp_path):
     assert jobs["legacy"].idempotency_key is None
 
 
-def test_interrupted_started_job_keeps_idempotency_key(tmp_path):
-    """正常启动后应用中断，任务虽改判失败，仍须接回原提交而不是重复创建。"""
+def test_interrupted_started_job_releases_idempotency_key(tmp_path):
+    """重启时非终态任务统一失败并释放键，允许用户重新启动实际 runner。"""
     store = JobStore(str(tmp_path))
     store.save(Job(
         id="ghost", audio_path="/missing/old.m4a", status="queued",
@@ -47,7 +47,22 @@ def test_interrupted_started_job_keeps_idempotency_key(tmp_path):
     ))
     loaded = JobStore(str(tmp_path)).load_all()[0]
     assert loaded.status == "failed"
-    assert loaded.idempotency_key == "recording:old-ghost"
+    assert loaded.idempotency_key is None
+
+
+def test_load_all_returns_released_key_even_if_recovery_persist_fails(tmp_path, monkeypatch):
+    store = JobStore(str(tmp_path))
+    store.save(Job(
+        id="ghost", audio_path="/missing/old.m4a", status="queued",
+        progress=0.0, transcript=None, error=None,
+        idempotency_key="recording:old-ghost",
+    ))
+    monkeypatch.setattr(store, "_persist_recovered_job", lambda job: (_ for _ in ()).throw(
+        OSError("disk read-only")
+    ))
+    loaded = store.load_all()[0]
+    assert loaded.status == "failed"
+    assert loaded.idempotency_key is None
 
 
 def test_running_job_marked_failed_on_load(tmp_path):

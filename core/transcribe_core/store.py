@@ -49,18 +49,32 @@ class JobStore:
         for p in sorted(self.dir.glob("*.json")):
             d = json.loads(p.read_text(encoding="utf-8"))
             status, err = d["status"], d.get("error")
+            recovered_nonterminal = status in ("queued", "running")
             # 运行中/排队中无稳定断点，重启改判失败；paused 有断点，保留可续传
-            if status in ("queued", "running"):
+            if recovered_nonterminal:
                 status, err = "failed", "应用中断，请重新提交"
             t = Transcript.from_dict(d["transcript"]) if d.get("transcript") else None
             # 旧任务无 created_at：回退用 json 文件的修改时间，保证分组时间大致合理
             created_at = d.get("created_at") or p.stat().st_mtime
-            jobs.append(Job(id=d["id"], audio_path=d["audio_path"], status=status,
-                            progress=d["progress"], transcript=t, error=err,
-                            total_chunks=d.get("total_chunks", 0),
-                            chunks_done=d.get("chunks_done", 0),
-                            created_at=created_at,
-                            num_speakers=d.get("num_speakers"),
-                            blocks=d.get("blocks"),
-                            idempotency_key=d.get("idempotency_key")))
+            job = Job(id=d["id"], audio_path=d["audio_path"], status=status,
+                      progress=d["progress"], transcript=t, error=err,
+                      total_chunks=d.get("total_chunks", 0),
+                      chunks_done=d.get("chunks_done", 0),
+                      created_at=created_at,
+                      num_speakers=d.get("num_speakers"),
+                      blocks=d.get("blocks"),
+                      idempotency_key=(
+                          None if recovered_nonterminal else d.get("idempotency_key")
+                      ))
+            jobs.append(job)
+            if recovered_nonterminal:
+                # 尽力把恢复决定写回磁盘，避免下一次重启重复遇到旧状态；失败也不能
+                # 让本次内存对象重新携带幽灵键，preload 仍以已释放键的对象为准。
+                try:
+                    self._persist_recovered_job(job)
+                except OSError:
+                    pass
         return jobs
+
+    def _persist_recovered_job(self, job: Job) -> None:
+        self.save(job)

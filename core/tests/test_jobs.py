@@ -240,26 +240,16 @@ def test_concurrent_same_idempotency_key_is_atomic(tmp_path):
         release.set()
 
 
-def test_idempotency_key_survives_restart_without_new_runner(tmp_path):
-    release = threading.Event()
+def test_interrupted_job_releases_key_and_restart_runs_new_job(tmp_path):
     store = JobStore(str(tmp_path))
     audio = tmp_path / "a.m4a"
     audio.write_bytes(b"audio")
-
-    class BlockingBackend(FakeBackend):
-        def diarize(self, audio_path, num_speakers):
-            release.wait(timeout=2)
-            return super().diarize(audio_path, num_speakers)
-
-    first_queue = JobQueue(
-        BlockingBackend(),
-        on_change=store.save,
-        duration_fn=lambda p: 1.0,
-        extract_fn=lambda src, start, dur: src,
-    )
-    first_id = first_queue.submit_async(
-        str(audio), idempotency_key="recording:req-restart"
-    )
+    first_id = "interrupted"
+    store.save(Job(
+        id=first_id, audio_path=str(audio.resolve()), status="queued",
+        progress=0.0, transcript=None, error=None,
+        idempotency_key="recording:req-restart",
+    ))
     loaded = JobStore(str(tmp_path)).load_all()
     second_calls = 0
 
@@ -276,14 +266,17 @@ def test_idempotency_key_survives_restart_without_new_runner(tmp_path):
         extract_fn=lambda src, start, dur: src,
     )
     second_queue.preload(loaded)
-    try:
-        assert second_queue.submit_async(
-            str(audio), idempotency_key="recording:req-restart"
-        ) == first_id
-        assert second_calls == 0
-        assert len(second_queue.list()) == 1
-    finally:
-        release.set()
+    retry_id = second_queue.submit_async(
+        str(audio), idempotency_key="recording:req-restart"
+    )
+    assert retry_id != first_id
+    for _ in range(50):
+        if second_queue.get(retry_id).status in ("done", "failed"):
+            break
+        time.sleep(0.01)
+    assert second_queue.get(retry_id).status == "done"
+    assert second_calls == 1
+    assert len(second_queue.list()) == 2
 
 
 def test_different_or_missing_keys_keep_existing_submit_behavior(tmp_path):
@@ -346,6 +339,62 @@ def test_thread_start_failure_rolls_back_key_and_retry_starts_new_runner(tmp_pat
         time.sleep(0.01)
     assert q.get(retry_id).status == "done"
     assert starts == 2
+
+
+def test_thread_start_and_cleanup_save_failure_does_not_preload_ghost(tmp_path):
+    audio = tmp_path / "recording.m4a"
+    audio.write_bytes(b"audio")
+    store = JobStore(str(tmp_path / "data"))
+    save_calls = 0
+
+    def fail_cleanup_save(job):
+        nonlocal save_calls
+        save_calls += 1
+        if save_calls == 2:
+            raise OSError("disk unavailable during cleanup")
+        store.save(job)
+
+    class FailingThread:
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    q = JobQueue(
+        FakeBackend(), on_change=fail_cleanup_save,
+        thread_factory=lambda **kwargs: FailingThread(),
+        duration_fn=lambda p: 1.0, extract_fn=lambda src, start, dur: src,
+    )
+    with pytest.raises(RuntimeError, match="thread unavailable"):
+        q.submit_async(str(audio), idempotency_key="recording:start-cleanup-fail")
+
+    # 磁盘仍是首次落下的 queued+key；恢复层必须解除其键，不把幽灵预载进索引。
+    recovered = JobStore(str(tmp_path / "data")).load_all()
+    assert len(recovered) == 1
+    assert recovered[0].status == "failed"
+    assert recovered[0].idempotency_key is None
+
+    runner_calls = 0
+
+    class CountingBackend(FakeBackend):
+        def diarize(self, audio_path, num_speakers):
+            nonlocal runner_calls
+            runner_calls += 1
+            return super().diarize(audio_path, num_speakers)
+
+    retry_queue = JobQueue(
+        CountingBackend(), on_change=store.save,
+        duration_fn=lambda p: 1.0, extract_fn=lambda src, start, dur: src,
+    )
+    retry_queue.preload(recovered)
+    retry_id = retry_queue.submit_async(
+        str(audio), idempotency_key="recording:start-cleanup-fail"
+    )
+    assert retry_id != recovered[0].id
+    for _ in range(50):
+        if retry_queue.get(retry_id).status in ("done", "failed"):
+            break
+        time.sleep(0.01)
+    assert retry_queue.get(retry_id).status == "done"
+    assert runner_calls == 1
 
 
 def test_keyed_submit_uses_canonical_path_identity(tmp_path):
