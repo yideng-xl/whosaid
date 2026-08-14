@@ -267,9 +267,6 @@ describe("RecordingPanel", () => {
 
   it("删除录音需要确认，确认后只删除当前条目", async () => {
     const onDeleteRecording = vi.fn();
-    const confirmDeletion = vi.fn()
-      .mockReturnValueOnce(false)
-      .mockReturnValueOnce(true);
     const pending: PendingRecordingSubmission = {
       previewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       key: "path:/recordings/meeting.m4a",
@@ -283,15 +280,23 @@ describe("RecordingPanel", () => {
       onStop: vi.fn(),
       pendingRecordings: [pending],
       onDeleteRecording,
-      confirmDeletion,
       toAudioSrc: (path: string) => `asset://${path}`,
     });
 
     const button = screen.getByRole("button", { name: "删除录音 meeting.m4a" });
     await fireEvent.click(button);
     expect(onDeleteRecording).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog", {
+      name: "确认删除录音 meeting.m4a",
+    })).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole("button", { name: "取消删除" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
 
     await fireEvent.click(button);
+    await fireEvent.click(screen.getByRole("button", {
+      name: "确认删除 meeting.m4a",
+    }));
     expect(onDeleteRecording).toHaveBeenCalledOnce();
     expect(onDeleteRecording).toHaveBeenCalledWith(pending);
   });

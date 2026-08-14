@@ -20,7 +20,6 @@
     onConfirmTranscription = () => {},
     onRenameRecording = () => {},
     onDeleteRecording = () => {},
-    confirmDeletion = (name: string) => globalThis.confirm(`确定删除“${name}”吗？删除后无法恢复。`),
     toAudioSrc = recordingAudioSrc,
   }: {
     snapshot: RecordingSnapshot;
@@ -39,7 +38,6 @@
     onDeleteRecording?: (
       recording: PendingRecordingSubmission,
     ) => void | Promise<void>;
-    confirmDeletion?: (name: string) => boolean | Promise<boolean>;
     toAudioSrc?: (path: string) => string;
   } = $props();
 
@@ -49,6 +47,7 @@
   let renamingPaths = $state<Set<string>>(new Set());
   let editingPaths = $state<Set<string>>(new Set());
   let deletingPaths = $state<Set<string>>(new Set());
+  let deleteConfirmPath = $state<string | null>(null);
   let renameDrafts = $state<Record<string, string>>({});
   const ui = $derived(reduceRecordingState(recordingState(), snapshot));
   const canStop = $derived(ui.phase === "recording");
@@ -138,10 +137,10 @@
   async function deleteOnce(recording: PendingRecordingSubmission) {
     const path = recording.finalPath.trim();
     if (!path || recording.busy || deletingPaths.has(path)) return;
-    if (!await confirmDeletion(fileName(path))) return;
     deletingPaths = new Set(deletingPaths).add(path);
     try {
       await onDeleteRecording(recording);
+      if (deleteConfirmPath === path) deleteConfirmPath = null;
     } catch {
       // 上层保留当前条目并展示具体错误，用户可以再次删除。
     } finally {
@@ -311,7 +310,7 @@
                 aria-label={`删除录音 ${fileName(recording.finalPath)}`}
                 disabled={recording.busy || deletingPaths.has(recording.finalPath.trim())}
                 aria-busy={deletingPaths.has(recording.finalPath.trim())}
-                onclick={() => void deleteOnce(recording)}
+                onclick={() => (deleteConfirmPath = recording.finalPath.trim())}
               >{deletingPaths.has(recording.finalPath.trim()) ? "正在删除…" : "删除录音"}</button>
               <button
                 class="confirm"
@@ -321,6 +320,30 @@
                 onclick={() => confirmOnce(recording)}
               >{recording.busy || confirmingPaths.has(recording.finalPath.trim()) ? "正在提交…" : "确认无误，开始转写"}</button>
             </div>
+            {#if deleteConfirmPath === recording.finalPath.trim()}
+              <div
+                class="delete-confirm"
+                role="alertdialog"
+                aria-label={`确认删除录音 ${fileName(recording.finalPath)}`}
+              >
+                <div>
+                  <strong>确认删除这段录音？</strong>
+                  <p>删除后无法恢复，也不会再出现在待确认列表中。</p>
+                </div>
+                <div class="delete-confirm-actions">
+                  <button
+                    disabled={deletingPaths.has(recording.finalPath.trim())}
+                    onclick={() => (deleteConfirmPath = null)}
+                  >取消删除</button>
+                  <button
+                    class="delete-final"
+                    aria-label={`确认删除 ${fileName(recording.finalPath)}`}
+                    disabled={deletingPaths.has(recording.finalPath.trim())}
+                    onclick={() => void deleteOnce(recording)}
+                  >{deletingPaths.has(recording.finalPath.trim()) ? "正在删除…" : "确认删除"}</button>
+                </div>
+              </div>
+            {/if}
           </article>
         {/each}
       </div>
@@ -397,6 +420,23 @@
     font: inherit; font-weight: 600; cursor: pointer;
   }
   .delete-recording:disabled { cursor: default; opacity: 0.6; }
+  .delete-confirm {
+    display: grid; gap: var(--space-3); padding: var(--space-3);
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--hairline));
+    border-radius: var(--radius-card);
+    background: color-mix(in srgb, var(--danger) 7%, var(--card));
+  }
+  .delete-confirm strong { color: var(--danger); }
+  .delete-confirm p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+  .delete-confirm-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
+  .delete-confirm-actions button {
+    min-height: 34px; border: 1px solid var(--hairline); border-radius: var(--radius-btn);
+    padding: 0 var(--space-3); color: var(--fg); background: var(--card); font: inherit;
+    cursor: pointer;
+  }
+  .delete-confirm-actions .delete-final {
+    border-color: var(--danger); color: #fff; background: var(--danger); font-weight: 600;
+  }
   .confirm {
     flex: 1;
     min-height: 38px;
