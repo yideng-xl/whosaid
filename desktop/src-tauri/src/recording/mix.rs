@@ -5,7 +5,9 @@ use std::process::Command;
 
 use super::storage::{RecordingStore, RecoverableRecording};
 
-const DUAL_TRACK_FILTER: &str = "[0:a]aresample=48000:async=1:first_pts=0[sys];[1:a]aresample=48000:async=1:first_pts=0[mic];[sys][mic]amix=inputs=2:duration=first:dropout_transition=0,alimiter=limit=0.95[out]";
+// 系统声既作为最终混音的一路，也作为麦克风回灌的参考信号。NLMS 只从麦克风
+// 中消除与系统声相关的成分，尽量保留使用者自己的发言，再与原始系统声合并。
+const DUAL_TRACK_FILTER: &str = "[0:a]aresample=48000:async=1:first_pts=0,asplit=2[sys][echo_ref];[1:a]aresample=48000:async=1:first_pts=0[mic];[echo_ref][mic]anlms=order=8192:mu=0.1:leakage=0.0001:out_mode=o[clean_mic];[sys][clean_mic]amix=inputs=2:duration=first:dropout_transition=0,alimiter=limit=0.95[out]";
 
 #[derive(Clone, Debug)]
 pub struct FfmpegTools {
@@ -261,6 +263,8 @@ mod tests {
             Path::new("out.tmp.m4a"),
         );
         assert!(args.iter().any(|arg| arg.contains("amix=inputs=2")));
+        assert!(args.iter().any(|arg| arg.contains("anlms=order=8192")));
+        assert!(args.iter().any(|arg| arg.contains("[echo_ref][mic]")));
         assert!(args.iter().any(|arg| arg == "-filter_complex"));
         assert_eq!(args.last().unwrap(), "out.tmp.m4a");
     }

@@ -555,6 +555,15 @@ impl RecordingManager {
         self.store.acknowledge_preview(id)
     }
 
+    fn rename_preview(
+        &self,
+        id: &str,
+        name: &str,
+    ) -> Result<PendingRecordingPreview, RecordingError> {
+        let _guard = self.coordination_lock.lock().unwrap();
+        self.store.rename_pending_preview(id, name)
+    }
+
     fn mix_recording(
         &self,
         recording: &RecoverableRecording,
@@ -658,6 +667,17 @@ pub fn acknowledge_recording_preview(
 ) -> Result<(), String> {
     manager
         .acknowledge_preview(&id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn rename_pending_recording_preview(
+    id: String,
+    name: String,
+    manager: State<'_, RecordingManager>,
+) -> Result<PendingRecordingPreview, String> {
+    manager
+        .rename_preview(&id, &name)
         .map_err(|error| error.to_string())
 }
 

@@ -250,6 +250,52 @@ impl RecordingStore {
         fs::remove_file(receipt_path).map_err(io_error)
     }
 
+    pub fn rename_pending_preview(
+        &self,
+        id: &str,
+        requested_name: &str,
+    ) -> Result<PendingRecordingPreview, RecordingError> {
+        validate_session_id(id)?;
+        let stem = validate_recording_name(requested_name)?;
+        let (mut receipt, _) = self
+            .read_receipt(id)?
+            .ok_or_else(|| RecordingError::Io("待确认录音不存在".into()))?;
+        let original = PathBuf::from(&receipt.final_path);
+        let target = self.validate_final_path(
+            &original
+                .parent()
+                .ok_or_else(|| RecordingError::Io("录音文件缺少父目录".into()))?
+                .join(format!("{stem}.m4a")),
+        )?;
+
+        if target != original {
+            fs::hard_link(&original, &target).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    RecordingError::Io("该录音名称已存在，请换一个名称".into())
+                } else {
+                    io_error(error)
+                }
+            })?;
+            receipt.final_path = path_string(&target);
+            if let Err(error) = self.write_receipt(&receipt) {
+                let _ = fs::remove_file(&target);
+                return Err(error);
+            }
+            if let Err(error) = fs::remove_file(&original) {
+                eprintln!(
+                    "[whosaid] 录音改名后无法清理旧文件 {}：{error}",
+                    original.display()
+                );
+            }
+        }
+
+        Ok(PendingRecordingPreview {
+            id: receipt.session_id,
+            final_path: receipt.final_path,
+            created_at: receipt.created_at,
+        })
+    }
+
     pub(crate) fn reconcile_completed_session(
         &self,
         session_id: &str,
@@ -716,6 +762,28 @@ fn validate_session_id(session_id: &str) -> Result<(), RecordingError> {
     Ok(())
 }
 
+fn validate_recording_name(requested_name: &str) -> Result<String, RecordingError> {
+    let trimmed = requested_name.trim();
+    let stem = trimmed
+        .strip_suffix(".m4a")
+        .or_else(|| trimmed.strip_suffix(".M4A"))
+        .unwrap_or(trimmed)
+        .trim();
+    if stem.is_empty()
+        || stem == "."
+        || stem == ".."
+        || stem.chars().count() > 80
+        || stem
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\' | ':'))
+    {
+        return Err(RecordingError::Io(
+            "录音名称不能为空、不能包含路径字符，且最多 80 个字".into(),
+        ));
+    }
+    Ok(stem.to_owned())
+}
+
 fn validate_track_name(actual: &str, expected: &str) -> Result<(), RecordingError> {
     if actual != expected || Path::new(actual).components().count() != 1 {
         return Err(RecordingError::Io("会话清单包含不受控的音轨路径".into()));
@@ -1060,6 +1128,50 @@ mod tests {
         let remaining = store.pending_previews().unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    }
+
+    #[test]
+    fn renaming_pending_preview_updates_receipt_without_overwriting() {
+        let root = tempdir().unwrap();
+        let store = RecordingStore::new(root.path().to_path_buf());
+        let incomplete = root.path().join(".incomplete");
+        let session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        fs::create_dir_all(&incomplete).unwrap();
+        write_session(&incomplete, session_id, false);
+        let recording = store.recoverable_by_id(session_id).unwrap();
+        let original = root.path().join("2026-08-14_10-00-00.m4a");
+        fs::write(&original, b"meeting audio").unwrap();
+        store.complete_with_receipt(&recording, &original).unwrap();
+
+        let renamed = store
+            .rename_pending_preview(session_id, "腾讯会议产品复盘")
+            .unwrap();
+
+        let renamed_path = fs::canonicalize(root.path())
+            .unwrap()
+            .join("腾讯会议产品复盘.m4a");
+        assert_eq!(renamed.final_path, path_string(&renamed_path));
+        assert!(!original.exists());
+        assert_eq!(fs::read(&renamed.final_path).unwrap(), b"meeting audio");
+        assert_eq!(store.pending_previews().unwrap(), vec![renamed]);
+
+        fs::write(root.path().join("已存在.m4a"), b"keep me").unwrap();
+        assert!(store.rename_pending_preview(session_id, "已存在").is_err());
+        assert_eq!(
+            fs::read(root.path().join("已存在.m4a")).unwrap(),
+            b"keep me"
+        );
+    }
+
+    #[test]
+    fn renaming_pending_preview_rejects_unsafe_or_blank_names() {
+        let root = tempdir().unwrap();
+        let store = RecordingStore::new(root.path().to_path_buf());
+        for name in ["", "   ", "../escape", "folder/name", "a\\b", ".", ".."] {
+            assert!(store
+                .rename_pending_preview("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name)
+                .is_err());
+        }
     }
 
     #[test]

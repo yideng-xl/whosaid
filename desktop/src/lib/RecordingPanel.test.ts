@@ -194,7 +194,9 @@ describe("RecordingPanel", () => {
     const players = screen.getAllByLabelText(/试听/);
     expect(players).toHaveLength(2);
     expect(players[0].getAttribute("src")).toBe("asset:///recordings/one.m4a");
-    expect(screen.getAllByText("one.m4a")).toHaveLength(1);
+    expect((screen.getByRole("textbox", {
+      name: "录音名称 one.m4a",
+    }) as HTMLInputElement).value).toBe("one");
     expect(screen.getByText("/recordings/two.m4a")).toBeTruthy();
     const buttons = screen.getAllByRole("button", {
       name: /确认.+无误，开始转写/,
@@ -205,6 +207,54 @@ describe("RecordingPanel", () => {
     expect(onConfirmTranscription).toHaveBeenCalledWith(pendingRecordings[0]);
     expect((buttons[0] as HTMLButtonElement).disabled).toBe(true);
     finish();
+  });
+
+  it("已有待确认录音时仍可继续录制新的一段", async () => {
+    const onStartNew = vi.fn();
+    render(RecordingPanel, {
+      snapshot: snapshot({ phase: "ready", final_path: "/recordings/one.m4a" }),
+      onStop: vi.fn(),
+      onStartNew,
+      pendingRecordings: [{
+        previewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        key: "path:/recordings/one.m4a",
+        label: "录音时间 2026/8/14 10:00:00",
+        finalPath: "/recordings/one.m4a",
+        busy: false,
+        error: null,
+      }],
+      toAudioSrc: (path: string) => `asset://${path}`,
+    });
+
+    await fireEvent.click(screen.getByRole("button", { name: "继续录一段" }));
+    expect(onStartNew).toHaveBeenCalledOnce();
+  });
+
+  it("允许编辑待确认录音的文件名并保存", async () => {
+    const onRenameRecording = vi.fn();
+    const pending: PendingRecordingSubmission = {
+      previewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      key: "path:/recordings/2026-08-14_10-00-00.m4a",
+      label: "录音时间 2026/8/14 10:00:00",
+      finalPath: "/recordings/2026-08-14_10-00-00.m4a",
+      busy: false,
+      error: null,
+    };
+    render(RecordingPanel, {
+      snapshot: snapshot({ phase: "ready", final_path: pending.finalPath }),
+      onStop: vi.fn(),
+      pendingRecordings: [pending],
+      onRenameRecording,
+      toAudioSrc: (path: string) => `asset://${path}`,
+    });
+
+    const input = screen.getByRole("textbox", {
+      name: "录音名称 2026-08-14_10-00-00.m4a",
+    });
+    await fireEvent.input(input, { target: { value: "腾讯会议产品复盘" } });
+    await fireEvent.click(screen.getByRole("button", { name: "保存录音名称" }));
+
+    expect(onRenameRecording).toHaveBeenCalledWith(pending, "腾讯会议产品复盘");
   });
 
   it("空路径不展示播放器", () => {

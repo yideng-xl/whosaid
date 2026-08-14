@@ -17,6 +17,7 @@
     listRecoverableRecordings,
     manageAsyncListener,
     openRecordingSettings,
+    renamePendingRecordingPreview,
     recordingController,
     retryRecordingMix,
     watchRecordingCloseRequested,
@@ -396,6 +397,29 @@
     }
   }
 
+  async function renamePendingRecording(
+    pending: PendingRecordingSubmission,
+    name: string,
+  ) {
+    if (!pending.previewId || pending.busy) return;
+    const oldPath = pending.finalPath;
+    pendingRecordingSubmissions = upsertPendingRecordingSubmission(
+      pendingRecordingSubmissions,
+      { ...pending, busy: true, error: null },
+    );
+    try {
+      await renamePendingRecordingPreview(pending.previewId, name);
+      recordingSubmissionKeys.complete(oldPath);
+      await refreshPendingRecordingPreviews();
+    } catch (error) {
+      pendingRecordingSubmissions = upsertPendingRecordingSubmission(
+        pendingRecordingSubmissions,
+        { ...pending, busy: false, error: messageOf(error) },
+      );
+      throw error;
+    }
+  }
+
   async function openSystemRecordingSettings() {
     try {
       await openRecordingSettings("systemAudio");
@@ -737,10 +761,12 @@
         <RecordingPanel
           snapshot={recordingSnapshot}
           onStop={async () => { await finalizeRecordingOnce(); }}
+          onStartNew={startDirectRecording}
           {systemPermissionDenied}
           onOpenSystemSettings={openSystemRecordingSettings}
           pendingRecordings={pendingRecordingSubmissions}
           onConfirmTranscription={retryPendingRecordingSubmission}
+          onRenameRecording={renamePendingRecording}
         />
       {:else if view === "models" && api}
         <ModelManager {api} onClose={() => (view = "transcript")} />

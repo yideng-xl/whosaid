@@ -120,6 +120,12 @@ export const listPendingRecordingPreviews = () =>
 export const acknowledgeRecordingPreview = (id: string) =>
   invoke<void>("acknowledge_recording_preview", { id });
 
+export const renamePendingRecordingPreview = (id: string, name: string) =>
+  invoke<PendingRecordingPreview>("rename_pending_recording_preview", {
+    id,
+    name,
+  });
+
 export const retryRecordingMix = (sessionId: string) =>
   invoke<RecordingStopResult>("retry_recording_mix", { sessionId });
 

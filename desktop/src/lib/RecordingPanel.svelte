@@ -13,19 +13,26 @@
   let {
     snapshot,
     onStop,
+    onStartNew = () => {},
     systemPermissionDenied = false,
     onOpenSystemSettings = () => {},
     pendingRecordings = [],
     onConfirmTranscription = () => {},
+    onRenameRecording = () => {},
     toAudioSrc = recordingAudioSrc,
   }: {
     snapshot: RecordingSnapshot;
     onStop: () => void | Promise<void>;
+    onStartNew?: () => void | Promise<void>;
     systemPermissionDenied?: boolean;
     onOpenSystemSettings?: () => void | Promise<void>;
     pendingRecordings?: PendingRecordingSubmission[];
     onConfirmTranscription?: (
       recording: PendingRecordingSubmission,
+    ) => void | Promise<void>;
+    onRenameRecording?: (
+      recording: PendingRecordingSubmission,
+      name: string,
     ) => void | Promise<void>;
     toAudioSrc?: (path: string) => string;
   } = $props();
@@ -33,8 +40,14 @@
   let stopPending = $state(false);
   let settingsPending = $state(false);
   let confirmingPaths = $state<Set<string>>(new Set());
+  let renamingPaths = $state<Set<string>>(new Set());
+  let renameDrafts = $state<Record<string, string>>({});
   const ui = $derived(reduceRecordingState(recordingState(), snapshot));
   const canStop = $derived(ui.phase === "recording");
+  const canStartNew = $derived(
+    ["idle", "ready", "failed"].includes(ui.phase) &&
+      pendingRecordings.some((recording) => recording.finalPath.trim()),
+  );
 
   async function stopOnce() {
     if (stopPending || !canStop) return;
@@ -74,6 +87,32 @@
     const name = fileName(recording.finalPath);
     const label = recording.label.trim();
     return label && label !== name ? `${label} ${name}` : name;
+  }
+
+  function fileStem(path: string): string {
+    return fileName(path).replace(/\.m4a$/i, "");
+  }
+
+  function renameDraft(recording: PendingRecordingSubmission): string {
+    return renameDrafts[recording.finalPath] ?? fileStem(recording.finalPath);
+  }
+
+  function updateRenameDraft(recording: PendingRecordingSubmission, value: string) {
+    renameDrafts = { ...renameDrafts, [recording.finalPath]: value };
+  }
+
+  async function renameOnce(recording: PendingRecordingSubmission) {
+    const path = recording.finalPath.trim();
+    const name = renameDraft(recording).trim();
+    if (!path || !name || recording.busy || renamingPaths.has(path)) return;
+    renamingPaths = new Set(renamingPaths).add(path);
+    try {
+      await onRenameRecording(recording, name);
+    } finally {
+      const next = new Set(renamingPaths);
+      next.delete(path);
+      renamingPaths = next;
+    }
   }
 
   async function confirmOnce(recording: PendingRecordingSubmission) {
@@ -175,6 +214,13 @@
       </div>
     {/if}
 
+    {#if canStartNew}
+      <button class="start-new" onclick={onStartNew}>
+        <Icon name="microphone" size={16} />
+        <span>继续录一段</span>
+      </button>
+    {/if}
+
     {#if pendingRecordings.some((recording) => recording.finalPath.trim())}
       <div class="previews" aria-label="待确认录音">
         <h2>试听录音</h2>
@@ -182,7 +228,27 @@
         {#each pendingRecordings.filter((recording) => recording.finalPath.trim()) as recording (recording.finalPath)}
           <article class="preview-item">
             <strong>{visibleLabel(recording)}</strong>
-            <span class="preview-name">{fileName(recording.finalPath)}</span>
+            <div class="rename-row">
+              <label>
+                <span>录音名称</span>
+                <input
+                  aria-label={`录音名称 ${fileName(recording.finalPath)}`}
+                  value={renameDraft(recording)}
+                  disabled={recording.busy || renamingPaths.has(recording.finalPath.trim())}
+                  oninput={(event) => updateRenameDraft(recording, event.currentTarget.value)}
+                  onkeydown={(event) => {
+                    if (event.key === "Enter") void renameOnce(recording);
+                  }}
+                />
+              </label>
+              <span>.m4a</span>
+              <button
+                class="save-name"
+                aria-label="保存录音名称"
+                disabled={recording.busy || renamingPaths.has(recording.finalPath.trim())}
+                onclick={() => void renameOnce(recording)}
+              >{renamingPaths.has(recording.finalPath.trim()) ? "保存中…" : "保存"}</button>
+            </div>
             <span class="preview-path">{recording.finalPath}</span>
             <audio
               controls
@@ -249,6 +315,24 @@
     font-size: 11px;
   }
   .preview-item audio { width: 100%; }
+  .rename-row { display: flex; align-items: end; gap: var(--space-2); }
+  .rename-row label { min-width: 0; flex: 1; display: grid; gap: 4px; }
+  .rename-row label span { color: var(--muted); font-size: 12px; }
+  .rename-row input {
+    width: 100%; min-height: 34px; box-sizing: border-box;
+    border: 1px solid var(--hairline); border-radius: var(--radius-btn);
+    padding: 0 var(--space-2); color: var(--fg); background: var(--bg); font: inherit;
+  }
+  .save-name, .start-new {
+    min-height: 36px; border: 1px solid var(--hairline); border-radius: var(--radius-btn);
+    padding: 0 var(--space-3); color: var(--fg); background: var(--card); font: inherit;
+    cursor: pointer;
+  }
+  .start-new {
+    width: 100%; margin-top: var(--space-4); display: flex; align-items: center;
+    justify-content: center; gap: var(--space-2); border-color: var(--accent); color: var(--accent);
+  }
+  .save-name:disabled, .start-new:disabled { cursor: default; opacity: 0.6; }
   .preview-error { color: var(--danger); }
   .confirm {
     min-height: 38px;

@@ -240,6 +240,7 @@ pub fn run() {
             recording::list_recoverable_recordings,
             recording::list_pending_recording_previews,
             recording::acknowledge_recording_preview,
+            recording::rename_pending_recording_preview,
             recording::retry_recording_mix,
             close_after_recording
         ])
