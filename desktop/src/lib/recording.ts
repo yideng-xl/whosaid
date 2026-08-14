@@ -120,6 +120,9 @@ export const listPendingRecordingPreviews = () =>
 export const acknowledgeRecordingPreview = (id: string) =>
   invoke<void>("acknowledge_recording_preview", { id });
 
+export const deletePendingRecordingPreview = (id: string) =>
+  invoke<void>("delete_pending_recording_preview", { id });
+
 export const renamePendingRecordingPreview = (id: string, name: string) =>
   invoke<PendingRecordingPreview>("rename_pending_recording_preview", {
     id,

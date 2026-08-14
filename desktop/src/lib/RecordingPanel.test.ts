@@ -265,6 +265,37 @@ describe("RecordingPanel", () => {
     })).toBeNull();
   });
 
+  it("删除录音需要确认，确认后只删除当前条目", async () => {
+    const onDeleteRecording = vi.fn();
+    const confirmDeletion = vi.fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    const pending: PendingRecordingSubmission = {
+      previewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      key: "path:/recordings/meeting.m4a",
+      label: "录音时间 2026/8/14 10:00:00",
+      finalPath: "/recordings/meeting.m4a",
+      busy: false,
+      error: null,
+    };
+    render(RecordingPanel, {
+      snapshot: snapshot({ phase: "ready", final_path: pending.finalPath }),
+      onStop: vi.fn(),
+      pendingRecordings: [pending],
+      onDeleteRecording,
+      confirmDeletion,
+      toAudioSrc: (path: string) => `asset://${path}`,
+    });
+
+    const button = screen.getByRole("button", { name: "删除录音 meeting.m4a" });
+    await fireEvent.click(button);
+    expect(onDeleteRecording).not.toHaveBeenCalled();
+
+    await fireEvent.click(button);
+    expect(onDeleteRecording).toHaveBeenCalledOnce();
+    expect(onDeleteRecording).toHaveBeenCalledWith(pending);
+  });
+
   it("空路径不展示播放器", () => {
     render(RecordingPanel, {
       snapshot: snapshot({ phase: "ready" }),

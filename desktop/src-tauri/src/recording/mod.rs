@@ -555,6 +555,11 @@ impl RecordingManager {
         self.store.acknowledge_preview(id)
     }
 
+    fn delete_preview(&self, id: &str) -> Result<(), RecordingError> {
+        let _guard = self.coordination_lock.lock().unwrap();
+        self.store.delete_pending_preview(id)
+    }
+
     fn rename_preview(
         &self,
         id: &str,
@@ -667,6 +672,16 @@ pub fn acknowledge_recording_preview(
 ) -> Result<(), String> {
     manager
         .acknowledge_preview(&id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn delete_pending_recording_preview(
+    id: String,
+    manager: State<'_, RecordingManager>,
+) -> Result<(), String> {
+    manager
+        .delete_preview(&id)
         .map_err(|error| error.to_string())
 }
 

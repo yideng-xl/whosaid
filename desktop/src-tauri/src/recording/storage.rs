@@ -251,6 +251,30 @@ impl RecordingStore {
         fs::remove_file(receipt_path).map_err(io_error)
     }
 
+    pub fn delete_pending_preview(&self, id: &str) -> Result<(), RecordingError> {
+        validate_session_id(id)?;
+        let (receipt, receipt_path) = self
+            .read_receipt(id)?
+            .ok_or_else(|| RecordingError::Io("待确认录音不存在".into()))?;
+        let final_path = PathBuf::from(receipt.final_path);
+        let tombstone = receipt_path.with_extension("deleting");
+
+        // 先把凭据原子移出待确认清单，再删除音频。音频删除失败时尽力回滚凭据，
+        // 避免界面消失但文件仍留在磁盘。
+        fs::rename(&receipt_path, &tombstone).map_err(io_error)?;
+        if let Err(error) = fs::remove_file(&final_path) {
+            let _ = fs::rename(&tombstone, &receipt_path);
+            return Err(io_error(error));
+        }
+        if let Err(error) = fs::remove_file(&tombstone) {
+            eprintln!(
+                "[whosaid] 录音已删除，但无法清理删除凭据 {}：{error}",
+                tombstone.display()
+            );
+        }
+        Ok(())
+    }
+
     pub fn rename_pending_preview(
         &self,
         id: &str,
@@ -1163,6 +1187,37 @@ mod tests {
         assert_eq!(previews.len(), 2);
         assert_eq!(previews[0].id, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
         assert_eq!(previews[1].id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    }
+
+    #[test]
+    fn deleting_pending_preview_removes_only_selected_audio_and_receipt() {
+        let root = tempdir().unwrap();
+        let store = RecordingStore::new(root.path().to_path_buf());
+        let incomplete = root.path().join(".incomplete");
+        fs::create_dir_all(&incomplete).unwrap();
+        for (session_id, filename) in [
+            ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "delete-me.m4a"),
+            ("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "keep-me.m4a"),
+        ] {
+            write_session(&incomplete, session_id, false);
+            let recording = store.recoverable_by_id(session_id).unwrap();
+            let final_path = root.path().join(filename);
+            fs::write(&final_path, filename.as_bytes()).unwrap();
+            store
+                .complete_with_receipt(&recording, &final_path)
+                .unwrap();
+            store.remove_completed_session(&recording).unwrap();
+        }
+
+        store
+            .delete_pending_preview("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap();
+
+        assert!(!root.path().join("delete-me.m4a").exists());
+        assert!(root.path().join("keep-me.m4a").exists());
+        let remaining = store.pending_previews().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
     }
 
     #[test]

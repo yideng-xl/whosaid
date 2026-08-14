@@ -19,6 +19,8 @@
     pendingRecordings = [],
     onConfirmTranscription = () => {},
     onRenameRecording = () => {},
+    onDeleteRecording = () => {},
+    confirmDeletion = (name: string) => globalThis.confirm(`确定删除“${name}”吗？删除后无法恢复。`),
     toAudioSrc = recordingAudioSrc,
   }: {
     snapshot: RecordingSnapshot;
@@ -34,6 +36,10 @@
       recording: PendingRecordingSubmission,
       name: string,
     ) => void | Promise<void>;
+    onDeleteRecording?: (
+      recording: PendingRecordingSubmission,
+    ) => void | Promise<void>;
+    confirmDeletion?: (name: string) => boolean | Promise<boolean>;
     toAudioSrc?: (path: string) => string;
   } = $props();
 
@@ -42,6 +48,7 @@
   let confirmingPaths = $state<Set<string>>(new Set());
   let renamingPaths = $state<Set<string>>(new Set());
   let editingPaths = $state<Set<string>>(new Set());
+  let deletingPaths = $state<Set<string>>(new Set());
   let renameDrafts = $state<Record<string, string>>({});
   const ui = $derived(reduceRecordingState(recordingState(), snapshot));
   const canStop = $derived(ui.phase === "recording");
@@ -126,6 +133,22 @@
     if (!path || recording.busy || renamingPaths.has(path)) return;
     updateRenameDraft(recording, fileStem(path));
     editingPaths = new Set(editingPaths).add(path);
+  }
+
+  async function deleteOnce(recording: PendingRecordingSubmission) {
+    const path = recording.finalPath.trim();
+    if (!path || recording.busy || deletingPaths.has(path)) return;
+    if (!await confirmDeletion(fileName(path))) return;
+    deletingPaths = new Set(deletingPaths).add(path);
+    try {
+      await onDeleteRecording(recording);
+    } catch {
+      // 上层保留当前条目并展示具体错误，用户可以再次删除。
+    } finally {
+      const next = new Set(deletingPaths);
+      next.delete(path);
+      deletingPaths = next;
+    }
   }
 
   async function confirmOnce(recording: PendingRecordingSubmission) {
@@ -282,13 +305,22 @@
             {#if recording.error}
               <small class="preview-error" role="alert">{recording.error}</small>
             {/if}
-            <button
-              class="confirm"
-              aria-label={`确认${accessibleRecordingName(recording)}无误，开始转写`}
-              disabled={recording.busy || confirmingPaths.has(recording.finalPath.trim())}
-              aria-busy={recording.busy || confirmingPaths.has(recording.finalPath.trim())}
-              onclick={() => confirmOnce(recording)}
-            >{recording.busy || confirmingPaths.has(recording.finalPath.trim()) ? "正在提交…" : "确认无误，开始转写"}</button>
+            <div class="preview-actions">
+              <button
+                class="delete-recording"
+                aria-label={`删除录音 ${fileName(recording.finalPath)}`}
+                disabled={recording.busy || deletingPaths.has(recording.finalPath.trim())}
+                aria-busy={deletingPaths.has(recording.finalPath.trim())}
+                onclick={() => void deleteOnce(recording)}
+              >{deletingPaths.has(recording.finalPath.trim()) ? "正在删除…" : "删除录音"}</button>
+              <button
+                class="confirm"
+                aria-label={`确认${accessibleRecordingName(recording)}无误，开始转写`}
+                disabled={recording.busy || confirmingPaths.has(recording.finalPath.trim())}
+                aria-busy={recording.busy || confirmingPaths.has(recording.finalPath.trim())}
+                onclick={() => confirmOnce(recording)}
+              >{recording.busy || confirmingPaths.has(recording.finalPath.trim()) ? "正在提交…" : "确认无误，开始转写"}</button>
+            </div>
           </article>
         {/each}
       </div>
@@ -358,7 +390,15 @@
   }
   .save-name:disabled, .start-new:disabled { cursor: default; opacity: 0.6; }
   .preview-error { color: var(--danger); }
+  .preview-actions { display: flex; gap: var(--space-2); }
+  .delete-recording {
+    min-height: 38px; border: 1px solid var(--danger); border-radius: var(--radius-btn);
+    padding: 0 var(--space-3); color: var(--danger); background: transparent;
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .delete-recording:disabled { cursor: default; opacity: 0.6; }
   .confirm {
+    flex: 1;
     min-height: 38px;
     border: 1px solid var(--accent);
     border-radius: var(--radius-btn);

@@ -10,6 +10,7 @@
   import {
     acknowledgeRecordingPreview,
     closeAfterRecording,
+    deletePendingRecordingPreview,
     getRecordingPermissions,
     getRecordingState,
     initializeDirectRecording,
@@ -420,6 +421,44 @@
     }
   }
 
+  async function deletePendingRecording(
+    pending: PendingRecordingSubmission,
+  ) {
+    if (!pending.previewId || pending.busy) return;
+    const deletedPath = pending.finalPath.trim();
+    pendingRecordingSubmissions = upsertPendingRecordingSubmission(
+      pendingRecordingSubmissions,
+      { ...pending, busy: true, error: null },
+    );
+    try {
+      await deletePendingRecordingPreview(pending.previewId);
+      recordingSubmissionKeys.complete(deletedPath);
+      pendingRecordingSubmissions = pendingRecordingSubmissions.filter(
+        (item) => item.finalPath.trim() !== deletedPath,
+      );
+      if (recordingSnapshot.final_path?.trim() === deletedPath) {
+        ignoreRecordingEvents = true;
+        publishRecordingSnapshot({
+          ...recordingSnapshot,
+          phase: "idle",
+          elapsed_seconds: 0,
+          final_path: null,
+          recoverable_paths: [],
+          error: null,
+        });
+      }
+      if (submissionFailureFinalPath?.trim() === deletedPath) {
+        submissionFailureFinalPath = null;
+      }
+    } catch (error) {
+      pendingRecordingSubmissions = upsertPendingRecordingSubmission(
+        pendingRecordingSubmissions,
+        { ...pending, busy: false, error: messageOf(error) },
+      );
+      throw error;
+    }
+  }
+
   async function openSystemRecordingSettings() {
     try {
       await openRecordingSettings("systemAudio");
@@ -767,6 +806,7 @@
           pendingRecordings={pendingRecordingSubmissions}
           onConfirmTranscription={retryPendingRecordingSubmission}
           onRenameRecording={renamePendingRecording}
+          onDeleteRecording={deletePendingRecording}
         />
       {:else if view === "models" && api}
         <ModelManager {api} onClose={() => (view = "transcript")} />
