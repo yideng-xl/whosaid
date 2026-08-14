@@ -39,11 +39,13 @@
     RecordingSnapshotCoordinator,
     RecordingSubmissionKeyStore,
     RecordingSubmissionRegistry,
+    runRecoverableRecordingAction,
     runRecordingCloseFlow,
     shouldSubscribeRecordingJob,
     transitionRecordingSubmissionFailure,
     upsertPendingRecordingSubmission,
     type PendingRecordingSubmission,
+    type RecoverableRecordingAction,
     type RecoverableRecordingItem,
     type RecordingSubmissionResult,
   } from "$lib/recordingFlow";
@@ -91,6 +93,9 @@
     "mixing",
     "submitting",
   ].includes(recordingSnapshot.phase));
+  const recoverableActionPending = $derived(
+    recoverableRecordings.some((recording) => recording.busy),
+  );
   const systemPermissionDenied = $derived(
     recordingPermissions?.systemAudio === "denied" ||
       recordingSnapshot.system_audio === "denied",
@@ -312,22 +317,34 @@
     void startDirectRecording();
   }
 
-  async function recoverRecording(recording: RecoverableRecordingItem) {
-    if (recording.busy || recordingActive) return;
+  async function recoverRecording(
+    recording: RecoverableRecordingItem,
+    action: RecoverableRecordingAction,
+  ) {
+    if (recoverableActionPending || recordingActive) return;
     recoverableRecordings = beginRecoverableRecording(
       recoverableRecordings,
       recording.sessionId,
+      action,
     );
     try {
-      await retryRecordingMix(recording.sessionId);
-      if (!pageMounted) return;
-      // 混音成功后只进入试听待确认；每段最终文件独立保存，不能覆盖别段结果。
-      recoverableRecordings = completeRecoverableRecording(
-        recoverableRecordings,
-        recording.sessionId,
+      await runRecoverableRecordingAction(
+        action,
+        async () => {
+          await retryRecordingMix(recording.sessionId);
+          if (!pageMounted) return;
+          // 旧音轨先安全收尾为独立试听项，不能原地追加覆盖。
+          recoverableRecordings = completeRecoverableRecording(
+            recoverableRecordings,
+            recording.sessionId,
+          );
+          await refreshPendingRecordingPreviews();
+          view = "recording";
+        },
+        async () => {
+          if (pageMounted) await startDirectRecording();
+        },
       );
-      await refreshPendingRecordingPreviews();
-      view = "recording";
     } catch (error) {
       if (!pageMounted) return;
       recoverableRecordings = failRecoverableRecording(
@@ -785,14 +802,23 @@
       {#each recordingAvailable ? recoverableRecordings : [] as recovery (recovery.sessionId)}
         <div class="recovery-notice" role="status">
           <span>
-            发现一段未完成录音（开始于 {recoverableStartedAt(recovery)}），可尝试恢复。
+            发现一段未完成录音（开始于 {recoverableStartedAt(recovery)}）。
+            <small class="recovery-help">继续录音会先保存这段，再开始新的一段。</small>
             {#if recovery.error}<small>{recovery.error}</small>{/if}
           </span>
-          <button
-            disabled={recovery.busy || recordingActive}
-            aria-busy={recovery.busy}
-            onclick={() => void recoverRecording(recovery).catch(() => undefined)}
-          >{recovery.busy ? "正在恢复…" : "恢复录音"}</button>
+          <div class="recovery-actions">
+            <button
+              class="secondary"
+              disabled={recoverableActionPending || recordingActive}
+              aria-busy={recovery.busy && recovery.busyAction === "finish"}
+              onclick={() => void recoverRecording(recovery, "finish").catch(() => undefined)}
+            >{recovery.busy && recovery.busyAction === "finish" ? "正在保存…" : "结束并保存"}</button>
+            <button
+              disabled={recoverableActionPending || recordingActive}
+              aria-busy={recovery.busy && recovery.busyAction === "continue"}
+              onclick={() => void recoverRecording(recovery, "continue").catch(() => undefined)}
+            >{recovery.busy && recovery.busyAction === "continue" ? "正在继续…" : "继续录音"}</button>
+          </div>
         </div>
       {/each}
 
@@ -987,18 +1013,37 @@
     padding: 6px 12px;
     border: 1px solid var(--spk-2);
     border-radius: var(--radius-btn);
-    background: transparent;
-    color: var(--spk-2);
+    background: var(--spk-2);
+    color: var(--bg);
     font: inherit;
     font-weight: 600;
     cursor: pointer;
   }
+  .recovery-notice button.secondary {
+    background: transparent;
+    color: var(--spk-2);
+  }
   .recovery-notice button:disabled { cursor: default; opacity: 0.55; }
+  .recovery-notice button:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
   .recovery-notice span { min-width: 0; overflow-wrap: anywhere; }
+  .recovery-actions {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
   .recovery-notice small {
     display: block;
     margin-top: 3px;
     color: var(--danger);
+  }
+  .recovery-notice .recovery-help { color: var(--muted); }
+  @media (max-width: 760px) {
+    .recovery-notice { align-items: stretch; flex-direction: column; }
+    .recovery-actions { flex-wrap: wrap; justify-content: flex-end; }
   }
   .boot {
     height: 100vh;

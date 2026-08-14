@@ -21,6 +21,7 @@ import {
   RecordingSubmissionKeyStore,
   RecordingSubmissionRegistry,
   retainFailedRecordingSubmission,
+  runRecoverableRecordingAction,
   runRecordingCloseFlow,
   saveRecordingForPreview,
   shouldSubscribeRecordingJob,
@@ -769,10 +770,41 @@ describe("多段恢复录音", () => {
       "mix failed",
     );
     expect(failed[0]).toMatchObject({ busy: false, error: "mix failed" });
-    expect(beginRecoverableRecording(failed, "two")[1]).toMatchObject({
+    expect(beginRecoverableRecording(failed, "two", "continue")[1]).toMatchObject({
       busy: true,
+      busyAction: "continue",
       error: null,
     });
+  });
+
+  it("结束并保存不会启动下一段录音", async () => {
+    const order: string[] = [];
+    await runRecoverableRecordingAction(
+      "finish",
+      async () => { order.push("finish"); },
+      async () => { order.push("start"); },
+    );
+    expect(order).toEqual(["finish"]);
+  });
+
+  it("继续录音会先保存旧素材再启动新的一段", async () => {
+    const order: string[] = [];
+    await runRecoverableRecordingAction(
+      "continue",
+      async () => { order.push("finish"); },
+      async () => { order.push("start"); },
+    );
+    expect(order).toEqual(["finish", "start"]);
+  });
+
+  it("旧素材保存失败时不会启动新录音", async () => {
+    const startNext = vi.fn();
+    await expect(runRecoverableRecordingAction(
+      "continue",
+      async () => { throw new Error("mix failed"); },
+      startNext,
+    )).rejects.toThrow("mix failed");
+    expect(startNext).not.toHaveBeenCalled();
   });
 
   it("两条提交失败都保留独立重提入口，成功只移除对应项", () => {

@@ -447,8 +447,11 @@ export class RecordingCloseGuard {
 
 export interface RecoverableRecordingItem extends RecoverableRecording {
   busy: boolean;
+  busyAction: RecoverableRecordingAction | null;
   error: string | null;
 }
+
+export type RecoverableRecordingAction = "continue" | "finish";
 
 export interface PendingRecordingSubmission {
   previewId?: string;
@@ -707,6 +710,7 @@ export function makeRecoverableRecordingItems(
   return recordings.map((recording) => ({
     ...recording,
     busy: false,
+    busyAction: null,
     error: null,
   }));
 }
@@ -714,10 +718,11 @@ export function makeRecoverableRecordingItems(
 export function beginRecoverableRecording(
   recordings: RecoverableRecordingItem[],
   sessionId: string,
+  action: RecoverableRecordingAction = "finish",
 ): RecoverableRecordingItem[] {
   return recordings.map((recording) =>
     recording.sessionId === sessionId
-      ? { ...recording, busy: true, error: null }
+      ? { ...recording, busy: true, busyAction: action, error: null }
       : recording,
   );
 }
@@ -729,7 +734,7 @@ export function failRecoverableRecording(
 ): RecoverableRecordingItem[] {
   return recordings.map((recording) =>
     recording.sessionId === sessionId
-      ? { ...recording, busy: false, error }
+      ? { ...recording, busy: false, busyAction: null, error }
       : recording,
   );
 }
@@ -739,6 +744,19 @@ export function completeRecoverableRecording(
   sessionId: string,
 ): RecoverableRecordingItem[] {
   return recordings.filter((recording) => recording.sessionId !== sessionId);
+}
+
+/**
+ * 未完成音轨不能安全原地追加。继续录音时先把旧音轨保存为独立录音，
+ * 再启动新的一段，既保住旧素材，也沿用应用现有的多段录音模型。
+ */
+export async function runRecoverableRecordingAction(
+  action: RecoverableRecordingAction,
+  finishAndSave: () => Promise<void>,
+  startNext: () => Promise<void>,
+): Promise<void> {
+  await finishAndSave();
+  if (action === "continue") await startNext();
 }
 
 export function upsertPendingRecordingSubmission(
