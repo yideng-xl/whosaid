@@ -194,9 +194,8 @@ describe("RecordingPanel", () => {
     const players = screen.getAllByLabelText(/试听/);
     expect(players).toHaveLength(2);
     expect(players[0].getAttribute("src")).toBe("asset:///recordings/one.m4a");
-    expect((screen.getByRole("textbox", {
-      name: "录音名称 one.m4a",
-    }) as HTMLInputElement).value).toBe("one");
+    expect(screen.getByText("one.m4a")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "录音名称 one.m4a" })).toBeNull();
     expect(screen.getByText("/recordings/two.m4a")).toBeTruthy();
     const buttons = screen.getAllByRole("button", {
       name: /确认.+无误，开始转写/,
@@ -248,6 +247,12 @@ describe("RecordingPanel", () => {
       toAudioSrc: (path: string) => `asset://${path}`,
     });
 
+    expect(screen.queryByRole("textbox", {
+      name: "录音名称 2026-08-14_10-00-00.m4a",
+    })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", {
+      name: "重命名录音名称 2026-08-14_10-00-00.m4a",
+    }));
     const input = screen.getByRole("textbox", {
       name: "录音名称 2026-08-14_10-00-00.m4a",
     });
@@ -255,6 +260,9 @@ describe("RecordingPanel", () => {
     await fireEvent.click(screen.getByRole("button", { name: "保存录音名称" }));
 
     expect(onRenameRecording).toHaveBeenCalledWith(pending, "腾讯会议产品复盘");
+    expect(screen.queryByRole("textbox", {
+      name: "录音名称 2026-08-14_10-00-00.m4a",
+    })).toBeNull();
   });
 
   it("空路径不展示播放器", () => {

@@ -233,9 +233,10 @@ impl RecordingStore {
             }
         }
         previews.sort_by(|left, right| {
-            left.created_at
-                .total_cmp(&right.created_at)
-                .then_with(|| left.id.cmp(&right.id))
+            right
+                .created_at
+                .total_cmp(&left.created_at)
+                .then_with(|| right.id.cmp(&left.id))
         });
         Ok(previews)
     }
@@ -1131,6 +1132,40 @@ mod tests {
     }
 
     #[test]
+    fn pending_previews_are_newest_first() {
+        let root = tempdir().unwrap();
+        let store = RecordingStore::new(root.path().to_path_buf());
+        let incomplete = root.path().join(".incomplete");
+        fs::create_dir_all(&incomplete).unwrap();
+        for (session_id, filename, started_at) in [
+            (
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "older.m4a",
+                1_786_492_000.0,
+            ),
+            (
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "newer.m4a",
+                1_786_495_600.0,
+            ),
+        ] {
+            write_session_at(&incomplete, session_id, false, started_at);
+            let recording = store.recoverable_by_id(session_id).unwrap();
+            let final_path = root.path().join(filename);
+            fs::write(&final_path, filename.as_bytes()).unwrap();
+            store
+                .complete_with_receipt(&recording, &final_path)
+                .unwrap();
+            store.remove_completed_session(&recording).unwrap();
+        }
+
+        let previews = store.pending_previews().unwrap();
+        assert_eq!(previews.len(), 2);
+        assert_eq!(previews[0].id, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+        assert_eq!(previews[1].id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    }
+
+    #[test]
     fn renaming_pending_preview_updates_receipt_without_overwriting() {
         let root = tempdir().unwrap();
         let store = RecordingStore::new(root.path().to_path_buf());
@@ -1217,6 +1252,10 @@ mod tests {
     }
 
     fn write_session(root: &std::path::Path, session_id: &str, complete: bool) {
+        write_session_at(root, session_id, complete, 1786492215.0);
+    }
+
+    fn write_session_at(root: &std::path::Path, session_id: &str, complete: bool, started_at: f64) {
         let session = root.join(session_id);
         fs::create_dir_all(&session).unwrap();
         fs::write(session.join("system.caf"), b"audio").unwrap();
@@ -1225,7 +1264,7 @@ mod tests {
             serde_json::json!({
                 "schemaVersion": 1,
                 "sessionId": session_id,
-                "startedAt": 1786492215.0,
+                "startedAt": started_at,
                 "systemTrack": "system.caf",
                 "microphoneTrack": null,
                 "systemStatus": "stopped",

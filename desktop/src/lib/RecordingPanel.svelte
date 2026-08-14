@@ -41,6 +41,7 @@
   let settingsPending = $state(false);
   let confirmingPaths = $state<Set<string>>(new Set());
   let renamingPaths = $state<Set<string>>(new Set());
+  let editingPaths = $state<Set<string>>(new Set());
   let renameDrafts = $state<Record<string, string>>({});
   const ui = $derived(reduceRecordingState(recordingState(), snapshot));
   const canStop = $derived(ui.phase === "recording");
@@ -108,11 +109,23 @@
     renamingPaths = new Set(renamingPaths).add(path);
     try {
       await onRenameRecording(recording, name);
+      const nextEditing = new Set(editingPaths);
+      nextEditing.delete(path);
+      editingPaths = nextEditing;
+    } catch {
+      // 上层会在该录音条目中展示失败原因；保留编辑态供用户直接修改后重试。
     } finally {
       const next = new Set(renamingPaths);
       next.delete(path);
       renamingPaths = next;
     }
+  }
+
+  function beginRename(recording: PendingRecordingSubmission) {
+    const path = recording.finalPath.trim();
+    if (!path || recording.busy || renamingPaths.has(path)) return;
+    updateRenameDraft(recording, fileStem(path));
+    editingPaths = new Set(editingPaths).add(path);
   }
 
   async function confirmOnce(recording: PendingRecordingSubmission) {
@@ -229,25 +242,35 @@
           <article class="preview-item">
             <strong>{visibleLabel(recording)}</strong>
             <div class="rename-row">
-              <label>
-                <span>录音名称</span>
-                <input
-                  aria-label={`录音名称 ${fileName(recording.finalPath)}`}
-                  value={renameDraft(recording)}
-                  disabled={recording.busy || renamingPaths.has(recording.finalPath.trim())}
-                  oninput={(event) => updateRenameDraft(recording, event.currentTarget.value)}
-                  onkeydown={(event) => {
-                    if (event.key === "Enter") void renameOnce(recording);
-                  }}
-                />
-              </label>
-              <span>.m4a</span>
+              {#if editingPaths.has(recording.finalPath.trim())}
+                <label>
+                  <span>录音名称</span>
+                  <input
+                    aria-label={`录音名称 ${fileName(recording.finalPath)}`}
+                    value={renameDraft(recording)}
+                    disabled={recording.busy || renamingPaths.has(recording.finalPath.trim())}
+                    oninput={(event) => updateRenameDraft(recording, event.currentTarget.value)}
+                    onkeydown={(event) => {
+                      if (event.key === "Enter") void renameOnce(recording);
+                    }}
+                  />
+                </label>
+                <span>.m4a</span>
+              {:else}
+                <span class="preview-name">{fileName(recording.finalPath)}</span>
+              {/if}
               <button
                 class="save-name"
-                aria-label="保存录音名称"
+                aria-label={editingPaths.has(recording.finalPath.trim())
+                  ? "保存录音名称"
+                  : `重命名录音名称 ${fileName(recording.finalPath)}`}
                 disabled={recording.busy || renamingPaths.has(recording.finalPath.trim())}
-                onclick={() => void renameOnce(recording)}
-              >{renamingPaths.has(recording.finalPath.trim()) ? "保存中…" : "保存"}</button>
+                onclick={() => editingPaths.has(recording.finalPath.trim())
+                  ? void renameOnce(recording)
+                  : beginRename(recording)}
+              >{renamingPaths.has(recording.finalPath.trim())
+                  ? "保存中…"
+                  : editingPaths.has(recording.finalPath.trim()) ? "保存" : "重命名"}</button>
             </div>
             <span class="preview-path">{recording.finalPath}</span>
             <audio
@@ -316,6 +339,7 @@
   }
   .preview-item audio { width: 100%; }
   .rename-row { display: flex; align-items: end; gap: var(--space-2); }
+  .rename-row .preview-name { min-width: 0; flex: 1; align-self: center; font-size: 13px; }
   .rename-row label { min-width: 0; flex: 1; display: grid; gap: 4px; }
   .rename-row label span { color: var(--muted); font-size: 12px; }
   .rename-row input {
