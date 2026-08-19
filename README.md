@@ -38,6 +38,7 @@ Windows 使用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)，
 | **三期 · Windows 版本** | faster-whisper CPU 后端 + 自包含运行时 + NSIS 安装包 | 🧪 首个候选包已生成，待实机转写验收 |
 | **后续 · 人名统一替换** | 候选词提取、人工确认、一键统一替换正文和说话人显示名 | ✅ 首版完成 |
 | 后续 · 直接录音 | macOS app 内直接录全系统声音和可选麦克风，试听确认后手动开始分人转写 | 🧪 自动验证与打包验收中 |
+| 未来 · 姓名库与专用词库 | 本地维护姓名、常见称呼和行业术语，转写时作为上下文提示，转写后辅助统一校对 | 📝 待设计 |
 
 > Windows 首版支持 Windows 10/11 x64，默认使用 CPU；NVIDIA CUDA 加速放在后续阶段。
 
