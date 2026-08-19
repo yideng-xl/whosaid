@@ -3,6 +3,17 @@ import { describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar.svelte";
 
 describe("Sidebar 录音入口", () => {
+  it("词库入口可打开管理页", async () => {
+    const onOpenVocabulary = vi.fn();
+    render(Sidebar, {
+      jobs: [], selectedJobId: null, dragging: false,
+      onSelect: vi.fn(), onOpenModels: vi.fn(), onOpenVocabulary,
+      onDelete: vi.fn(),
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "词库" }));
+    expect(onOpenVocabulary).toHaveBeenCalledOnce();
+  });
+
   it("能力确认前和不支持的平台不显示录音入口", () => {
     render(Sidebar, {
       jobs: [],

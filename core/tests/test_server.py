@@ -6,6 +6,7 @@ from transcribe_core.jobs import JobQueue
 from transcribe_core.models import ModelRegistry
 from transcribe_core.transcript import Segment
 from transcribe_core.backend import InferenceBackend
+from transcribe_core.vocabulary import VocabularyStore
 
 
 def _wait_done(c, jid):
@@ -38,14 +39,15 @@ class FailingBackend(InferenceBackend):
         return [(0.0, 5.0, "SPEAKER_00")]
 
 
-def make_client(tmp_path, backend=None, store=None):
+def make_client(tmp_path, backend=None, store=None, vocabulary=None):
     if backend is None:
         backend = FakeBackend()
     reg = ModelRegistry(str(tmp_path / "config.json"),
                         is_downloaded_fn=lambda repo: True,
                         download_fn=lambda repo: None)
     app = create_app(JobQueue(backend, duration_fn=lambda p: 1.0,
-                               extract_fn=lambda src, start, dur: src), reg, store=store)
+                               extract_fn=lambda src, start, dur: src), reg,
+                     store=store, vocabulary=vocabulary)
     return TestClient(app)
 
 
@@ -449,6 +451,40 @@ def test_hf_settings_clearing_removes_env(tmp_path, monkeypatch):
     c.post("/settings/hf", json={"hf_token": "", "hf_endpoint": None})
     import os
     assert os.environ.get("HF_TOKEN") is None
+
+
+def test_vocabulary_crud_endpoints(tmp_path):
+    vocabulary = VocabularyStore(tmp_path / "vocabulary.json")
+    c = make_client(tmp_path, vocabulary=vocabulary)
+
+    created = c.post("/vocabulary", json={
+        "kind": "person", "canonical": "许磊", "aliases": ["许雷"]
+    })
+    assert created.status_code == 200
+    entry = created.json()
+    assert c.get("/vocabulary").json() == [entry]
+
+    updated = c.put(f"/vocabulary/{entry['id']}", json={
+        "kind": "person", "canonical": "许磊", "aliases": ["徐磊"],
+        "enabled": False,
+    })
+    assert updated.status_code == 200
+    assert updated.json()["aliases"] == ["徐磊"]
+    assert updated.json()["enabled"] is False
+
+    assert c.delete(f"/vocabulary/{entry['id']}").status_code == 200
+    assert c.get("/vocabulary").json() == []
+
+
+def test_vocabulary_endpoints_validate_and_report_missing_entries(tmp_path):
+    vocabulary = VocabularyStore(tmp_path / "vocabulary.json")
+    c = make_client(tmp_path, vocabulary=vocabulary)
+    assert c.post("/vocabulary", json={
+        "kind": "other", "canonical": "x"
+    }).status_code == 422
+    payload = {"kind": "term", "canonical": "端到端探测"}
+    assert c.put("/vocabulary/missing", json=payload).status_code == 404
+    assert c.delete("/vocabulary/missing").status_code == 404
 
 
 def test_download_endpoint_maps_401_to_readable_403(tmp_path):

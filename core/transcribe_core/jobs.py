@@ -41,6 +41,8 @@ class Job:
     blocks: list[tuple[float, float, str]] | None = None   # refine_turns 精炼后的发言块，持久化供 resume 免重跑分离
     # 仅由需要跨 HTTP 重试去重的调用方提供。普通手工提交保持 None，允许同一路径反复转写。
     idempotency_key: str | None = None
+    # 任务创建时冻结的词库提示词。冻结而非逐块动态读取，避免编辑词库后同一稿件前后标准不一。
+    transcription_prompt: str | None = None
 
 
 class IdempotencyConflict(ValueError):
@@ -52,7 +54,9 @@ class JobQueue:
                  backend_factory: Callable[[str, str], InferenceBackend] | None = None,
                  registry=None,
                  language: str | None = "zh",
-                 prompt: str | None = None, num_speakers: int | None = None,
+                 prompt: str | None = None,
+                 prompt_provider: Callable[[], str | None] | None = None,
+                 num_speakers: int | None = None,
                  on_change: Callable[[Job], None] | None = None,
                  duration_fn: Callable[[str], float] | None = None,
                  extract_fn: Callable[[str, float, float], str] | None = None,
@@ -66,6 +70,7 @@ class JobQueue:
         self._registry = registry
         self.language = language
         self.prompt = prompt
+        self._prompt_provider = prompt_provider
         self.num_speakers = num_speakers
         self._on_change = on_change
         # duration_fn/extract_fn：可注入的音频 IO 钩子（便于测试；默认惰性 import 真实实现）
@@ -121,6 +126,16 @@ class JobQueue:
         from .audio import extract_wav
         return extract_wav(src, start, dur)
 
+    def _snapshot_prompt(self) -> str | None:
+        parts = []
+        if self.prompt and self.prompt.strip():
+            parts.append(self.prompt.strip())
+        if self._prompt_provider is not None:
+            dynamic = self._prompt_provider()
+            if dynamic and dynamic.strip():
+                parts.append(dynamic.strip())
+        return "\n".join(parts) or None
+
     def preload(self, jobs: list[Job]) -> None:
         """预载历史 job 到队列（用于恢复持久化状态）。加锁避免与后台 submit_async 竞态。"""
         with self._lock:
@@ -133,7 +148,8 @@ class JobQueue:
         jid = self._new_id()
         job = Job(id=jid, audio_path=audio_path, status="queued",
                   progress=0.0, transcript=None, error=None, created_at=time.time(),
-                  num_speakers=num_speakers)
+                  num_speakers=num_speakers,
+                  transcription_prompt=self._snapshot_prompt())
         self._jobs[jid] = job
         self.run_job(job, on_progress=lambda j: None)
         return jid
@@ -183,7 +199,8 @@ class JobQueue:
             jid = self._new_id()
             job = Job(id=jid, audio_path=canonical_audio_path, status="queued",
                       progress=0.0, transcript=None, error=None, created_at=time.time(),
-                      num_speakers=num_speakers, idempotency_key=key)
+                      num_speakers=num_speakers, idempotency_key=key,
+                      transcription_prompt=self._snapshot_prompt())
             self._jobs[jid] = job
             if key is not None:
                 self._idempotency_jobs[key] = jid
@@ -299,7 +316,9 @@ class JobQueue:
                         bstart, bend, bspk = job.blocks[index]
                         wav = self._extract(job.audio_path, bstart, bend - bstart)
                         try:
-                            segs = backend.transcribe(wav, self.language, self.prompt)
+                            segs = backend.transcribe(
+                                wav, self.language, job.transcription_prompt
+                            )
                         finally:
                             if self._extract_fn is None:
                                 os.remove(wav)  # 真实临时文件才删；注入的假路径不删

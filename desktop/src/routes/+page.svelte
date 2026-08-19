@@ -5,6 +5,7 @@
   import Sidebar from "$lib/Sidebar.svelte";
   import TranscriptView from "$lib/TranscriptView.svelte";
   import ModelManager from "$lib/ModelManager.svelte";
+  import VocabularyManager from "$lib/VocabularyManager.svelte";
   import RecordingPanel from "$lib/RecordingPanel.svelte";
   import { createApi, type JobSummary } from "$lib/api";
   import {
@@ -62,7 +63,7 @@
   let statusText = $state("服务启动中…");
   let jobs = $state<JobSummary[]>([]);
   let selectedJobId = $state<string | null>(null);
-  let view = $state<"transcript" | "models" | "recording">("transcript");
+  let view = $state<"transcript" | "models" | "vocabulary" | "recording">("transcript");
   let dragging = $state(false);
   let errorBanner = $state<string | null>(null);
   let modelsNotReady = $state(false);
@@ -785,6 +786,7 @@
       {dragging}
       {onSelect}
       onOpenModels={() => (view = "models")}
+      onOpenVocabulary={() => (view = "vocabulary")}
       onStartRecording={openRecordingEntry}
       {recordingAvailable}
       {recordingActive}
@@ -836,6 +838,8 @@
         />
       {:else if view === "models" && api}
         <ModelManager {api} onClose={() => (view = "transcript")} />
+      {:else if view === "vocabulary" && api}
+        <VocabularyManager {api} onClose={() => (view = "transcript")} />
       {:else if api && selectedJobId}
         <TranscriptView
           {api}

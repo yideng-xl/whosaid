@@ -75,6 +75,7 @@ HF_ENDPOINT=https://hf-mirror.com venv/bin/pytest -q -m slow
 | `faster_whisper_backend.py` | `InferenceBackend` 的 Windows/CPU 实现：faster-whisper `int8` 转写 + pyannote 说话人分离 |
 | `backend_selection.py` | 按操作系统或 `WHOSAID_BACKEND` 选择并创建推理后端 |
 | `models.py` | 模型注册表：内置模型清单、下载状态、当前启用模型，持久化到 `config.json` |
+| `vocabulary.py` | 本地姓名库与专用词库：原子持久化、校验、启用控制和转写提示词生成 |
 | `jobs.py` | 转写任务队列：串联 转写→分离→对齐→生成 Transcript，推进度，全局信号量保证单并发 |
 | `server.py` | FastAPI 服务：REST + WebSocket，把上述组件装配成可被外壳调用的接口 |
 

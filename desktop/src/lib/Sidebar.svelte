@@ -10,6 +10,7 @@
     dragging = false,
     onSelect,
     onOpenModels,
+    onOpenVocabulary = () => {},
     onDelete,
     onStartRecording = () => {},
     recordingAvailable = false,
@@ -24,6 +25,7 @@
     dragging: boolean;
     onSelect: (id: string) => void;
     onOpenModels: () => void;
+    onOpenVocabulary?: () => void;
     onDelete: (id: string) => void;
     onStartRecording?: () => void;
     recordingAvailable?: boolean;
@@ -159,10 +161,16 @@
   </div>
 
   <div class="footer">
-    <button class="models-entry" aria-label="模型管理" onclick={onOpenModels}>
-      <Icon name="gear" size={14} />
-      <span>模型管理</span>
-    </button>
+    <div class="footer-links">
+      <button class="models-entry" aria-label="词库" onclick={onOpenVocabulary}>
+        <Icon name="book" size={14} />
+        <span>词库</span>
+      </button>
+      <button class="models-entry" aria-label="模型管理" onclick={onOpenModels}>
+        <Icon name="gear" size={14} />
+        <span>模型</span>
+      </button>
+    </div>
     <button
       class="theme-toggle"
       aria-label={currentTheme === "dark" ? "切换到浅色模式" : "切换到深色模式"}
@@ -411,6 +419,7 @@
     color: var(--muted);
   }
   .models-entry:hover { color: var(--accent); }
+  .footer-links { display: flex; align-items: center; gap: var(--space-2); }
   .theme-toggle {
     flex-shrink: 0;
     display: inline-flex;

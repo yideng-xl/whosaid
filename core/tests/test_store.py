@@ -37,6 +37,23 @@ def test_idempotency_key_roundtrips_and_old_job_defaults_to_none(tmp_path):
     assert jobs["legacy"].idempotency_key is None
 
 
+def test_transcription_prompt_roundtrips_and_old_job_defaults_to_none(tmp_path):
+    store = JobStore(str(tmp_path))
+    job = _done_job()
+    job.transcription_prompt = "姓名：许磊。"
+    store.save(job)
+    loaded = JobStore(str(tmp_path)).load_all()[0]
+    assert loaded.transcription_prompt == "姓名：许磊。"
+
+    import json
+    (store.dir / "legacy-prompt.json").write_text(json.dumps({
+        "id": "legacy-prompt", "audio_path": "/x/old.m4a", "status": "done",
+        "progress": 1.0, "error": None, "transcript": None,
+    }), encoding="utf-8")
+    jobs = {item.id: item for item in JobStore(str(tmp_path)).load_all()}
+    assert jobs["legacy-prompt"].transcription_prompt is None
+
+
 def test_interrupted_started_job_releases_idempotency_key(tmp_path):
     """重启时非终态任务统一失败并释放键，允许用户重新启动实际 runner。"""
     store = JobStore(str(tmp_path))

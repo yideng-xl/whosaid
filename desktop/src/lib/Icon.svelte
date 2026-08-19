@@ -31,6 +31,8 @@
     "computer-audio": "M3 5h14v10H3Z M8 19h4M10 15v4M20 8v4M22 6v8",
     microphone: "M9 5a3 3 0 0 1 6 0v6a3 3 0 0 1-6 0V5Z M5 10v1a7 7 0 0 0 14 0v-1M12 18v4M8 22h8",
     warning: "M12 3 2.5 20h19L12 3Z M12 9v5M12 17h.01",
+    // 词库：打开的书页。
+    book: "M4 4.5h5a3 3 0 0 1 3 3v12a3 3 0 0 0-3-3H4V4.5Z M20 4.5h-5a3 3 0 0 0-3 3v12a3 3 0 0 1 3-3h5V4.5Z",
   };
 </script>
 

@@ -29,6 +29,25 @@ export interface HfSettings {
   hf_endpoint: string | null;
 }
 
+export type VocabularyKind = "person" | "term";
+
+export interface VocabularyEntry {
+  id: string;
+  kind: VocabularyKind;
+  canonical: string;
+  aliases: string[];
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface VocabularyInput {
+  kind: VocabularyKind;
+  canonical: string;
+  aliases: string[];
+  enabled: boolean;
+}
+
 export interface Speaker {
   orig: string; // 原始标签，如 "说话人A"，rename 时作为 orig 传回
   name: string; // 当前显示名（改名后为真名）
@@ -191,6 +210,33 @@ export function createApi(port: number) {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(settings),
+      }));
+    },
+
+    // 姓名库与专用词库 API
+    async listVocabulary(): Promise<VocabularyEntry[]> {
+      return j(await fetch(`${base}/vocabulary`));
+    },
+
+    async addVocabulary(input: VocabularyInput): Promise<VocabularyEntry> {
+      return j(await fetch(`${base}/vocabulary`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      }));
+    },
+
+    async updateVocabulary(id: string, input: VocabularyInput): Promise<VocabularyEntry> {
+      return j(await fetch(`${base}/vocabulary/${encodeURIComponent(id)}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      }));
+    },
+
+    async deleteVocabulary(id: string): Promise<void> {
+      await j(await fetch(`${base}/vocabulary/${encodeURIComponent(id)}`, {
+        method: "DELETE",
       }));
     },
 

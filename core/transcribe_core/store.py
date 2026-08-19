@@ -28,6 +28,7 @@ class JobStore:
                 "created_at": job.created_at, "num_speakers": job.num_speakers,
                 "transcript": job.transcript.to_dict() if job.transcript else None,
                 "blocks": job.blocks, "idempotency_key": job.idempotency_key,
+                "transcription_prompt": job.transcription_prompt,
             }
             target = self._path(job.id)
             temporary = self.dir / f".{job.id}.{threading.get_ident()}.tmp"
@@ -65,7 +66,8 @@ class JobStore:
                       blocks=d.get("blocks"),
                       idempotency_key=(
                           None if recovered_nonterminal else d.get("idempotency_key")
-                      ))
+                      ),
+                      transcription_prompt=d.get("transcription_prompt"))
             jobs.append(job)
             if recovered_nonterminal:
                 # 尽力把恢复决定写回磁盘，避免下一次重启重复遇到旧状态；失败也不能

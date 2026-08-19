@@ -42,6 +42,32 @@ def test_run_job_success_produces_labeled_transcript():
     assert job.transcript.to_txt() == "说话人A：你好在吗\n\n说话人B：你好在吗\n\n"
 
 
+def test_vocabulary_prompt_is_snapshotted_once_per_job():
+    prompts = []
+    current = {"value": "姓名：张三。"}
+
+    class PromptBackend(FakeBackend):
+        def transcribe(self, audio_path, language, initial_prompt):
+            prompts.append(initial_prompt)
+            # 第一块转完后模拟用户编辑词库；第二块仍应使用任务创建时的快照。
+            current["value"] = "姓名：李四。"
+            return super().transcribe(audio_path, language, initial_prompt)
+
+    q = JobQueue(
+        PromptBackend(),
+        prompt_provider=lambda: current["value"],
+        duration_fn=lambda p: 1.0,
+        extract_fn=lambda src, start, dur: src,
+    )
+    first = q.submit("/x/a.m4a")
+    second = q.submit("/x/b.m4a")
+
+    assert prompts[:2] == ["姓名：张三。", "姓名：张三。"]
+    assert prompts[2:] == ["姓名：李四。", "姓名：李四。"]
+    assert q.get(first).transcription_prompt == "姓名：张三。"
+    assert q.get(second).transcription_prompt == "姓名：李四。"
+
+
 def test_run_job_failure_sets_error():
     q = JobQueue(BoomBackend(), duration_fn=lambda p: 1.0,
                  extract_fn=lambda src, start, dur: src)

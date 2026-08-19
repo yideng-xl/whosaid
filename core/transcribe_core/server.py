@@ -44,6 +44,13 @@ class HfSettingsReq(BaseModel):
     hf_endpoint: str | None = None
 
 
+class VocabularyReq(BaseModel):
+    kind: str
+    canonical: str
+    aliases: list[str] = Field(default_factory=list)
+    enabled: bool = True
+
+
 def _start_parent_watchdog(poll_sec: float = 2.0) -> None:
     """盯住父进程：Tauri 外壳一旦退出（含被强杀/dev 重启），本服务会被 launchd 收养
     （getppid()==1），此时自我退出，避免残留孤儿进程占用内存与模型。仅当父进程真的消失
@@ -61,7 +68,7 @@ def _start_parent_watchdog(poll_sec: float = 2.0) -> None:
     threading.Thread(target=_watch, daemon=True).start()
 
 
-def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
+def create_app(queue: JobQueue, registry: ModelRegistry, store=None, vocabulary=None) -> FastAPI:
     app = FastAPI(title="本地转写服务")
     # 桌面外壳(Tauri)的前端页面来自 localhost:1420/tauri://，与本服务(127.0.0.1:随机端口)
     # 跨域。本服务仅监听回环、单机自用，放开所有来源即可，否则 webview 的 fetch 会被 CORS 拦成
@@ -303,6 +310,47 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None) -> FastAPI:
             os.environ.pop("HF_ENDPOINT", None)
         return {"ok": True}
 
+    def _vocabulary_or_503():
+        if vocabulary is None:
+            raise HTTPException(503, "词库尚未初始化")
+        return vocabulary
+
+    @app.get("/vocabulary")
+    def list_vocabulary():
+        return _vocabulary_or_503().list()
+
+    @app.post("/vocabulary")
+    def add_vocabulary(req: VocabularyReq):
+        try:
+            return _vocabulary_or_503().add(
+                req.kind, req.canonical, req.aliases, req.enabled
+            )
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+
+    @app.put("/vocabulary/{entry_id}")
+    def update_vocabulary(entry_id: str, req: VocabularyReq):
+        try:
+            return _vocabulary_or_503().update(
+                entry_id,
+                kind=req.kind,
+                canonical=req.canonical,
+                aliases=req.aliases,
+                enabled=req.enabled,
+            )
+        except KeyError as error:
+            raise HTTPException(404, "词库条目不存在") from error
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+
+    @app.delete("/vocabulary/{entry_id}")
+    def delete_vocabulary(entry_id: str):
+        try:
+            _vocabulary_or_503().delete(entry_id)
+        except KeyError as error:
+            raise HTTPException(404, "词库条目不存在") from error
+        return {"ok": True}
+
     @app.websocket("/ws/jobs/{job_id}")
     async def ws_job(websocket: WebSocket, job_id: str):
         await websocket.accept()
@@ -341,11 +389,13 @@ def main() -> None:  # 生产入口：按平台注入推理后端，随机端口
     import platform
     import socket
     import sys
+    from pathlib import Path
     import uvicorn
 
     from .backend_selection import choose_backend_id, create_backend
     from .models import models_for_backend
     from .store import JobStore
+    from .vocabulary import VocabularyStore
     from huggingface_hub import try_to_load_from_cache  # 判断模型是否已在本地缓存
 
     def is_downloaded(repo: str) -> bool:
@@ -392,7 +442,9 @@ def main() -> None:  # 生产入口：按平台注入推理后端，随机端口
         os.environ["HF_TOKEN"] = _saved["hf_token"]
     if _saved.get("hf_endpoint"):
         os.environ["HF_ENDPOINT"] = _saved["hf_endpoint"]
-    store = JobStore(os.environ.get("WHOSAID_DATA_DIR", "."))
+    data_dir = os.environ.get("WHOSAID_DATA_DIR", ".")
+    store = JobStore(data_dir)
+    vocabulary = VocabularyStore(Path(data_dir) / "vocabulary.json")
     # 注入 backend_factory + registry：每个任务开跑前按"当前启用模型"现构后端，
     # 使 /models/active 切换的模型能在下一个任务真正生效（而非固定在启动时的 large-v3）
     queue = JobQueue(
@@ -400,10 +452,11 @@ def main() -> None:  # 生产入口：按平台注入推理后端，随机端口
             backend_id, whisper_repo, diarize_repo
         ),
         registry=registry,
+        prompt_provider=vocabulary.build_prompt,
         on_change=store.save,
     )
     queue.preload(store.load_all())
-    app = create_app(queue, registry, store)
+    app = create_app(queue, registry, store, vocabulary)
 
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))

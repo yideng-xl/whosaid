@@ -177,4 +177,33 @@ describe("api", () => {
       }),
     );
   });
+
+  it("词库 API 支持查询、添加、编辑和删除", async () => {
+    const entry = {
+      id: "entry-1", kind: "person", canonical: "许磊", aliases: ["许雷"],
+      enabled: true, created_at: 1, updated_at: 1,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => [entry] })
+      .mockResolvedValueOnce({ ok: true, json: async () => entry })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ...entry, enabled: false }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(4444);
+    const input = { kind: "person" as const, canonical: "许磊", aliases: ["许雷"], enabled: true };
+
+    expect(await api.listVocabulary()).toEqual([entry]);
+    await api.addVocabulary(input);
+    await api.updateVocabulary("entry-1", { ...input, enabled: false });
+    await api.deleteVocabulary("entry-1");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "http://127.0.0.1:4444/vocabulary");
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "http://127.0.0.1:4444/vocabulary", expect.objectContaining({
+      method: "POST", body: JSON.stringify(input),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "http://127.0.0.1:4444/vocabulary/entry-1", expect.objectContaining({
+      method: "PUT", body: JSON.stringify({ ...input, enabled: false }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(4, "http://127.0.0.1:4444/vocabulary/entry-1", expect.objectContaining({ method: "DELETE" }));
+  });
 });
