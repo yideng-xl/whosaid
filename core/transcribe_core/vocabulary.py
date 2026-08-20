@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 
-KINDS = {"person", "term"}
+KINDS = {"person", "term", "other"}
 MAX_ENTRIES = 1000
 MAX_ALIASES = 20
 MAX_TEXT_LENGTH = 80
@@ -71,7 +71,7 @@ class VocabularyStore:
     def _validated_entry(cls, raw: dict) -> VocabularyEntry:
         kind = raw.get("kind")
         if kind not in KINDS:
-            raise ValueError("词库类型必须为 person 或 term")
+            raise ValueError("词库类型必须为 person、term 或 other")
         canonical = cls._normalize_text(str(raw.get("canonical", "")), "标准写法")
         aliases_raw = raw.get("aliases", [])
         if not isinstance(aliases_raw, list) or not all(isinstance(x, str) for x in aliases_raw):
@@ -149,7 +149,7 @@ class VocabularyStore:
         enabled: bool = True,
     ) -> dict:
         if kind not in KINDS:
-            raise ValueError("词库类型必须为 person 或 term")
+            raise ValueError("词库类型必须为 person、term 或 other")
         normalized = self._normalize_text(canonical, "标准写法")
         normalized_aliases = self._normalize_aliases(aliases or [], normalized)
         with self._lock:
@@ -176,7 +176,7 @@ class VocabularyStore:
         aliases: list[str] | None = None, enabled: bool = True,
     ) -> dict:
         if kind not in KINDS:
-            raise ValueError("词库类型必须为 person 或 term")
+            raise ValueError("词库类型必须为 person、term 或 other")
         normalized = self._normalize_text(canonical, "标准写法")
         normalized_aliases = self._normalize_aliases(aliases or [], normalized)
         with self._lock:
@@ -210,6 +210,64 @@ class VocabularyStore:
             self._save_locked(next_entries)
             self._entries = next_entries
 
+    def replace_all(self, groups: dict[str, list[str]]) -> list[dict]:
+        """用三个文本框的内容整体替换词库；同类同词保留原 id、别名和创建时间。"""
+        if set(groups) != KINDS:
+            raise ValueError("批量词库必须同时包含 person、term 和 other")
+        normalized_groups: dict[str, list[str]] = {}
+        total = 0
+        for kind in ("person", "term", "other"):
+            values = groups[kind]
+            if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+                raise ValueError("批量词库内容必须为字符串列表")
+            normalized: list[str] = []
+            seen: set[str] = set()
+            for value in values:
+                canonical = self._normalize_text(value, "标准写法")
+                key = canonical.casefold()
+                if key not in seen:
+                    seen.add(key)
+                    normalized.append(canonical)
+            normalized_groups[kind] = normalized
+            total += len(normalized)
+        if total > MAX_ENTRIES:
+            raise ValueError(f"词库最多保存 {MAX_ENTRIES} 条")
+
+        with self._lock:
+            existing = {
+                (entry.kind, entry.canonical.casefold()): entry
+                for entry in self._entries
+            }
+            next_entries: list[VocabularyEntry] = []
+            for kind in ("person", "term", "other"):
+                for canonical in normalized_groups[kind]:
+                    old = existing.get((kind, canonical.casefold()))
+                    if old is not None:
+                        entry = old if old.enabled else VocabularyEntry(
+                            id=old.id,
+                            kind=old.kind,
+                            canonical=old.canonical,
+                            aliases=old.aliases,
+                            enabled=True,
+                            created_at=old.created_at,
+                            updated_at=self._clock(),
+                        )
+                    else:
+                        now = self._clock()
+                        entry = VocabularyEntry(
+                            id=self._id_factory(),
+                            kind=kind,
+                            canonical=canonical,
+                            aliases=[],
+                            enabled=True,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    next_entries.append(entry)
+            self._save_locked(next_entries)
+            self._entries = next_entries
+            return [asdict(entry) for entry in self._entries]
+
     def build_prompt(self, max_chars: int = 1000, max_entries: int = 100) -> str | None:
         """只把启用条目的标准写法送给模型；别名留给后续校对，不诱导模型输出误写。"""
         if max_chars <= 0 or max_entries <= 0:
@@ -221,6 +279,7 @@ class VocabularyStore:
 
         people: list[str] = []
         terms: list[str] = []
+        others: list[str] = []
         prefix = "以下是本次会议可能出现的标准写法。"
         suffix = "请优先使用这些标准写法。"
 
@@ -230,13 +289,19 @@ class VocabularyStore:
                 sections.append(f"姓名：{'、'.join(people)}。")
             if terms:
                 sections.append(f"专用词：{'、'.join(terms)}。")
+            if others:
+                sections.append(f"其他：{'、'.join(others)}。")
             return prefix + "".join(sections) + suffix
 
         for entry in enabled:
-            target = people if entry.kind == "person" else terms
+            target = (
+                people if entry.kind == "person"
+                else terms if entry.kind == "term"
+                else others
+            )
             target.append(entry.canonical)
             if len(render()) > max_chars:
                 target.pop()
                 continue
         prompt = render()
-        return prompt if people or terms else None
+        return prompt if people or terms or others else None

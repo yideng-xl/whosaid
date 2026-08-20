@@ -480,11 +480,26 @@ def test_vocabulary_endpoints_validate_and_report_missing_entries(tmp_path):
     vocabulary = VocabularyStore(tmp_path / "vocabulary.json")
     c = make_client(tmp_path, vocabulary=vocabulary)
     assert c.post("/vocabulary", json={
-        "kind": "other", "canonical": "x"
+        "kind": "unknown", "canonical": "x"
     }).status_code == 422
     payload = {"kind": "term", "canonical": "端到端探测"}
     assert c.put("/vocabulary/missing", json=payload).status_code == 404
     assert c.delete("/vocabulary/missing").status_code == 404
+
+
+def test_vocabulary_bulk_endpoint_replaces_three_text_boxes(tmp_path):
+    vocabulary = VocabularyStore(tmp_path / "vocabulary.json")
+    c = make_client(tmp_path, vocabulary=vocabulary)
+    response = c.put("/vocabulary/bulk", json={
+        "person": ["许磊", "张三"],
+        "term": ["端到端探测"],
+        "other": ["陕西省调"],
+    })
+    assert response.status_code == 200
+    assert [(row["kind"], row["canonical"]) for row in response.json()] == [
+        ("person", "许磊"), ("person", "张三"),
+        ("term", "端到端探测"), ("other", "陕西省调"),
+    ]
 
 
 def test_download_endpoint_maps_401_to_readable_403(tmp_path):

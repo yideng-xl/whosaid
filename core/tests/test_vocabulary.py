@@ -6,8 +6,8 @@ from transcribe_core.vocabulary import VocabularyStore
 
 
 def make_store(tmp_path):
-    ids = iter(["entry-1", "entry-2", "entry-3"])
-    times = iter([10.0, 20.0, 30.0, 40.0])
+    ids = iter(["entry-1", "entry-2", "entry-3", "entry-4", "entry-5"])
+    times = iter([10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
     return VocabularyStore(
         tmp_path / "vocabulary.json",
         id_factory=lambda: next(ids),
@@ -66,6 +66,37 @@ def test_build_prompt_uses_only_enabled_canonical_forms(tmp_path):
     )
     assert "许雷" not in prompt
     assert "不启用" not in prompt
+
+
+def test_replace_all_supports_three_groups_and_preserves_existing_metadata(tmp_path):
+    store = make_store(tmp_path)
+    existing = store.add("person", "许磊", ["许雷"])
+
+    rows = store.replace_all({
+        "person": [" 许磊 ", "张三", "张三"],
+        "term": ["端到端探测"],
+        "other": ["陕西省调"],
+    })
+
+    assert [(row["kind"], row["canonical"]) for row in rows] == [
+        ("person", "许磊"), ("person", "张三"),
+        ("term", "端到端探测"), ("other", "陕西省调"),
+    ]
+    assert rows[0]["id"] == existing["id"]
+    assert rows[0]["aliases"] == ["许雷"]
+    assert "其他：陕西省调。" in store.build_prompt()
+
+
+def test_replace_all_is_atomic_when_write_fails(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    store.add("person", "张三")
+    before = store.list()
+    monkeypatch.setattr(store, "_save_locked", lambda entries: (_ for _ in ()).throw(
+        OSError("disk full")
+    ))
+    with pytest.raises(OSError, match="disk full"):
+        store.replace_all({"person": ["李四"], "term": [], "other": []})
+    assert store.list() == before
 
 
 def test_build_prompt_obeys_complete_term_boundary(tmp_path):

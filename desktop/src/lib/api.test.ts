@@ -206,4 +206,18 @@ describe("api", () => {
     }));
     expect(fetchMock).toHaveBeenNthCalledWith(4, "http://127.0.0.1:4444/vocabulary/entry-1", expect.objectContaining({ method: "DELETE" }));
   });
+
+  it("词库 API 支持三个文本框整组保存", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => [] });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(4444);
+    const groups = {
+      person: ["许磊", "张三"], term: ["端到端探测"], other: ["陕西省调"],
+    };
+    await api.replaceVocabulary(groups);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4444/vocabulary/bulk",
+      expect.objectContaining({ method: "PUT", body: JSON.stringify(groups) }),
+    );
+  });
 });

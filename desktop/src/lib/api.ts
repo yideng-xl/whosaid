@@ -29,7 +29,13 @@ export interface HfSettings {
   hf_endpoint: string | null;
 }
 
-export type VocabularyKind = "person" | "term";
+export type VocabularyKind = "person" | "term" | "other";
+
+export interface VocabularyGroups {
+  person: string[];
+  term: string[];
+  other: string[];
+}
 
 export interface VocabularyEntry {
   id: string;
@@ -223,6 +229,14 @@ export function createApi(port: number) {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(input),
+      }));
+    },
+
+    async replaceVocabulary(groups: VocabularyGroups): Promise<VocabularyEntry[]> {
+      return j(await fetch(`${base}/vocabulary/bulk`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(groups),
       }));
     },
 

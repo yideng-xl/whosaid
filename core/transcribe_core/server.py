@@ -51,6 +51,12 @@ class VocabularyReq(BaseModel):
     enabled: bool = True
 
 
+class BulkVocabularyReq(BaseModel):
+    person: list[str] = Field(default_factory=list)
+    term: list[str] = Field(default_factory=list)
+    other: list[str] = Field(default_factory=list)
+
+
 def _start_parent_watchdog(poll_sec: float = 2.0) -> None:
     """盯住父进程：Tauri 外壳一旦退出（含被强杀/dev 重启），本服务会被 launchd 收养
     （getppid()==1），此时自我退出，避免残留孤儿进程占用内存与模型。仅当父进程真的消失
@@ -325,6 +331,17 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None, vocabulary=
             return _vocabulary_or_503().add(
                 req.kind, req.canonical, req.aliases, req.enabled
             )
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+
+    @app.put("/vocabulary/bulk")
+    def replace_vocabulary(req: BulkVocabularyReq):
+        try:
+            return _vocabulary_or_503().replace_all({
+                "person": req.person,
+                "term": req.term,
+                "other": req.other,
+            })
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
 
