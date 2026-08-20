@@ -6,8 +6,8 @@ from transcribe_core.vocabulary import VocabularyStore
 
 
 def make_store(tmp_path):
-    ids = iter(["entry-1", "entry-2", "entry-3", "entry-4", "entry-5"])
-    times = iter([10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+    ids = iter([f"library-{index}" for index in range(1, 20)])
+    times = iter(float(index * 10) for index in range(1, 30))
     return VocabularyStore(
         tmp_path / "vocabulary.json",
         id_factory=lambda: next(ids),
@@ -15,33 +15,82 @@ def make_store(tmp_path):
     )
 
 
-def test_crud_persists_and_normalizes_aliases(tmp_path):
+def test_library_crud_persists_and_normalizes_terms(tmp_path):
     store = make_store(tmp_path)
-    person = store.add("person", " 许磊 ", ["许雷", "许雷", "许磊"])
-    assert person["canonical"] == "许磊"
-    assert person["aliases"] == ["许雷"]
+    names = store.add(" 姓名 ", "general", ["许磊", "许磊", " 张三 "])
+    assert names["name"] == "姓名"
+    assert names["terms"] == ["许磊", "张三"]
 
     updated = store.update(
-        person["id"], kind="person", canonical="许磊",
-        aliases=["徐磊"], enabled=False,
+        names["id"], name="常用姓名", scope="general", terms=["许磊", "李四"]
     )
-    assert updated["enabled"] is False
     assert updated["created_at"] == 10.0
     assert updated["updated_at"] == 20.0
+    assert VocabularyStore(tmp_path / "vocabulary.json").list() == [updated]
 
     reloaded = VocabularyStore(tmp_path / "vocabulary.json")
-    assert reloaded.list() == [updated]
-    reloaded.delete(person["id"])
+    reloaded.delete(names["id"])
     assert reloaded.list() == []
 
 
-def test_duplicate_standard_form_is_rejected_within_same_kind(tmp_path):
+def test_duplicate_library_name_is_rejected_case_insensitively(tmp_path):
     store = make_store(tmp_path)
-    store.add("term", "端到端探测")
-    with pytest.raises(ValueError, match="已存在"):
-        store.add("term", " 端到端探测 ")
-    # 同一写法可分别作为姓名和术语保存，避免替用户推断语义。
-    store.add("person", "端到端探测")
+    store.add("WhoSaid", "general", [])
+    with pytest.raises(ValueError, match="同名"):
+        store.add("whosaid", "specialized", ["端到端探测"])
+
+
+def test_default_prompt_uses_only_general_libraries(tmp_path):
+    store = make_store(tmp_path)
+    general = store.add("姓名", "general", ["许磊", "张三"])
+    store.add("集管", "specialized", ["OMS", "工单追溯"])
+
+    prompt, selected = store.build_prompt_snapshot(None)
+
+    assert selected == [general["id"]]
+    assert prompt == (
+        "以下是本次会议可能出现的标准写法。"
+        "词库“姓名”：许磊、张三。请优先使用这些标准写法。"
+    )
+    assert "OMS" not in prompt
+
+
+def test_explicit_selection_can_include_specialized_or_nothing(tmp_path):
+    store = make_store(tmp_path)
+    store.add("姓名", "general", ["许磊"])
+    product = store.add("集管", "specialized", ["OMS", "工单追溯"])
+
+    prompt, selected = store.build_prompt_snapshot([product["id"]])
+    assert selected == [product["id"]]
+    assert "词库“集管”：OMS、工单追溯。" in prompt
+    assert "许磊" not in prompt
+    assert store.build_prompt_snapshot([]) == (None, [])
+
+
+def test_unknown_selected_library_is_rejected(tmp_path):
+    store = make_store(tmp_path)
+    with pytest.raises(ValueError, match="不存在"):
+        store.build_prompt_snapshot(["missing"])
+
+
+def test_v1_file_migrates_to_named_libraries_without_disabled_terms(tmp_path):
+    path = tmp_path / "vocabulary.json"
+    path.write_text(json.dumps({
+        "version": 1,
+        "entries": [
+            {"id": "p1", "kind": "person", "canonical": "许磊", "aliases": [], "enabled": True},
+            {"id": "t1", "kind": "term", "canonical": "端到端探测", "aliases": [], "enabled": True},
+            {"id": "o1", "kind": "other", "canonical": "停用内容", "aliases": [], "enabled": False},
+        ],
+    }), encoding="utf-8")
+
+    libraries = make_store(tmp_path).list()
+
+    assert [(item["name"], item["scope"], item["terms"]) for item in libraries] == [
+        ("姓名", "general", ["许磊"]),
+        ("专用词库", "specialized", ["端到端探测"]),
+    ]
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 2
 
 
 def test_invalid_file_is_not_silently_overwritten(tmp_path):
@@ -52,76 +101,22 @@ def test_invalid_file_is_not_silently_overwritten(tmp_path):
     assert path.read_text(encoding="utf-8") == "{broken"
 
 
-def test_build_prompt_uses_only_enabled_canonical_forms(tmp_path):
+def test_write_failure_keeps_in_memory_libraries(tmp_path, monkeypatch):
     store = make_store(tmp_path)
-    store.add("person", "许磊", ["许雷"])
-    store.add("term", "端到端探测", ["端到端弹策"])
-    store.add("term", "不启用", enabled=False)
-
-    prompt = store.build_prompt()
-
-    assert prompt == (
-        "以下是本次会议可能出现的标准写法。"
-        "姓名：许磊。专用词：端到端探测。请优先使用这些标准写法。"
-    )
-    assert "许雷" not in prompt
-    assert "不启用" not in prompt
-
-
-def test_replace_all_supports_three_groups_and_preserves_existing_metadata(tmp_path):
-    store = make_store(tmp_path)
-    existing = store.add("person", "许磊", ["许雷"])
-
-    rows = store.replace_all({
-        "person": [" 许磊 ", "张三", "张三"],
-        "term": ["端到端探测"],
-        "other": ["陕西省调"],
-    })
-
-    assert [(row["kind"], row["canonical"]) for row in rows] == [
-        ("person", "许磊"), ("person", "张三"),
-        ("term", "端到端探测"), ("other", "陕西省调"),
-    ]
-    assert rows[0]["id"] == existing["id"]
-    assert rows[0]["aliases"] == ["许雷"]
-    assert "其他：陕西省调。" in store.build_prompt()
-
-
-def test_replace_all_is_atomic_when_write_fails(tmp_path, monkeypatch):
-    store = make_store(tmp_path)
-    store.add("person", "张三")
+    store.add("姓名", "general", ["张三"])
     before = store.list()
-    monkeypatch.setattr(store, "_save_locked", lambda entries: (_ for _ in ()).throw(
+    monkeypatch.setattr(store, "_save_locked", lambda rows: (_ for _ in ()).throw(
         OSError("disk full")
     ))
     with pytest.raises(OSError, match="disk full"):
-        store.replace_all({"person": ["李四"], "term": [], "other": []})
+        store.add("集管", "specialized", ["OMS"])
     assert store.list() == before
 
 
-def test_build_prompt_obeys_complete_term_boundary(tmp_path):
+def test_prompt_obeys_complete_term_boundary(tmp_path):
     store = make_store(tmp_path)
-    store.add("term", "甲")
-    store.add("term", "这是很长的第二个词")
-    prompt = store.build_prompt(max_chars=43)
-    assert prompt == "以下是本次会议可能出现的标准写法。专用词：甲。请优先使用这些标准写法。"
-
-
-def test_saved_document_has_explicit_version(tmp_path):
-    store = make_store(tmp_path)
-    store.add("person", "张三")
-    payload = json.loads((tmp_path / "vocabulary.json").read_text(encoding="utf-8"))
-    assert payload["version"] == 1
-
-
-def test_failed_write_does_not_change_in_memory_entries(tmp_path, monkeypatch):
-    store = make_store(tmp_path)
-    store.add("person", "张三")
-    before = store.list()
-    monkeypatch.setattr(store, "_save_locked", lambda entries: (_ for _ in ()).throw(
-        OSError("disk full")
-    ))
-
-    with pytest.raises(OSError, match="disk full"):
-        store.add("term", "端到端探测")
-    assert store.list() == before
+    library = store.add("短词", "general", ["甲", "这是很长的第二个词"])
+    prompt, selected = store.build_prompt_snapshot([library["id"]], max_chars=45)
+    assert selected == [library["id"]]
+    assert "甲" in prompt
+    assert "这是很长的第二个词" not in prompt

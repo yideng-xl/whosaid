@@ -37,6 +37,26 @@ describe("api", () => {
     );
   });
 
+  it("submitJob 可携带本次会议选择的词库", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ job_id: "job1" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi(12345);
+    await api.submitJob("/recordings/a.m4a", undefined, undefined, ["general-1", "product-1"]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:12345/jobs",
+      expect.objectContaining({
+        body: JSON.stringify({
+          audio_path: "/recordings/a.m4a",
+          num_speakers: null,
+          vocabulary_library_ids: ["general-1", "product-1"],
+        }),
+      }),
+    );
+  });
+
   it("exportUrl builds correct url", () => {
     const api = createApi(999);
     expect(api.exportUrl("job2", "srt")).toBe(
@@ -180,21 +200,21 @@ describe("api", () => {
 
   it("词库 API 支持查询、添加、编辑和删除", async () => {
     const entry = {
-      id: "entry-1", kind: "person", canonical: "许磊", aliases: ["许雷"],
-      enabled: true, created_at: 1, updated_at: 1,
+      id: "entry-1", name: "姓名", scope: "general", terms: ["许磊"],
+      created_at: 1, updated_at: 1,
     };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({ ok: true, json: async () => [entry] })
       .mockResolvedValueOnce({ ok: true, json: async () => entry })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ ...entry, enabled: false }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ...entry, name: "常用姓名" }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true }) });
     vi.stubGlobal("fetch", fetchMock);
     const api = createApi(4444);
-    const input = { kind: "person" as const, canonical: "许磊", aliases: ["许雷"], enabled: true };
+    const input = { name: "姓名", scope: "general" as const, terms: ["许磊"] };
 
     expect(await api.listVocabulary()).toEqual([entry]);
     await api.addVocabulary(input);
-    await api.updateVocabulary("entry-1", { ...input, enabled: false });
+    await api.updateVocabulary("entry-1", { ...input, name: "常用姓名" });
     await api.deleteVocabulary("entry-1");
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, "http://127.0.0.1:4444/vocabulary");
@@ -202,22 +222,9 @@ describe("api", () => {
       method: "POST", body: JSON.stringify(input),
     }));
     expect(fetchMock).toHaveBeenNthCalledWith(3, "http://127.0.0.1:4444/vocabulary/entry-1", expect.objectContaining({
-      method: "PUT", body: JSON.stringify({ ...input, enabled: false }),
+      method: "PUT", body: JSON.stringify({ ...input, name: "常用姓名" }),
     }));
     expect(fetchMock).toHaveBeenNthCalledWith(4, "http://127.0.0.1:4444/vocabulary/entry-1", expect.objectContaining({ method: "DELETE" }));
   });
 
-  it("词库 API 支持三个文本框整组保存", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => [] });
-    vi.stubGlobal("fetch", fetchMock);
-    const api = createApi(4444);
-    const groups = {
-      person: ["许磊", "张三"], term: ["端到端探测"], other: ["陕西省调"],
-    };
-    await api.replaceVocabulary(groups);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:4444/vocabulary/bulk",
-      expect.objectContaining({ method: "PUT", body: JSON.stringify(groups) }),
-    );
-  });
 });

@@ -70,6 +70,24 @@ describe("录音结束后的试听确认", () => {
     ]);
   });
 
+  it("首次开始转写时冻结并持久化词库选择，后续重试不改写", () => {
+    const storage = new MemoryStorage();
+    const keys = new RecordingSubmissionKeyStore(storage, () => "recording:vocab");
+    keys.prepare("/recordings/vocab.m4a", "会议录音");
+
+    const frozen = keys.prepare(
+      "/recordings/vocab.m4a", "会议录音", ["names", "jiguan", "names"],
+    );
+    const retry = keys.prepare(
+      "/recordings/vocab.m4a", "会议录音", ["names", "wangguan"],
+    );
+
+    expect(frozen.vocabularyLibraryIds).toEqual(["names", "jiguan"]);
+    expect(retry.vocabularyLibraryIds).toEqual(["names", "jiguan"]);
+    expect(new RecordingSubmissionKeyStore(storage).list()[0].vocabularyLibraryIds)
+      .toEqual(["names", "jiguan"]);
+  });
+
   it("恢复混音成功也只生成待确认录音，不调用转写接口", () => {
     const storage = new MemoryStorage();
     const keyStore = new RecordingSubmissionKeyStore(

@@ -45,8 +45,12 @@ def make_client(tmp_path, backend=None, store=None, vocabulary=None):
     reg = ModelRegistry(str(tmp_path / "config.json"),
                         is_downloaded_fn=lambda repo: True,
                         download_fn=lambda repo: None)
-    app = create_app(JobQueue(backend, duration_fn=lambda p: 1.0,
-                               extract_fn=lambda src, start, dur: src), reg,
+    app = create_app(JobQueue(
+        backend,
+        duration_fn=lambda p: 1.0,
+        extract_fn=lambda src, start, dur: src,
+        prompt_provider=(vocabulary.build_prompt_snapshot if vocabulary else None),
+    ), reg,
                      store=store, vocabulary=vocabulary)
     return TestClient(app)
 
@@ -458,19 +462,18 @@ def test_vocabulary_crud_endpoints(tmp_path):
     c = make_client(tmp_path, vocabulary=vocabulary)
 
     created = c.post("/vocabulary", json={
-        "kind": "person", "canonical": "许磊", "aliases": ["许雷"]
+        "name": "姓名", "scope": "general", "terms": ["许磊", "张三"]
     })
     assert created.status_code == 200
     entry = created.json()
     assert c.get("/vocabulary").json() == [entry]
 
     updated = c.put(f"/vocabulary/{entry['id']}", json={
-        "kind": "person", "canonical": "许磊", "aliases": ["徐磊"],
-        "enabled": False,
+        "name": "常用姓名", "scope": "general", "terms": ["许磊", "李四"],
     })
     assert updated.status_code == 200
-    assert updated.json()["aliases"] == ["徐磊"]
-    assert updated.json()["enabled"] is False
+    assert updated.json()["name"] == "常用姓名"
+    assert updated.json()["terms"] == ["许磊", "李四"]
 
     assert c.delete(f"/vocabulary/{entry['id']}").status_code == 200
     assert c.get("/vocabulary").json() == []
@@ -480,26 +483,35 @@ def test_vocabulary_endpoints_validate_and_report_missing_entries(tmp_path):
     vocabulary = VocabularyStore(tmp_path / "vocabulary.json")
     c = make_client(tmp_path, vocabulary=vocabulary)
     assert c.post("/vocabulary", json={
-        "kind": "unknown", "canonical": "x"
+        "name": "x", "scope": "unknown", "terms": []
     }).status_code == 422
-    payload = {"kind": "term", "canonical": "端到端探测"}
+    payload = {"name": "集管", "scope": "specialized", "terms": ["端到端探测"]}
     assert c.put("/vocabulary/missing", json=payload).status_code == 404
     assert c.delete("/vocabulary/missing").status_code == 404
 
 
-def test_vocabulary_bulk_endpoint_replaces_three_text_boxes(tmp_path):
+def test_job_submission_uses_selected_vocabulary_snapshot(tmp_path):
     vocabulary = VocabularyStore(tmp_path / "vocabulary.json")
+    vocabulary.add("姓名", "general", ["许磊"])
+    product = vocabulary.add("集管", "specialized", ["端到端探测"])
     c = make_client(tmp_path, vocabulary=vocabulary)
-    response = c.put("/vocabulary/bulk", json={
-        "person": ["许磊", "张三"],
-        "term": ["端到端探测"],
-        "other": ["陕西省调"],
+    response = c.post("/jobs", json={
+        "audio_path": "/x/a.m4a",
+        "vocabulary_library_ids": [product["id"]],
     })
     assert response.status_code == 200
-    assert [(row["kind"], row["canonical"]) for row in response.json()] == [
-        ("person", "许磊"), ("person", "张三"),
-        ("term", "端到端探测"), ("other", "陕西省调"),
-    ]
+    queued = next(item for item in c.get("/jobs").json() if item["id"] == response.json()["job_id"])
+    assert queued["id"] == response.json()["job_id"]
+
+
+def test_job_submission_rejects_unknown_vocabulary(tmp_path):
+    vocabulary = VocabularyStore(tmp_path / "vocabulary.json")
+    c = make_client(tmp_path, vocabulary=vocabulary)
+    response = c.post("/jobs", json={
+        "audio_path": "/x/a.m4a", "vocabulary_library_ids": ["missing"]
+    })
+    assert response.status_code == 422
+    assert "不存在" in response.text
 
 
 def test_download_endpoint_maps_401_to_readable_403(tmp_path):

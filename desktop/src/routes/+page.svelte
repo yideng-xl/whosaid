@@ -6,8 +6,9 @@
   import TranscriptView from "$lib/TranscriptView.svelte";
   import ModelManager from "$lib/ModelManager.svelte";
   import VocabularyManager from "$lib/VocabularyManager.svelte";
+  import VocabularyPicker from "$lib/VocabularyPicker.svelte";
   import RecordingPanel from "$lib/RecordingPanel.svelte";
-  import { createApi, type JobSummary } from "$lib/api";
+  import { createApi, type JobSummary, type VocabularyLibrary } from "$lib/api";
   import {
     acknowledgeRecordingPreview,
     closeAfterRecording,
@@ -56,6 +57,12 @@
   import "$lib/tokens.css";
 
   type Api = ReturnType<typeof createApi>;
+  type VocabularyPickerRequest = {
+    audioName: string;
+    libraries: VocabularyLibrary[];
+    initialSelectedIds?: string[];
+    confirm: (libraryIds: string[]) => Promise<void>;
+  };
   const recordingSubmissionKeys = new RecordingSubmissionKeyStore(localStorage);
 
   let api: Api | null = $state(null);
@@ -80,6 +87,7 @@
   let submissionFailureFinalPath: string | null = null;
   let pageMounted = false;
   let finalizationInFlight: Promise<RecordingStopResult> | null = null;
+  let vocabularyPickerQueue = $state<VocabularyPickerRequest[]>([]);
   const recordingSnapshots = new RecordingSnapshotCoordinator(recordingState());
   const recordingSubmissions = new RecordingSubmissionRegistry();
   const recordingClose = new RecordingCloseGuard();
@@ -357,8 +365,9 @@
     }
   }
 
-  async function retryPendingRecordingSubmission(
+  async function performPendingRecordingSubmission(
     pending: PendingRecordingSubmission,
+    vocabularyLibraryIds: string[],
   ) {
     if (!api || pending.busy) return;
     let submission;
@@ -366,6 +375,7 @@
       submission = recordingSubmissionKeys.prepare(
         pending.finalPath,
         pending.label,
+        vocabularyLibraryIds,
       );
     } catch (error) {
       pendingRecordingSubmissions = upsertPendingRecordingSubmission(
@@ -398,6 +408,7 @@
           },
         ),
         submission.idempotencyKey,
+        submission.vocabularyLibraryIds,
       );
       if (!pageMounted) return;
     } catch (error) {
@@ -414,6 +425,36 @@
       }
       throw error;
     }
+  }
+
+  async function chooseVocabulary(
+    audioName: string,
+    confirm: (libraryIds: string[]) => Promise<void>,
+    initialSelectedIds?: string[],
+  ) {
+    if (!api) return;
+    try {
+      vocabularyPickerQueue = [
+        ...vocabularyPickerQueue,
+        {
+          audioName,
+          libraries: await api.listVocabulary(),
+          confirm,
+          ...(initialSelectedIds ? { initialSelectedIds } : {}),
+        },
+      ];
+    } catch (error) {
+      errorBanner = `读取词库失败：${messageOf(error)}`;
+    }
+  }
+
+  async function retryPendingRecordingSubmission(
+    pending: PendingRecordingSubmission,
+  ) {
+    if (pending.busy) return;
+    await chooseVocabulary(pending.label, async (libraryIds) => {
+      await performPendingRecordingSubmission(pending, libraryIds);
+    }, pending.vocabularyLibraryIds);
   }
 
   async function renamePendingRecording(
@@ -727,6 +768,19 @@
     }
   }
 
+  async function performManualSubmission(path: string, vocabularyLibraryIds: string[]) {
+    if (!api) return;
+    await recordingSubmissions.submitAndAccept(
+      path,
+      api,
+      async (accepted) => {
+        if (pageMounted) acceptSubmissionResult(accepted);
+      },
+      undefined,
+      vocabularyLibraryIds,
+    );
+  }
+
   async function submit(path: string) {
     if (!api) return;
     const normalizedPath = path.trim();
@@ -736,13 +790,9 @@
       return;
     }
     try {
-      await recordingSubmissions.submitAndAccept(
-        normalizedPath,
-        api,
-        async (accepted) => {
-          if (pageMounted) acceptSubmissionResult(accepted);
-        },
-      );
+      await chooseVocabulary(basename(normalizedPath), async (libraryIds) => {
+        await performManualSubmission(normalizedPath, libraryIds);
+      });
     } catch (err) {
       errorBanner = `提交失败：${err}`;
     }
@@ -936,6 +986,19 @@
           </div>
         </div>
       </div>
+    {/if}
+
+    {#if vocabularyPickerQueue[0]}
+      <VocabularyPicker
+        libraries={vocabularyPickerQueue[0].libraries}
+        audioName={vocabularyPickerQueue[0].audioName}
+        initialSelectedIds={vocabularyPickerQueue[0].initialSelectedIds}
+        onCancel={() => (vocabularyPickerQueue = vocabularyPickerQueue.slice(1))}
+        onConfirm={async (libraryIds) => {
+          await vocabularyPickerQueue[0].confirm(libraryIds);
+          vocabularyPickerQueue = vocabularyPickerQueue.slice(1);
+        }}
+      />
     {/if}
   </div>
 {/if}

@@ -1,4 +1,4 @@
-"""本地姓名库与专用词库，以及面向转写后端的提示词生成。"""
+"""可按会议选择的本地命名词库，以及面向转写后端的提示词快照。"""
 from __future__ import annotations
 
 import json
@@ -10,116 +10,138 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
-
-KINDS = {"person", "term", "other"}
-MAX_ENTRIES = 1000
-MAX_ALIASES = 20
-MAX_TEXT_LENGTH = 80
+SCOPES = {"general", "specialized"}
+MAX_LIBRARIES = 100
+MAX_TERMS = 1000
+MAX_NAME_LENGTH = 80
+MAX_TERM_LENGTH = 80
 
 
 @dataclass(frozen=True)
-class VocabularyEntry:
+class VocabularyLibrary:
     id: str
-    kind: str
-    canonical: str
-    aliases: list[str]
-    enabled: bool
+    name: str
+    scope: str
+    terms: list[str]
     created_at: float
     updated_at: float
 
 
 class VocabularyStore:
-    """以原子 JSON 文件保存词库；读写均在单进程锁内完成。"""
+    """以原子 JSON 文件保存命名词库；读写均在单进程锁内完成。"""
 
-    def __init__(
-        self,
-        path: str | Path,
-        *,
-        id_factory: Callable[[], str] | None = None,
-        clock: Callable[[], float] | None = None,
-    ) -> None:
+    def __init__(self, path: str | Path, *, id_factory: Callable[[], str] | None = None,
+                 clock: Callable[[], float] | None = None) -> None:
         self.path = Path(path)
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._clock = clock or time.time
         self._lock = threading.Lock()
-        self._entries = self._load()
+        self._libraries, migrated = self._load()
+        if migrated:
+            self._save_locked(self._libraries)
 
     @staticmethod
-    def _normalize_text(value: str, field: str) -> str:
+    def _normalize_text(value: str, field: str, max_length: int) -> str:
         text = value.strip()
         if not text:
             raise ValueError(f"{field}不能为空")
-        if len(text) > MAX_TEXT_LENGTH:
-            raise ValueError(f"{field}最长 {MAX_TEXT_LENGTH} 个字符")
+        if len(text) > max_length:
+            raise ValueError(f"{field}最长 {max_length} 个字符")
         return text
 
     @classmethod
-    def _normalize_aliases(cls, aliases: list[str], canonical: str) -> list[str]:
-        if len(aliases) > MAX_ALIASES:
-            raise ValueError(f"别名最多 {MAX_ALIASES} 个")
+    def _normalize_terms(cls, terms: list[str]) -> list[str]:
+        if not isinstance(terms, list) or not all(isinstance(term, str) for term in terms):
+            raise ValueError("词库内容必须为字符串列表")
         result: list[str] = []
-        seen = {canonical.casefold()}
-        for value in aliases:
-            alias = cls._normalize_text(value, "别名")
-            key = alias.casefold()
+        seen: set[str] = set()
+        for value in terms:
+            term = cls._normalize_text(value, "词条", MAX_TERM_LENGTH)
+            key = term.casefold()
             if key not in seen:
                 seen.add(key)
-                result.append(alias)
+                result.append(term)
         return result
 
     @classmethod
-    def _validated_entry(cls, raw: dict) -> VocabularyEntry:
-        kind = raw.get("kind")
-        if kind not in KINDS:
-            raise ValueError("词库类型必须为 person、term 或 other")
-        canonical = cls._normalize_text(str(raw.get("canonical", "")), "标准写法")
-        aliases_raw = raw.get("aliases", [])
-        if not isinstance(aliases_raw, list) or not all(isinstance(x, str) for x in aliases_raw):
-            raise ValueError("别名必须为字符串列表")
-        entry_id = raw.get("id")
-        if not isinstance(entry_id, str) or not entry_id:
-            raise ValueError("词库条目缺少 id")
+    def _validated_library(cls, raw: dict) -> VocabularyLibrary:
+        library_id = raw.get("id")
+        if not isinstance(library_id, str) or not library_id.strip():
+            raise ValueError("词库缺少 id")
+        scope = raw.get("scope")
+        if scope not in SCOPES:
+            raise ValueError("词库类型必须为 general 或 specialized")
+        name = cls._normalize_text(str(raw.get("name", "")), "词库名称", MAX_NAME_LENGTH)
         created_at = float(raw.get("created_at", 0))
         updated_at = float(raw.get("updated_at", created_at))
-        enabled = raw.get("enabled", True)
-        if not isinstance(enabled, bool):
-            raise ValueError("启用状态必须为布尔值")
-        return VocabularyEntry(
-            id=entry_id,
-            kind=kind,
-            canonical=canonical,
-            aliases=cls._normalize_aliases(aliases_raw, canonical),
-            enabled=enabled,
-            created_at=created_at,
-            updated_at=updated_at,
+        return VocabularyLibrary(
+            id=library_id.strip(), name=name, scope=scope,
+            terms=cls._normalize_terms(raw.get("terms", [])),
+            created_at=created_at, updated_at=updated_at,
         )
 
-    def _load(self) -> list[VocabularyEntry]:
+    def _migrate_v1(self, rows: list[dict]) -> list[VocabularyLibrary]:
+        """把旧版三个固定类别迁成三个命名词库；停用词条不再参与提示词。"""
+        mapping = {
+            "person": ("姓名", "general"),
+            "term": ("专用词库", "specialized"),
+            "other": ("其他", "specialized"),
+        }
+        grouped: dict[str, list[str]] = {kind: [] for kind in mapping}
+        for row in rows:
+            if not isinstance(row, dict) or row.get("kind") not in mapping:
+                raise ValueError("旧版词库条目格式无效")
+            if row.get("enabled", True) is False:
+                continue
+            grouped[row["kind"]].append(self._normalize_text(
+                str(row.get("canonical", "")), "标准写法", MAX_TERM_LENGTH
+            ))
+        migrated: list[VocabularyLibrary] = []
+        for kind in ("person", "term", "other"):
+            terms = self._normalize_terms(grouped[kind])
+            if not terms:
+                continue
+            now = self._clock()
+            name, scope = mapping[kind]
+            migrated.append(VocabularyLibrary(
+                id=self._id_factory(), name=name, scope=scope, terms=terms,
+                created_at=now, updated_at=now,
+            ))
+        return migrated
+
+    def _load(self) -> tuple[list[VocabularyLibrary], bool]:
         if not self.path.exists():
-            return []
+            return [], False
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError(f"词库文件无法读取：{self.path}") from error
-        if not isinstance(payload, dict) or payload.get("version") != 1:
+        if not isinstance(payload, dict):
             raise ValueError("不支持的词库文件版本")
-        rows = payload.get("entries")
-        if not isinstance(rows, list) or len(rows) > MAX_ENTRIES:
-            raise ValueError("词库条目格式或数量无效")
-        entries = [self._validated_entry(row) for row in rows if isinstance(row, dict)]
-        if len(entries) != len(rows) or len({entry.id for entry in entries}) != len(entries):
-            raise ValueError("词库条目格式无效或 id 重复")
-        return entries
+        version = payload.get("version")
+        if version == 1:
+            rows = payload.get("entries")
+            if not isinstance(rows, list) or len(rows) > MAX_TERMS:
+                raise ValueError("旧版词库条目格式或数量无效")
+            return self._migrate_v1(rows), True
+        if version != 2:
+            raise ValueError("不支持的词库文件版本")
+        rows = payload.get("libraries")
+        if not isinstance(rows, list) or len(rows) > MAX_LIBRARIES:
+            raise ValueError("词库格式或数量无效")
+        libraries = [self._validated_library(row) for row in rows if isinstance(row, dict)]
+        if len(libraries) != len(rows) or len({item.id for item in libraries}) != len(libraries):
+            raise ValueError("词库格式无效或 id 重复")
+        if sum(len(item.terms) for item in libraries) > MAX_TERMS:
+            raise ValueError(f"所有词库合计最多保存 {MAX_TERMS} 个词条")
+        return libraries, False
 
-    def _save_locked(self, entries: list[VocabularyEntry]) -> None:
+    def _save_locked(self, libraries: list[VocabularyLibrary]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(
-            f".{self.path.name}.{threading.get_ident()}.tmp"
-        )
+        temporary = self.path.with_name(f".{self.path.name}.{threading.get_ident()}.tmp")
         encoded = json.dumps(
-            {"version": 1, "entries": [asdict(entry) for entry in entries]},
-            ensure_ascii=False,
-            indent=2,
+            {"version": 2, "libraries": [asdict(item) for item in libraries]},
+            ensure_ascii=False, indent=2,
         ).encode("utf-8")
         try:
             with temporary.open("wb") as output:
@@ -130,178 +152,115 @@ class VocabularyStore:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def _ensure_unique(self, kind: str, canonical: str, exclude_id: str | None = None) -> None:
-        key = canonical.casefold()
-        if any(
-            entry.kind == kind
-            and entry.id != exclude_id
-            and entry.canonical.casefold() == key
-            for entry in self._entries
-        ):
-            raise ValueError("同类词库中已存在相同的标准写法")
+    def _ensure_unique_name(self, name: str, exclude_id: str | None = None) -> None:
+        key = name.casefold()
+        if any(item.id != exclude_id and item.name.casefold() == key for item in self._libraries):
+            raise ValueError("已存在同名词库")
+
+    @staticmethod
+    def _validate_total(libraries: list[VocabularyLibrary]) -> None:
+        if len(libraries) > MAX_LIBRARIES:
+            raise ValueError(f"最多保存 {MAX_LIBRARIES} 个词库")
+        if sum(len(item.terms) for item in libraries) > MAX_TERMS:
+            raise ValueError(f"所有词库合计最多保存 {MAX_TERMS} 个词条")
 
     def list(self) -> list[dict]:
         with self._lock:
-            return [asdict(entry) for entry in self._entries]
+            return [asdict(item) for item in self._libraries]
 
-    def add(
-        self, kind: str, canonical: str, aliases: list[str] | None = None,
-        enabled: bool = True,
-    ) -> dict:
-        if kind not in KINDS:
-            raise ValueError("词库类型必须为 person、term 或 other")
-        normalized = self._normalize_text(canonical, "标准写法")
-        normalized_aliases = self._normalize_aliases(aliases or [], normalized)
+    def add(self, name: str, scope: str, terms: list[str]) -> dict:
+        if scope not in SCOPES:
+            raise ValueError("词库类型必须为 general 或 specialized")
+        normalized_name = self._normalize_text(name, "词库名称", MAX_NAME_LENGTH)
+        normalized_terms = self._normalize_terms(terms)
         with self._lock:
-            if len(self._entries) >= MAX_ENTRIES:
-                raise ValueError(f"词库最多保存 {MAX_ENTRIES} 条")
-            self._ensure_unique(kind, normalized)
+            self._ensure_unique_name(normalized_name)
             now = self._clock()
-            entry = VocabularyEntry(
-                id=self._id_factory(),
-                kind=kind,
-                canonical=normalized,
-                aliases=normalized_aliases,
-                enabled=enabled,
-                created_at=now,
-                updated_at=now,
+            library = VocabularyLibrary(
+                id=self._id_factory(), name=normalized_name, scope=scope,
+                terms=normalized_terms, created_at=now, updated_at=now,
             )
-            next_entries = [*self._entries, entry]
-            self._save_locked(next_entries)
-            self._entries = next_entries
-            return asdict(entry)
+            next_libraries = [*self._libraries, library]
+            self._validate_total(next_libraries)
+            self._save_locked(next_libraries)
+            self._libraries = next_libraries
+            return asdict(library)
 
-    def update(
-        self, entry_id: str, *, kind: str, canonical: str,
-        aliases: list[str] | None = None, enabled: bool = True,
-    ) -> dict:
-        if kind not in KINDS:
-            raise ValueError("词库类型必须为 person、term 或 other")
-        normalized = self._normalize_text(canonical, "标准写法")
-        normalized_aliases = self._normalize_aliases(aliases or [], normalized)
+    def update(self, library_id: str, *, name: str, scope: str, terms: list[str]) -> dict:
+        if scope not in SCOPES:
+            raise ValueError("词库类型必须为 general 或 specialized")
+        normalized_name = self._normalize_text(name, "词库名称", MAX_NAME_LENGTH)
+        normalized_terms = self._normalize_terms(terms)
         with self._lock:
-            index = next((i for i, entry in enumerate(self._entries) if entry.id == entry_id), None)
+            index = next((i for i, item in enumerate(self._libraries) if item.id == library_id), None)
             if index is None:
-                raise KeyError(entry_id)
-            self._ensure_unique(kind, normalized, exclude_id=entry_id)
-            old = self._entries[index]
-            entry = VocabularyEntry(
-                id=old.id,
-                kind=kind,
-                canonical=normalized,
-                aliases=normalized_aliases,
-                enabled=enabled,
-                created_at=old.created_at,
-                updated_at=self._clock(),
+                raise KeyError(library_id)
+            self._ensure_unique_name(normalized_name, exclude_id=library_id)
+            old = self._libraries[index]
+            library = VocabularyLibrary(
+                id=old.id, name=normalized_name, scope=scope, terms=normalized_terms,
+                created_at=old.created_at, updated_at=self._clock(),
             )
-            next_entries = list(self._entries)
-            next_entries[index] = entry
-            self._save_locked(next_entries)
-            self._entries = next_entries
-            return asdict(entry)
+            next_libraries = list(self._libraries)
+            next_libraries[index] = library
+            self._validate_total(next_libraries)
+            self._save_locked(next_libraries)
+            self._libraries = next_libraries
+            return asdict(library)
 
-    def delete(self, entry_id: str) -> None:
+    def delete(self, library_id: str) -> None:
         with self._lock:
-            index = next((i for i, entry in enumerate(self._entries) if entry.id == entry_id), None)
+            index = next((i for i, item in enumerate(self._libraries) if item.id == library_id), None)
             if index is None:
-                raise KeyError(entry_id)
-            next_entries = list(self._entries)
-            del next_entries[index]
-            self._save_locked(next_entries)
-            self._entries = next_entries
+                raise KeyError(library_id)
+            next_libraries = list(self._libraries)
+            del next_libraries[index]
+            self._save_locked(next_libraries)
+            self._libraries = next_libraries
 
-    def replace_all(self, groups: dict[str, list[str]]) -> list[dict]:
-        """用三个文本框的内容整体替换词库；同类同词保留原 id、别名和创建时间。"""
-        if set(groups) != KINDS:
-            raise ValueError("批量词库必须同时包含 person、term 和 other")
-        normalized_groups: dict[str, list[str]] = {}
-        total = 0
-        for kind in ("person", "term", "other"):
-            values = groups[kind]
-            if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
-                raise ValueError("批量词库内容必须为字符串列表")
-            normalized: list[str] = []
-            seen: set[str] = set()
-            for value in values:
-                canonical = self._normalize_text(value, "标准写法")
-                key = canonical.casefold()
-                if key not in seen:
-                    seen.add(key)
-                    normalized.append(canonical)
-            normalized_groups[kind] = normalized
-            total += len(normalized)
-        if total > MAX_ENTRIES:
-            raise ValueError(f"词库最多保存 {MAX_ENTRIES} 条")
-
+    def build_prompt_snapshot(self, library_ids: list[str] | None,
+                              max_chars: int = 5000,
+                              max_entries: int = 300) -> tuple[str | None, list[str]]:
+        """返回提示词和实际选择。None 默认选通用词库，空列表表示明确不使用。"""
+        if library_ids is not None and (
+            not isinstance(library_ids, list)
+            or not all(isinstance(item, str) and item.strip() for item in library_ids)
+        ):
+            raise ValueError("词库选择必须为非空 id 列表")
         with self._lock:
-            existing = {
-                (entry.kind, entry.canonical.casefold()): entry
-                for entry in self._entries
-            }
-            next_entries: list[VocabularyEntry] = []
-            for kind in ("person", "term", "other"):
-                for canonical in normalized_groups[kind]:
-                    old = existing.get((kind, canonical.casefold()))
-                    if old is not None:
-                        entry = old if old.enabled else VocabularyEntry(
-                            id=old.id,
-                            kind=old.kind,
-                            canonical=old.canonical,
-                            aliases=old.aliases,
-                            enabled=True,
-                            created_at=old.created_at,
-                            updated_at=self._clock(),
-                        )
-                    else:
-                        now = self._clock()
-                        entry = VocabularyEntry(
-                            id=self._id_factory(),
-                            kind=kind,
-                            canonical=canonical,
-                            aliases=[],
-                            enabled=True,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                    next_entries.append(entry)
-            self._save_locked(next_entries)
-            self._entries = next_entries
-            return [asdict(entry) for entry in self._entries]
+            libraries = list(self._libraries)
+        if library_ids is None:
+            selected = [item for item in libraries if item.scope == "general"]
+        else:
+            requested = list(dict.fromkeys(item.strip() for item in library_ids))
+            known = {item.id for item in libraries}
+            missing = [item for item in requested if item not in known]
+            if missing:
+                raise ValueError(f"选择了不存在的词库：{missing[0]}")
+            selected_set = set(requested)
+            selected = [item for item in libraries if item.id in selected_set]
+        selected_ids = [item.id for item in selected]
+        if max_chars <= 0 or max_entries <= 0 or not selected:
+            return None, selected_ids
 
-    def build_prompt(self, max_chars: int = 1000, max_entries: int = 100) -> str | None:
-        """只把启用条目的标准写法送给模型；别名留给后续校对，不诱导模型输出误写。"""
-        if max_chars <= 0 or max_entries <= 0:
-            return None
-        with self._lock:
-            enabled = [entry for entry in self._entries if entry.enabled][:max_entries]
-        if not enabled:
-            return None
-
-        people: list[str] = []
-        terms: list[str] = []
-        others: list[str] = []
         prefix = "以下是本次会议可能出现的标准写法。"
         suffix = "请优先使用这些标准写法。"
+        sections: list[str] = []
+        count = 0
+        for library in selected:
+            included: list[str] = []
+            for term in library.terms:
+                if count >= max_entries:
+                    break
+                candidate = f"词库“{library.name}”：{'、'.join([*included, term])}。"
+                if len(prefix + "".join([*sections, candidate]) + suffix) > max_chars:
+                    continue
+                included.append(term)
+                count += 1
+            if included:
+                sections.append(f"词库“{library.name}”：{'、'.join(included)}。")
+        return (prefix + "".join(sections) + suffix if sections else None), selected_ids
 
-        def render() -> str:
-            sections = []
-            if people:
-                sections.append(f"姓名：{'、'.join(people)}。")
-            if terms:
-                sections.append(f"专用词：{'、'.join(terms)}。")
-            if others:
-                sections.append(f"其他：{'、'.join(others)}。")
-            return prefix + "".join(sections) + suffix
-
-        for entry in enabled:
-            target = (
-                people if entry.kind == "person"
-                else terms if entry.kind == "term"
-                else others
-            )
-            target.append(entry.canonical)
-            if len(render()) > max_chars:
-                target.pop()
-                continue
-        prompt = render()
-        return prompt if people or terms or others else None
+    def build_prompt(self, max_chars: int = 5000, max_entries: int = 300) -> str | None:
+        """兼容旧调用：默认只使用全部通用词库。"""
+        return self.build_prompt_snapshot(None, max_chars, max_entries)[0]

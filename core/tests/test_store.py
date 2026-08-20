@@ -41,9 +41,11 @@ def test_transcription_prompt_roundtrips_and_old_job_defaults_to_none(tmp_path):
     store = JobStore(str(tmp_path))
     job = _done_job()
     job.transcription_prompt = "姓名：许磊。"
+    job.vocabulary_library_ids = ["names", "jiguan"]
     store.save(job)
     loaded = JobStore(str(tmp_path)).load_all()[0]
     assert loaded.transcription_prompt == "姓名：许磊。"
+    assert loaded.vocabulary_library_ids == ["names", "jiguan"]
 
     import json
     (store.dir / "legacy-prompt.json").write_text(json.dumps({
@@ -52,6 +54,7 @@ def test_transcription_prompt_roundtrips_and_old_job_defaults_to_none(tmp_path):
     }), encoding="utf-8")
     jobs = {item.id: item for item in JobStore(str(tmp_path)).load_all()}
     assert jobs["legacy-prompt"].transcription_prompt is None
+    assert jobs["legacy-prompt"].vocabulary_library_ids is None
 
 
 def test_interrupted_started_job_releases_idempotency_key(tmp_path):

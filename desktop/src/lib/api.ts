@@ -29,29 +29,21 @@ export interface HfSettings {
   hf_endpoint: string | null;
 }
 
-export type VocabularyKind = "person" | "term" | "other";
+export type VocabularyScope = "general" | "specialized";
 
-export interface VocabularyGroups {
-  person: string[];
-  term: string[];
-  other: string[];
-}
-
-export interface VocabularyEntry {
+export interface VocabularyLibrary {
   id: string;
-  kind: VocabularyKind;
-  canonical: string;
-  aliases: string[];
-  enabled: boolean;
+  name: string;
+  scope: VocabularyScope;
+  terms: string[];
   created_at: number;
   updated_at: number;
 }
 
-export interface VocabularyInput {
-  kind: VocabularyKind;
-  canonical: string;
-  aliases: string[];
-  enabled: boolean;
+export interface VocabularyLibraryInput {
+  name: string;
+  scope: VocabularyScope;
+  terms: string[];
 }
 
 export interface Speaker {
@@ -107,6 +99,7 @@ export function createApi(port: number) {
       audioPath: string,
       numSpeakers?: number,
       idempotencyKey?: string,
+      vocabularyLibraryIds?: string[],
     ): Promise<string> {
       const r = await fetch(`${base}/jobs`, {
         method: "POST",
@@ -115,6 +108,9 @@ export function createApi(port: number) {
           audio_path: audioPath,
           num_speakers: numSpeakers ?? null,
           ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
+          ...(vocabularyLibraryIds !== undefined
+            ? { vocabulary_library_ids: vocabularyLibraryIds }
+            : {}),
         }),
       });
       return (await j(r)).job_id;
@@ -219,12 +215,12 @@ export function createApi(port: number) {
       }));
     },
 
-    // 姓名库与专用词库 API
-    async listVocabulary(): Promise<VocabularyEntry[]> {
+    // 可按会议选择的命名词库 API
+    async listVocabulary(): Promise<VocabularyLibrary[]> {
       return j(await fetch(`${base}/vocabulary`));
     },
 
-    async addVocabulary(input: VocabularyInput): Promise<VocabularyEntry> {
+    async addVocabulary(input: VocabularyLibraryInput): Promise<VocabularyLibrary> {
       return j(await fetch(`${base}/vocabulary`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -232,15 +228,7 @@ export function createApi(port: number) {
       }));
     },
 
-    async replaceVocabulary(groups: VocabularyGroups): Promise<VocabularyEntry[]> {
-      return j(await fetch(`${base}/vocabulary/bulk`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(groups),
-      }));
-    },
-
-    async updateVocabulary(id: string, input: VocabularyInput): Promise<VocabularyEntry> {
+    async updateVocabulary(id: string, input: VocabularyLibraryInput): Promise<VocabularyLibrary> {
       return j(await fetch(`${base}/vocabulary/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: { "content-type": "application/json" },

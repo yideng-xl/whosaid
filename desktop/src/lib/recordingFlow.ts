@@ -10,6 +10,7 @@ export interface RecordingSubmissionApi {
     audioPath: string,
     numSpeakers?: number,
     idempotencyKey?: string,
+    vocabularyLibraryIds?: string[],
   ): Promise<string>;
 }
 
@@ -49,12 +50,20 @@ export async function submitFinalizedRecording(
   finalPath: string,
   api: RecordingSubmissionApi,
   idempotencyKey?: string,
+  vocabularyLibraryIds?: string[],
 ): Promise<RecordingSubmissionResult> {
   const validatedPath = validateFinalPath(finalPath);
   try {
-    const rawJobId = idempotencyKey
-      ? await api.submitJob(validatedPath, undefined, idempotencyKey)
-      : await api.submitJob(validatedPath);
+    let rawJobId: string;
+    if (vocabularyLibraryIds !== undefined) {
+      rawJobId = await api.submitJob(
+        validatedPath, undefined, idempotencyKey, vocabularyLibraryIds,
+      );
+    } else if (idempotencyKey) {
+      rawJobId = await api.submitJob(validatedPath, undefined, idempotencyKey);
+    } else {
+      rawJobId = await api.submitJob(validatedPath);
+    }
     const jobId = rawJobId.trim();
     if (!jobId) throw new Error("转写服务返回的任务 ID 为空");
     return { jobId, audioPath: validatedPath };
@@ -338,6 +347,7 @@ export class RecordingSubmissionRegistry {
     finalPath: string,
     api: RecordingSubmissionApi,
     idempotencyKey?: string,
+    vocabularyLibraryIds?: string[],
   ): Promise<RecordingSubmissionResult> {
     let validatedPath: string;
     try {
@@ -346,11 +356,15 @@ export class RecordingSubmissionRegistry {
       return Promise.reject(error);
     }
     // 无键调用代表一次明确的手工提交，不按路径单飞；用户可以主动对同一文件再转一次。
-    if (!idempotencyKey) return submitFinalizedRecording(validatedPath, api);
+    if (!idempotencyKey) return submitFinalizedRecording(
+      validatedPath, api, undefined, vocabularyLibraryIds,
+    );
     const existing = this.inFlight.get(validatedPath);
     if (existing) return existing;
 
-    const task = submitFinalizedRecording(validatedPath, api, idempotencyKey);
+    const task = submitFinalizedRecording(
+      validatedPath, api, idempotencyKey, vocabularyLibraryIds,
+    );
     this.inFlight.set(validatedPath, task);
     void task.then(
       () => this.clear(validatedPath, task),
@@ -376,6 +390,7 @@ export class RecordingSubmissionRegistry {
     api: RecordingSubmissionApi,
     accept: (result: RecordingSubmissionResult) => void | Promise<void>,
     idempotencyKey?: string,
+    vocabularyLibraryIds?: string[],
   ): Promise<RecordingSubmissionResult> {
     let validatedPath: string;
     try {
@@ -384,7 +399,9 @@ export class RecordingSubmissionRegistry {
       return Promise.reject(error);
     }
     if (!idempotencyKey) {
-      return submitFinalizedRecording(validatedPath, api).then(async (result) => {
+      return submitFinalizedRecording(
+        validatedPath, api, undefined, vocabularyLibraryIds,
+      ).then(async (result) => {
         await accept(result);
         return result;
       });
@@ -392,7 +409,9 @@ export class RecordingSubmissionRegistry {
     const existing = this.acceptanceInFlight.get(validatedPath);
     if (existing) return existing;
 
-    const task = this.submit(validatedPath, api, idempotencyKey).then(async (result) => {
+    const task = this.submit(
+      validatedPath, api, idempotencyKey, vocabularyLibraryIds,
+    ).then(async (result) => {
       await accept(result);
       return result;
     });
@@ -459,6 +478,7 @@ export interface PendingRecordingSubmission {
   label: string;
   finalPath: string;
   idempotencyKey?: string;
+  vocabularyLibraryIds?: string[];
   busy: boolean;
   error: string | null;
 }
@@ -516,6 +536,7 @@ export interface PersistedRecordingSubmission {
   label: string;
   finalPath: string;
   idempotencyKey: string;
+  vocabularyLibraryIds?: string[];
 }
 
 const RECORDING_SUBMISSIONS_STORAGE_KEY =
@@ -569,7 +590,15 @@ export class RecordingSubmissionKeyStore {
           ? value.label.trim()
           : "录音结果";
         if (!finalPath || !idempotencyKey) continue;
-        byPath.set(finalPath, { finalPath, idempotencyKey, label });
+        const vocabularyLibraryIds = Array.isArray(value.vocabularyLibraryIds)
+          ? value.vocabularyLibraryIds.filter(
+              (id): id is string => typeof id === "string" && Boolean(id.trim()),
+            ).map((id) => id.trim())
+          : undefined;
+        byPath.set(finalPath, {
+          finalPath, idempotencyKey, label,
+          ...(vocabularyLibraryIds ? { vocabularyLibraryIds } : {}),
+        });
       }
       this.memory = [...byPath.values()];
       return [...this.memory];
@@ -579,12 +608,26 @@ export class RecordingSubmissionKeyStore {
     }
   }
 
-  prepare(finalPath: string, label: string): PersistedRecordingSubmission {
+  prepare(
+    finalPath: string,
+    label: string,
+    vocabularyLibraryIds?: string[],
+  ): PersistedRecordingSubmission {
     const normalizedPath = validateFinalPath(finalPath);
     const existing = this.list().find(
       (submission) => submission.finalPath === normalizedPath,
     );
-    if (existing) return existing;
+    if (existing) {
+      if (existing.vocabularyLibraryIds !== undefined || vocabularyLibraryIds === undefined) {
+        return existing;
+      }
+      const frozen = {
+        ...existing,
+        vocabularyLibraryIds: [...new Set(vocabularyLibraryIds.map((id) => id.trim()).filter(Boolean))],
+      };
+      this.persist(this.list().map((item) => item.finalPath === normalizedPath ? frozen : item));
+      return frozen;
+    }
     const idempotencyKey = this.makeKey().trim();
     if (!idempotencyKey) {
       throw new RecordingFlowError("无法生成录音转写提交标识");
@@ -593,6 +636,9 @@ export class RecordingSubmissionKeyStore {
       finalPath: normalizedPath,
       label: label.trim() || "录音结果",
       idempotencyKey,
+      ...(vocabularyLibraryIds !== undefined
+        ? { vocabularyLibraryIds: [...new Set(vocabularyLibraryIds.map((id) => id.trim()).filter(Boolean))] }
+        : {}),
     };
     this.persist([...this.list(), submission]);
     return submission;

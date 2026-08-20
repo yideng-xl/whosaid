@@ -20,6 +20,7 @@ class SubmitReq(BaseModel):
         max_length=128,
         pattern=r"^[A-Za-z0-9._:-]+$",
     )
+    vocabulary_library_ids: list[str] | None = None
 
 
 class RenameReq(BaseModel):
@@ -44,17 +45,10 @@ class HfSettingsReq(BaseModel):
     hf_endpoint: str | None = None
 
 
-class VocabularyReq(BaseModel):
-    kind: str
-    canonical: str
-    aliases: list[str] = Field(default_factory=list)
-    enabled: bool = True
-
-
-class BulkVocabularyReq(BaseModel):
-    person: list[str] = Field(default_factory=list)
-    term: list[str] = Field(default_factory=list)
-    other: list[str] = Field(default_factory=list)
+class VocabularyLibraryReq(BaseModel):
+    name: str
+    scope: str
+    terms: list[str] = Field(default_factory=list)
 
 
 def _start_parent_watchdog(poll_sec: float = 2.0) -> None:
@@ -98,7 +92,8 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None, vocabulary=
         # 用 submit_async 而非 submit：后台线程执行，接口立即返回，配合 WS 拿流式进度
         try:
             job_id = queue.submit_async(
-                req.audio_path, req.num_speakers, req.idempotency_key
+                req.audio_path, req.num_speakers, req.idempotency_key,
+                req.vocabulary_library_ids,
             )
         except IdempotencyConflict as error:
             raise HTTPException(409, str(error)) from error
@@ -326,37 +321,21 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None, vocabulary=
         return _vocabulary_or_503().list()
 
     @app.post("/vocabulary")
-    def add_vocabulary(req: VocabularyReq):
+    def add_vocabulary(req: VocabularyLibraryReq):
         try:
-            return _vocabulary_or_503().add(
-                req.kind, req.canonical, req.aliases, req.enabled
-            )
-        except ValueError as error:
-            raise HTTPException(422, str(error)) from error
-
-    @app.put("/vocabulary/bulk")
-    def replace_vocabulary(req: BulkVocabularyReq):
-        try:
-            return _vocabulary_or_503().replace_all({
-                "person": req.person,
-                "term": req.term,
-                "other": req.other,
-            })
+            return _vocabulary_or_503().add(req.name, req.scope, req.terms)
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
 
     @app.put("/vocabulary/{entry_id}")
-    def update_vocabulary(entry_id: str, req: VocabularyReq):
+    def update_vocabulary(entry_id: str, req: VocabularyLibraryReq):
         try:
             return _vocabulary_or_503().update(
                 entry_id,
-                kind=req.kind,
-                canonical=req.canonical,
-                aliases=req.aliases,
-                enabled=req.enabled,
+                name=req.name, scope=req.scope, terms=req.terms,
             )
         except KeyError as error:
-            raise HTTPException(404, "词库条目不存在") from error
+            raise HTTPException(404, "词库不存在") from error
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
 
@@ -365,7 +344,7 @@ def create_app(queue: JobQueue, registry: ModelRegistry, store=None, vocabulary=
         try:
             _vocabulary_or_503().delete(entry_id)
         except KeyError as error:
-            raise HTTPException(404, "词库条目不存在") from error
+            raise HTTPException(404, "词库不存在") from error
         return {"ok": True}
 
     @app.websocket("/ws/jobs/{job_id}")
@@ -469,7 +448,7 @@ def main() -> None:  # 生产入口：按平台注入推理后端，随机端口
             backend_id, whisper_repo, diarize_repo
         ),
         registry=registry,
-        prompt_provider=vocabulary.build_prompt,
+        prompt_provider=vocabulary.build_prompt_snapshot,
         on_change=store.save,
     )
     queue.preload(store.load_all())

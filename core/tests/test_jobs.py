@@ -68,6 +68,38 @@ def test_vocabulary_prompt_is_snapshotted_once_per_job():
     assert q.get(second).transcription_prompt == "姓名：李四。"
 
 
+def test_selected_vocabulary_is_frozen_on_job_and_part_of_idempotency(tmp_path):
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"audio")
+    seen = []
+
+    def provider(library_ids):
+        resolved = ["names"] if library_ids is None else list(library_ids)
+        seen.append(resolved)
+        return f"词库：{'、'.join(resolved)}。", resolved
+
+    q = JobQueue(
+        FakeBackend(), prompt_provider=provider,
+        duration_fn=lambda p: 1.0, extract_fn=lambda src, start, dur: src,
+    )
+    jid = q.submit_async(
+        str(audio), idempotency_key="recording:vocabulary",
+        vocabulary_library_ids=["names", "jiguan"],
+    )
+    job = q.get(jid)
+    assert job.vocabulary_library_ids == ["names", "jiguan"]
+    assert job.transcription_prompt == "词库：names、jiguan。"
+    assert q.submit_async(
+        str(audio), idempotency_key="recording:vocabulary",
+        vocabulary_library_ids=["names", "jiguan"],
+    ) == jid
+    with pytest.raises(ValueError, match="不同的转写参数"):
+        q.submit_async(
+            str(audio), idempotency_key="recording:vocabulary",
+            vocabulary_library_ids=["names", "wangguan"],
+        )
+
+
 def test_run_job_failure_sets_error():
     q = JobQueue(BoomBackend(), duration_fn=lambda p: 1.0,
                  extract_fn=lambda src, start, dur: src)

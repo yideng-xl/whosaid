@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import itertools
+import inspect
 import os
 import queue as _q
 import re
@@ -43,6 +44,8 @@ class Job:
     idempotency_key: str | None = None
     # 任务创建时冻结的词库提示词。冻结而非逐块动态读取，避免编辑词库后同一稿件前后标准不一。
     transcription_prompt: str | None = None
+    # 任务创建时实际使用的词库 id；用于审计和幂等参数校验。
+    vocabulary_library_ids: list[str] | None = None
 
 
 class IdempotencyConflict(ValueError):
@@ -55,7 +58,7 @@ class JobQueue:
                  registry=None,
                  language: str | None = "zh",
                  prompt: str | None = None,
-                 prompt_provider: Callable[[], str | None] | None = None,
+                 prompt_provider: Callable[..., object] | None = None,
                  num_speakers: int | None = None,
                  on_change: Callable[[Job], None] | None = None,
                  duration_fn: Callable[[str], float] | None = None,
@@ -126,15 +129,24 @@ class JobQueue:
         from .audio import extract_wav
         return extract_wav(src, start, dur)
 
-    def _snapshot_prompt(self) -> str | None:
+    def _snapshot_prompt(
+        self, library_ids: list[str] | None
+    ) -> tuple[str | None, list[str] | None]:
         parts = []
         if self.prompt and self.prompt.strip():
             parts.append(self.prompt.strip())
+        resolved_ids: list[str] | None = None
         if self._prompt_provider is not None:
-            dynamic = self._prompt_provider()
-            if dynamic and dynamic.strip():
+            # 兼容旧的零参数 provider；新 provider 返回“提示词 + 实际词库 id”。
+            if len(inspect.signature(self._prompt_provider).parameters) == 0:
+                dynamic = self._prompt_provider()
+            else:
+                dynamic, resolved_ids = self._prompt_provider(library_ids)
+            if isinstance(dynamic, str) and dynamic.strip():
                 parts.append(dynamic.strip())
-        return "\n".join(parts) or None
+        elif library_ids:
+            raise ValueError("词库尚未初始化")
+        return "\n".join(parts) or None, resolved_ids
 
     def preload(self, jobs: list[Job]) -> None:
         """预载历史 job 到队列（用于恢复持久化状态）。加锁避免与后台 submit_async 竞态。"""
@@ -144,12 +156,15 @@ class JobQueue:
                 if j.idempotency_key and j.idempotency_key not in self._idempotency_jobs:
                     self._idempotency_jobs[j.idempotency_key] = j.id
 
-    def submit(self, audio_path: str, num_speakers: int | None = None) -> str:
+    def submit(self, audio_path: str, num_speakers: int | None = None,
+               vocabulary_library_ids: list[str] | None = None) -> str:
         jid = self._new_id()
+        prompt, resolved_ids = self._snapshot_prompt(vocabulary_library_ids)
         job = Job(id=jid, audio_path=audio_path, status="queued",
                   progress=0.0, transcript=None, error=None, created_at=time.time(),
                   num_speakers=num_speakers,
-                  transcription_prompt=self._snapshot_prompt())
+                  transcription_prompt=prompt,
+                  vocabulary_library_ids=resolved_ids)
         self._jobs[jid] = job
         self.run_job(job, on_progress=lambda j: None)
         return jid
@@ -173,11 +188,21 @@ class JobQueue:
                 del self._subscribers[job_id]
 
     def submit_async(self, audio_path: str, num_speakers: int | None = None,
-                     idempotency_key: str | None = None) -> str:
+                     idempotency_key: str | None = None,
+                     vocabulary_library_ids: list[str] | None = None) -> str:
         """提交任务并立即返回 job_id，实际转写在后台线程执行，可通过 subscribe 拿进度。"""
         key = idempotency_key
         if key is not None and _IDEMPOTENCY_KEY.fullmatch(key) is None:
             raise ValueError("幂等键只能包含字母、数字、点、下划线、冒号或连字符，且最长 128 字符")
+        if vocabulary_library_ids is not None and (
+            not isinstance(vocabulary_library_ids, list)
+            or not all(isinstance(item, str) and item.strip() for item in vocabulary_library_ids)
+        ):
+            raise ValueError("词库选择必须为非空 id 列表")
+        normalized_library_ids = (
+            None if vocabulary_library_ids is None
+            else list(dict.fromkeys(item.strip() for item in vocabulary_library_ids))
+        )
         canonical_audio_path = (
             self._canonical_audio_path(audio_path) if key is not None else audio_path
         )
@@ -189,18 +214,26 @@ class JobQueue:
                     if existing is None:
                         # 防御旧版直接改 _jobs 的调用；删除任务后键不能永久占位。
                         del self._idempotency_jobs[key]
-                    elif (self._existing_audio_identity(existing.audio_path), existing.num_speakers) != (
-                        canonical_audio_path, num_speakers
+                    elif (
+                        self._existing_audio_identity(existing.audio_path) != canonical_audio_path
+                        or existing.num_speakers != num_speakers
+                        or (
+                            normalized_library_ids is not None
+                            and set(existing.vocabulary_library_ids or [])
+                            != set(normalized_library_ids)
+                        )
                     ):
                         raise IdempotencyConflict("幂等键已用于不同的转写参数")
                     else:
                         return existing_id
 
+            prompt, resolved_ids = self._snapshot_prompt(normalized_library_ids)
             jid = self._new_id()
             job = Job(id=jid, audio_path=canonical_audio_path, status="queued",
                       progress=0.0, transcript=None, error=None, created_at=time.time(),
                       num_speakers=num_speakers, idempotency_key=key,
-                      transcription_prompt=self._snapshot_prompt())
+                      transcription_prompt=prompt,
+                      vocabulary_library_ids=resolved_ids)
             self._jobs[jid] = job
             if key is not None:
                 self._idempotency_jobs[key] = jid
