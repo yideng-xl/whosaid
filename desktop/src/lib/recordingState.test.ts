@@ -41,4 +41,15 @@ describe("录音界面状态", () => {
   it("设备切换时显示麦克风重新连接中", () => {
     expect(sourceLabel("interrupted")).toBe("重新连接中");
   });
+
+  it("电脑声源断开时不再承诺系统声音不会中断", () => {
+    const state = reduceRecordingState(recordingState(), {
+      phase: "recording", system_audio: "interrupted", microphone: "unavailable",
+    });
+    expect(state.warning).toContain("电脑声音暂时不可用");
+    expect(state.warning).not.toContain("系统声音不会中断");
+    expect(reduceRecordingState(state, {
+      system_audio: "active", microphone: "active",
+    }).warning).toBeNull();
+  });
 });
