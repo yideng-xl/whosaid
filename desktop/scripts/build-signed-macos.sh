@@ -10,6 +10,7 @@ if ! security find-identity -v -p codesigning | grep -Fq "\"${signing_identity}\
 fi
 
 export APPLE_SIGNING_IDENTITY="${signing_identity}"
+src-tauri/python/bin/python3 scripts/check-private-data.py
 npm run tauri build -- "$@"
 
 signed_app="src-tauri/target/release/bundle/macos/whosaid.app"

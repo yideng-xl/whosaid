@@ -70,6 +70,8 @@ try {
   $CoreTarget = Join-Path $StagingRoot "core/transcribe_core"
   New-Item -ItemType Directory -Path (Split-Path -Parent $CoreTarget) | Out-Null
   Copy-Item -Recurse -Force $CoreSource $CoreTarget
+  & $Python (Join-Path $ScriptDir "check-private-data.py")
+  if ($LASTEXITCODE -ne 0) { throw "个人数据检查失败，禁止打包" }
 
   Write-Host "== 6/6 下载并提取 ffmpeg/ffprobe =="
   $FfmpegArchive = Join-Path $TempDir $FfmpegAsset
