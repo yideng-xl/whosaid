@@ -73,6 +73,7 @@
   let view = $state<"transcript" | "models" | "vocabulary" | "recording">("transcript");
   let dragging = $state(false);
   let errorBanner = $state<string | null>(null);
+  let recordingAutoNotice = $state<string | null>(null);
   let modelsNotReady = $state(false);
   let firstRunDismissed = $state(false);
   let recordingSnapshot = $state<RecordingSnapshot>(recordingState());
@@ -156,6 +157,7 @@
   function onRecordingSnapshot(snapshot: RecordingSnapshot) {
     // stop_recording 的 Promise 与最终 ready 事件跨 IPC 通道返回，ready 可能在前端已经
     // 进入 submitting 后才送达。必须先merge，只有接受的快照才增加revision并唤醒等待者。
+    const previousPhase = recordingSnapshot.phase;
     const accepted = recordingSnapshots.publishBackend(
       snapshot,
       ignoreRecordingEvents
@@ -167,6 +169,21 @@
     );
     if (!accepted) return;
     recordingSnapshot = recordingSnapshots.snapshot;
+    if (
+      snapshot.phase === "stopping" &&
+      ["starting", "recording"].includes(previousPhase) &&
+      !recordingActionPending
+    ) {
+      recordingAutoNotice = "屏幕已休眠，正在自动保存当前录音…";
+    } else if (recordingAutoNotice && snapshot.phase === "ready") {
+      recordingAutoNotice = "休眠前的录音已保存。";
+    } else if (
+      recordingAutoNotice &&
+      snapshot.phase === "recording" &&
+      ["ready", "requesting_permissions", "starting"].includes(previousPhase)
+    ) {
+      recordingAutoNotice = "屏幕已恢复，已自动开始下一段录音。";
+    }
     if (snapshot.system_audio === "denied") {
       recordingPermissions = {
         systemAudio: "denied",
@@ -175,6 +192,11 @@
     }
     if (["requesting_permissions", "starting", "recording", "stopping", "mixing"].includes(snapshot.phase)) {
       view = "recording";
+    }
+    if (snapshot.phase === "ready" && snapshot.final_path?.trim()) {
+      void refreshPendingRecordingPreviews().catch((error) => {
+        if (pageMounted) errorBanner = `读取自动保存录音失败：${messageOf(error)}`;
+      });
     }
   }
 
@@ -275,6 +297,7 @@
 
   async function startDirectRecording() {
     if (recordingActionPending || recordingActive) return;
+    recordingAutoNotice = null;
     ignoreRecordingEvents = false;
     submissionFailureFinalPath = null;
     recordingActionPending = true;
@@ -288,12 +311,19 @@
       const permissions = await getRecordingPermissions();
       if (!pageMounted) return;
       recordingPermissions = permissions;
+      if (permissions.microphone === "denied") {
+        publishRecordingSnapshot({
+          ...recordingState(), phase: "failed", microphone: "denied",
+          error: "麦克风未授权，无法录到你的发言。请先在系统设置中允许 whosaid 使用麦克风，再开始录音。",
+        });
+        return;
+      }
       if (permissions.systemAudio === "denied") {
         publishRecordingSnapshot({
           ...recordingState(),
           phase: "failed",
           system_audio: "denied",
-          microphone: permissions.microphone === "denied" ? "denied" : "pending",
+          microphone: "pending",
           error: "需要系统录音权限才能开始录音",
         });
         return;
@@ -823,6 +853,12 @@
         <button onclick={() => (errorBanner = null)}>✕</button>
       </div>
     {/if}
+    {#if recordingAutoNotice}
+      <div class="hint-banner" role="status">
+        <span>{recordingAutoNotice}</span>
+        <button aria-label="关闭录音提示" onclick={() => (recordingAutoNotice = null)}>✕</button>
+      </div>
+    {/if}
     {#if modelsNotReady && !firstRunDismissed}
       <div class="hint-banner">
         <span>还没有可用模型：请先在「模型管理」里填写 HuggingFace 访问令牌并下载模型，才能开始转写。</span>
@@ -881,6 +917,8 @@
           onStartNew={startDirectRecording}
           {systemPermissionDenied}
           onOpenSystemSettings={openSystemRecordingSettings}
+          microphonePermissionDenied={recordingPermissions?.microphone === "denied" || recordingSnapshot.microphone === "denied"}
+          onOpenMicrophoneSettings={() => openRecordingSettings("microphone")}
           pendingRecordings={pendingRecordingSubmissions}
           onConfirmTranscription={retryPendingRecordingSubmission}
           onRenameRecording={renamePendingRecording}

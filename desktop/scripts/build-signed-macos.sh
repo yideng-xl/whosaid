@@ -10,4 +10,12 @@ if ! security find-identity -v -p codesigning | grep -Fq "\"${signing_identity}\
 fi
 
 export APPLE_SIGNING_IDENTITY="${signing_identity}"
-exec npm run tauri build -- "$@"
+npm run tauri build -- "$@"
+
+signed_app="src-tauri/target/release/bundle/macos/whosaid.app"
+signed_entitlements="$(codesign -d --entitlements :- "$signed_app" 2>/dev/null)"
+if ! plutil -extract 'com\.apple\.security\.device\.audio-input' raw -o - - <<< "$signed_entitlements" | grep -qx true; then
+  echo "签名产物缺少麦克风音频输入权限，禁止安装。" >&2
+  exit 1
+fi
+codesign --verify --deep --strict "$signed_app"

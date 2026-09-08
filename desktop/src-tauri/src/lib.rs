@@ -1,6 +1,7 @@
 //! Tauri 外壳入口：启动时 spawn Python 转写服务，握手拿端口存入 app 状态，
 //! 前端通过 `get_service_port` 命令拿端口后走 REST/WS 连本地服务；退出时 kill 子进程。
 mod recording;
+mod recording_overlay;
 mod sidecar;
 
 use std::collections::HashSet;
@@ -227,9 +228,13 @@ pub fn run() {
         .manage(ServiceProcess(Mutex::new(None)))
         .manage(ServicePort(Mutex::new(None)))
         .manage(CloseGuardState::default())
+        .manage(recording_overlay::OverlayState::default())
         .invoke_handler(tauri::generate_handler![
             get_service_port,
             get_app_capabilities,
+            recording_overlay::get_recording_overlay_enabled,
+            recording_overlay::set_recording_overlay_enabled,
+            recording_overlay::open_recording_main_window,
             pick_save_path,
             write_file,
             recording::get_recording_state,
@@ -258,6 +263,12 @@ pub fn run() {
                 data_dir.join("recordings"),
                 recording_ffmpeg_tools(resource_dir.clone()),
             ));
+            if let Err(error) = app
+                .state::<recording::RecordingManager>()
+                .watch_power_events(app.handle())
+            {
+                eprintln!("[whosaid] 无法监听屏幕休眠状态：{error}");
+            }
             let cwd = data_dir.to_string_lossy().into_owned();
             // transcribe_core 未 pip 安装进 venv，只能从 core 根目录导入；
             // 故 cwd 用数据目录（config.json/持久化落此），PYTHONPATH 指向 core 根让 import 生效
@@ -288,9 +299,22 @@ pub fn run() {
                 }
             }
 
+            if app_capabilities().direct_recording {
+                if let Err(error) = recording_overlay::setup(app.handle()) {
+                    eprintln!("[whosaid] 无法准备波形悬浮窗：{error}");
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == recording_overlay::LABEL {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    recording_overlay::disable(window.app_handle());
+                }
+                // 辅助窗口的关闭/销毁不能停止录音或结束转写服务。
+                return;
+            }
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     let manager = window.app_handle().state::<recording::RecordingManager>();
@@ -308,6 +332,12 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Destroyed => {
+                    if let Some(overlay) = window
+                        .app_handle()
+                        .get_webview_window(recording_overlay::LABEL)
+                    {
+                        let _ = overlay.destroy();
+                    }
                     // 窗口关闭时 kill 子进程（正常关窗的快路径）
                     window
                         .app_handle()
@@ -351,6 +381,19 @@ fn kill_service(app: &tauri::AppHandle) {
 mod path_tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn signed_app_declares_audio_input_capability() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(
+            config["bundle"]["macOS"]["entitlements"],
+            "Entitlements.plist"
+        );
+        let plist = include_str!("../Entitlements.plist");
+        assert!(plist.contains("<key>com.apple.security.device.audio-input</key>"));
+        assert!(plist.contains("<true/>"));
+    }
 
     #[test]
     fn tauri_enables_local_asset_protocol_for_recording_preview() {

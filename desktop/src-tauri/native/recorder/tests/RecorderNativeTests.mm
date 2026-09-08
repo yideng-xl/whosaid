@@ -2,8 +2,10 @@
 #include "../RecorderPermissionState.h"
 #include "../RecorderSessionGate.h"
 #include "../TimelineWriter.h"
+#include "../AudioMeter.h"
 
 #import <Foundation/Foundation.h>
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
 
 #include <cassert>
 #include <atomic>
@@ -20,6 +22,8 @@ enum WSMicStartResult {
 bool WSMicFailureIsFatal(WSMicStartResult result);
 bool WSMicrophoneFailureAllowsReconnect(bool writerCreationAttempted,
                                         bool writerAppendAttempted);
+NSActivityOptions WSRecorderActivityOptions(void);
+BOOL WSSystemCaptureStopErrorMeansCaptureEnded(NSError *error);
 AVAudioPCMBuffer *WSConvertMicrophoneBuffer(AVAudioPCMBuffer *buffer, NSError **error);
 NSDictionary<NSString *, id> *WSSessionManifest(NSString *sessionID,
                                                  NSNumber *startedAt,
@@ -72,6 +76,25 @@ void WSFinalizeSystemAudioOutput(dispatch_block_t removeOutput,
 
 int main() {
     @autoreleasepool {
+        for (BOOL interleaved : {NO, YES}) {
+            AVAudioFormat *meterFormat = [[AVAudioFormat alloc]
+                initWithCommonFormat:AVAudioPCMFormatFloat32 sampleRate:48000
+                channels:2 interleaved:interleaved];
+            AVAudioPCMBuffer *meterBuffer = [[AVAudioPCMBuffer alloc]
+                initWithPCMFormat:meterFormat frameCapacity:2400];
+            meterBuffer.frameLength = 2400;
+            for (UInt32 i = 0; i < meterBuffer.mutableAudioBufferList->mNumberBuffers; ++i) {
+                auto b = meterBuffer.mutableAudioBufferList->mBuffers[i];
+                memset(b.mData, 0, b.mDataByteSize);
+            }
+            meterBuffer.floatChannelData[interleaved ? 0 : 1][interleaved ? 1 : 0] = -0.75f;
+            WSAudioMeter meter;
+            assert(!meter.consume(meterBuffer).has_value());
+            assert(std::abs(*meter.consume(meterBuffer) - 0.75f) < 0.0001f);
+            meterBuffer.floatChannelData[interleaved ? 0 : 1][interleaved ? 1 : 0] = 0;
+            assert(!meter.consume(meterBuffer).has_value());
+            assert(*meter.consume(meterBuffer) == 0);
+        }
         assert(whosaid_recorder_api_version() == 1);
 
         assert(!WSMicFailureIsFatal(WSMicStartResultDenied));
@@ -80,6 +103,25 @@ int main() {
         assert(WSMicrophoneFailureAllowsReconnect(false, false));
         assert(!WSMicrophoneFailureAllowsReconnect(true, false));
         assert(!WSMicrophoneFailureAllowsReconnect(false, true));
+
+        const NSActivityOptions recordingActivityOptions = WSRecorderActivityOptions();
+        assert((recordingActivityOptions & NSActivityIdleSystemSleepDisabled) != 0);
+        assert((recordingActivityOptions & NSActivityIdleDisplaySleepDisabled) == 0);
+
+        NSError *alreadyStoppedStream = [NSError
+            errorWithDomain:SCStreamErrorDomain
+                       code:SCStreamErrorAttemptToStopStreamState
+                   userInfo:nil];
+        assert(WSSystemCaptureStopErrorMeansCaptureEnded(alreadyStoppedStream));
+        NSError *systemStoppedStream = [NSError errorWithDomain:SCStreamErrorDomain
+                                                           code:SCStreamErrorSystemStoppedStream
+                                                       userInfo:nil];
+        assert(WSSystemCaptureStopErrorMeansCaptureEnded(systemStoppedStream));
+        NSError *unrelatedStopFailure = [NSError
+            errorWithDomain:@"com.yideng.whosaid.tests"
+                       code:SCStreamErrorAttemptToStopStreamState
+                   userInfo:nil];
+        assert(!WSSystemCaptureStopErrorMeansCaptureEnded(unrelatedStopFailure));
 
         AVAudioFormat *stereo44100 = [[AVAudioFormat alloc]
             initStandardFormatWithSampleRate:44'100

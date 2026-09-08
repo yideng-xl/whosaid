@@ -9,7 +9,7 @@ export interface RecordingUiState extends RecordingSnapshot {
 }
 
 const MICROPHONE_WARNING =
-  "没有录到你的麦克风声音。你可以继续会议，系统声音不会中断。";
+  "没有录到你的麦克风声音，你的发言会缺失。系统声音不会中断；请停止并保存，检查麦克风后重新录音。";
 const MICROPHONE_RECONNECTING_WARNING =
   "麦克风设备切换中，正在重新连接；系统声音不会中断。";
 

@@ -25,11 +25,26 @@ pub enum SourceStatus {
     Interrupted,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioSource {
     System,
     Microphone,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SleepReason {
+    DisplaySleep,
+    SystemSleep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PowerEvent {
+    DisplaySleep,
+    DisplayWake,
+    SystemSleep,
+    SystemWake,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -66,6 +81,12 @@ impl SettingsPane {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NativeEvent {
+    AudioLevel {
+        source: AudioSource,
+        peak: f32,
+        #[serde(rename = "sampledAt")]
+        sampled_at: f64,
+    },
     Starting,
     Recording {
         #[serde(rename = "startedAt")]
@@ -78,6 +99,9 @@ pub enum NativeEvent {
     Elapsed {
         #[serde(rename = "elapsedSeconds")]
         elapsed_seconds: u64,
+    },
+    Suspending {
+        reason: SleepReason,
     },
     Stopped {
         #[serde(rename = "sessionDir")]
@@ -258,6 +282,7 @@ impl RecordingState {
 
     fn apply_native(&mut self, event: NativeEvent) -> Result<(), RecordingError> {
         match event {
+            NativeEvent::AudioLevel { .. } => {} // 实时波形不改变录音状态。
             NativeEvent::Starting => {
                 if self.snapshot.phase != RecordingPhase::RequestingPermissions {
                     return Err(self.invalid_transition("starting"));
@@ -294,6 +319,15 @@ impl RecordingState {
                     return Err(self.invalid_transition("elapsed"));
                 }
                 self.snapshot.elapsed_seconds = elapsed_seconds;
+            }
+            NativeEvent::Suspending { .. } => {
+                if !matches!(
+                    self.snapshot.phase,
+                    RecordingPhase::Starting | RecordingPhase::Recording
+                ) {
+                    return Err(self.invalid_transition("suspending"));
+                }
+                self.snapshot.phase = RecordingPhase::Stopping;
             }
             NativeEvent::Stopped {
                 session_dir,
@@ -382,6 +416,21 @@ mod tests {
             state.begin_stop().unwrap_err(),
             RecordingError::NotRecording
         );
+    }
+
+    #[test]
+    fn display_sleep_moves_active_recording_to_stopping() {
+        let mut state = RecordingState::new();
+        state
+            .apply(NativeEvent::Recording { started_at: 10.0 })
+            .unwrap();
+        state
+            .apply(NativeEvent::Suspending {
+                reason: SleepReason::DisplaySleep,
+            })
+            .unwrap();
+
+        assert_eq!(state.snapshot().phase, RecordingPhase::Stopping);
     }
 
     #[test]

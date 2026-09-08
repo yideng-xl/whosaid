@@ -1,13 +1,16 @@
 use std::path::Path;
 use std::sync::mpsc::Sender;
 
-use super::state::{NativeEvent, PermissionSnapshot, RecordingError, SettingsPane};
+use super::state::{NativeEvent, PermissionSnapshot, PowerEvent, RecordingError, SettingsPane};
 
 pub trait NativeRecorder: Send + Sync {
     fn permissions(&self) -> Result<PermissionSnapshot, RecordingError>;
     fn start(&self, session_dir: &Path, sink: Sender<NativeEvent>) -> Result<(), RecordingError>;
     fn stop(&self) -> Result<(), RecordingError>;
     fn open_settings(&self, pane: SettingsPane) -> Result<(), RecordingError>;
+    fn watch_power_events(&self, _sink: Sender<PowerEvent>) -> Result<(), RecordingError> {
+        Ok(())
+    }
 }
 
 pub fn platform_recorder() -> std::sync::Arc<dyn NativeRecorder> {
@@ -41,12 +44,13 @@ fn parse_permission_snapshot(json: &[u8]) -> Result<PermissionSnapshot, Recordin
 mod platform {
     use std::ffi::{c_char, c_void, CStr, CString};
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::Sender;
     use std::sync::{Arc, Mutex, Weak};
 
     use super::{
         parse_native_event, parse_permission_snapshot, NativeEvent, NativeRecorder,
-        PermissionSnapshot, RecordingError, SettingsPane,
+        PermissionSnapshot, PowerEvent, RecordingError, SettingsPane,
     };
 
     const EXPECTED_API_VERSION: i32 = 1;
@@ -61,6 +65,10 @@ mod platform {
             context: *mut c_void,
         ) -> i32;
         fn whosaid_recorder_stop() -> i32;
+        fn whosaid_recorder_watch_power_events(
+            callback: unsafe extern "C" fn(i32, *mut c_void),
+            context: *mut c_void,
+        ) -> i32;
         fn whosaid_recorder_free_string(value: *mut c_char);
     }
 
@@ -87,12 +95,14 @@ mod platform {
 
     pub(super) struct PlatformRecorder {
         active_context: Mutex<Option<Weak<CallbackContext>>>,
+        power_monitor_started: AtomicBool,
     }
 
     impl PlatformRecorder {
         pub(super) fn new() -> Self {
             Self {
                 active_context: Mutex::new(None),
+                power_monitor_started: AtomicBool::new(false),
             }
         }
 
@@ -168,6 +178,21 @@ mod platform {
         }
     }
 
+    unsafe extern "C" fn power_callback(event: i32, context: *mut c_void) {
+        if context.is_null() {
+            return;
+        }
+        let sink = unsafe { &*context.cast::<Sender<PowerEvent>>() };
+        let event = match event {
+            1 => PowerEvent::DisplaySleep,
+            2 => PowerEvent::DisplayWake,
+            3 => PowerEvent::SystemSleep,
+            4 => PowerEvent::SystemWake,
+            _ => return,
+        };
+        let _ = sink.send(event);
+    }
+
     impl NativeRecorder for PlatformRecorder {
         fn permissions(&self) -> Result<PermissionSnapshot, RecordingError> {
             self.ensure_api_version()?;
@@ -224,6 +249,20 @@ mod platform {
         fn open_settings(&self, pane: SettingsPane) -> Result<(), RecordingError> {
             unsafe { whosaid_recorder_open_settings(pane.native_value()) };
             Ok(())
+        }
+
+        fn watch_power_events(&self, sink: Sender<PowerEvent>) -> Result<(), RecordingError> {
+            if self.power_monitor_started.swap(true, Ordering::AcqRel) {
+                return Ok(());
+            }
+            let context = Box::into_raw(Box::new(sink)).cast::<c_void>();
+            if unsafe { whosaid_recorder_watch_power_events(power_callback, context) } == 0 {
+                Ok(())
+            } else {
+                self.power_monitor_started.store(false, Ordering::Release);
+                unsafe { drop(Box::from_raw(context.cast::<Sender<PowerEvent>>())) };
+                Err(RecordingError::Native("无法监听屏幕休眠状态".into()))
+            }
         }
     }
 
@@ -343,7 +382,7 @@ use platform::PlatformRecorder;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recording::state::{AudioSource, PermissionStatus, SourceStatus};
+    use crate::recording::state::{AudioSource, PermissionStatus, SleepReason, SourceStatus};
 
     #[test]
     fn parses_all_native_event_shapes() {
@@ -369,6 +408,12 @@ mod tests {
             parse_native_event(br#"{"type":"elapsed","elapsedSeconds":42}"#).unwrap(),
             NativeEvent::Elapsed {
                 elapsed_seconds: 42,
+            }
+        );
+        assert_eq!(
+            parse_native_event(br#"{"type":"suspending","reason":"display_sleep"}"#).unwrap(),
+            NativeEvent::Suspending {
+                reason: SleepReason::DisplaySleep,
             }
         );
         assert!(matches!(

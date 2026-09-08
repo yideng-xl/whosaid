@@ -18,6 +18,15 @@ const snapshot = (
 });
 
 describe("RecordingPanel", () => {
+  it("停止保存后继续录新段时，停止按钮恢复可用", async () => {
+    const onStop = vi.fn().mockResolvedValue(undefined);
+    const view = render(RecordingPanel, { snapshot: snapshot(), onStop });
+    await fireEvent.click(screen.getByRole("button", { name: "停止并保存" }));
+    await view.rerender({ snapshot: snapshot({ phase: "ready" }), onStop });
+    await view.rerender({ snapshot: snapshot({ phase: "recording", elapsed_seconds: 1 }), onStop });
+    await fireEvent.click(screen.getByRole("button", { name: "停止并保存" }));
+    expect(onStop).toHaveBeenCalledTimes(2);
+  });
   it("呈现双来源和时长，并用一个动作停止", async () => {
     const onStop = vi.fn();
     render(RecordingPanel, { snapshot: snapshot(), onStop });

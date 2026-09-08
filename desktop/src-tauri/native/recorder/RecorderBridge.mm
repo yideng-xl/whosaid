@@ -2,6 +2,7 @@
 #import "RecorderPermissionState.h"
 #import "RecorderSessionGate.h"
 #import "TimelineWriter.h"
+#import "AudioMeter.h"
 
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -37,6 +38,81 @@ bool WSMicrophoneFailureAllowsReconnect(bool writerCreationAttempted,
                                         bool writerAppendAttempted) {
     return !writerCreationAttempted && !writerAppendAttempted;
 }
+
+NSActivityOptions WSRecorderActivityOptions(void) {
+    return NSActivityIdleSystemSleepDisabled;
+}
+
+BOOL WSSystemCaptureStopErrorMeansCaptureEnded(NSError *error) {
+    if (error == nil || ![error.domain isEqualToString:SCStreamErrorDomain]) {
+        return NO;
+    }
+    switch (error.code) {
+    case SCStreamErrorAttemptToStopStreamState:
+    case SCStreamErrorNoWindowList:
+    case SCStreamErrorNoDisplayList:
+    case SCStreamErrorNoCaptureSource:
+    case SCStreamErrorUserStopped:
+    case SCStreamErrorSystemStoppedStream:
+        return YES;
+    default:
+        return NO;
+    }
+}
+
+@interface WSPowerEventMonitor : NSObject
+@property(nonatomic, assign) WhosaidPowerCallback callback;
+@property(nonatomic, assign) void *context;
+@property(nonatomic, strong) NSMutableArray<id> *observers;
+- (instancetype)initWithCallback:(WhosaidPowerCallback)callback
+                         context:(void *)context;
+@end
+
+@implementation WSPowerEventMonitor
+
+- (instancetype)initWithCallback:(WhosaidPowerCallback)callback
+                         context:(void *)context {
+    self = [super init];
+    if (self == nil || callback == nullptr) {
+        return nil;
+    }
+    _callback = callback;
+    _context = context;
+    _observers = [NSMutableArray array];
+    NSNotificationCenter *center = NSWorkspace.sharedWorkspace.notificationCenter;
+    __weak WSPowerEventMonitor *weakSelf = self;
+    NSArray<NSArray *> *registrations = @[
+        @[NSWorkspaceScreensDidSleepNotification, @(WhosaidPowerEventDisplaySleep)],
+        @[NSWorkspaceScreensDidWakeNotification, @(WhosaidPowerEventDisplayWake)],
+        @[NSWorkspaceWillSleepNotification, @(WhosaidPowerEventSystemSleep)],
+        @[NSWorkspaceDidWakeNotification, @(WhosaidPowerEventSystemWake)],
+    ];
+    for (NSArray *registration in registrations) {
+        id observer = [center addObserverForName:registration[0]
+                                         object:nil
+                                          queue:nil
+                                     usingBlock:^(__unused NSNotification *notification) {
+                                         WSPowerEventMonitor *strongSelf = weakSelf;
+                                         if (strongSelf != nil && strongSelf.callback != nullptr) {
+                                             strongSelf.callback([registration[1] intValue],
+                                                                 strongSelf.context);
+                                         }
+                                     }];
+        [_observers addObject:observer];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    NSNotificationCenter *center = NSWorkspace.sharedWorkspace.notificationCenter;
+    for (id observer in self.observers) {
+        [center removeObserver:observer];
+    }
+}
+
+@end
+
+static WSPowerEventMonitor *power_event_monitor = nil;
 
 namespace {
 
@@ -509,6 +585,10 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 } // namespace
 
 @interface WSSystemAudioRecorder : NSObject <SCStreamOutput, SCStreamDelegate>
+{
+    WSAudioMeter systemMeter;
+    WSAudioMeter microphoneMeter;
+}
 @property(nonatomic, strong) NSURL *sessionURL;
 @property(nonatomic, copy) NSString *sessionID;
 @property(nonatomic, strong) NSNumber *startedAt;
@@ -519,6 +599,8 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 @property(nonatomic, strong) WSTimelineWriter *microphoneWriter;
 @property(nonatomic, strong) NSObject *microphoneLock;
 @property(nonatomic, strong) id microphoneConfigurationObserver;
+@property(nonatomic, strong) id displaySleepObserver;
+@property(nonatomic, strong) id systemSleepObserver;
 @property(nonatomic, strong) WSRecorderTerminalController *terminalController;
 @property(nonatomic, strong) WSRecorderActivityController *activityController;
 @property(nonatomic, strong) WSMicrophoneReconnectController *microphoneReconnectController;
@@ -535,13 +617,18 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 @property(nonatomic, assign) BOOL finished;
 @property(nonatomic, assign) BOOL microphoneTapInstalled;
 @property(atomic, assign) BOOL microphoneHasFrames;
+@property(atomic, assign) uint64_t microphoneLastFrameNs;
 @property(atomic, assign) BOOL stopping;
 @property(atomic, assign) BOOL microphoneStopping;
+@property(atomic, assign) BOOL systemCaptureStopped;
 - (instancetype)initWithSessionDirectory:(const char *)sessionDirectory
                                 callback:(WhosaidRecorderCallback)callback
                                  context:(void *)context;
 - (BOOL)begin;
 - (void)stop;
+- (void)stopForSleepReason:(NSString *)reason;
+- (void)installSleepObservers;
+- (void)removeSleepObservers;
 - (void)finalizeCaptureResources;
 - (void)stopMicrophoneEngineClosingWriter:(BOOL)closeWriter;
 - (void)scheduleMicrophoneReconnectGeneration:(NSUInteger)generation
@@ -575,7 +662,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     _activityController = [[WSRecorderActivityController alloc]
         initWithBegin:^id {
             return [[NSProcessInfo processInfo]
-                beginActivityWithOptions:NSActivityIdleSystemSleepDisabled
+                beginActivityWithOptions:WSRecorderActivityOptions()
                                   reason:@"WhoSaid 正在录制系统声音"];
         }
                  end:^(id activity) {
@@ -606,8 +693,51 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     }
 }
 
+- (void)publishPeak:(float)peak microphoneEngine:(AVAudioEngine *)engine {
+    const double sampledAt = NSDate.date.timeIntervalSince1970 * 1000;
+    dispatch_async(self.stateQueue, ^{
+        if (self.stopping || self.finished || !self.recording ||
+            ![self.terminalController allowsSuccess] ||
+            (engine != nil && (self.microphoneEngine != engine || self.microphoneStopping))) return;
+        [self emit:@{@"type": @"audio_level", @"source": engine ? @"microphone" : @"system",
+                     @"peak": @(peak), @"sampledAt": @(sampledAt)}];
+    });
+}
+
 - (void)dealloc {
+    [self removeSleepObservers];
     [self.activityController end];
+}
+
+- (void)removeSleepObservers {
+    NSNotificationCenter *center = NSWorkspace.sharedWorkspace.notificationCenter;
+    if (self.displaySleepObserver != nil) {
+        [center removeObserver:self.displaySleepObserver];
+        self.displaySleepObserver = nil;
+    }
+    if (self.systemSleepObserver != nil) {
+        [center removeObserver:self.systemSleepObserver];
+        self.systemSleepObserver = nil;
+    }
+}
+
+- (void)installSleepObservers {
+    NSNotificationCenter *center = NSWorkspace.sharedWorkspace.notificationCenter;
+    __weak WSSystemAudioRecorder *weakSelf = self;
+    self.displaySleepObserver = [center
+        addObserverForName:NSWorkspaceScreensDidSleepNotification
+                    object:nil
+                     queue:nil
+                usingBlock:^(__unused NSNotification *notification) {
+                    [weakSelf stopForSleepReason:@"display_sleep"];
+                }];
+    self.systemSleepObserver = [center
+        addObserverForName:NSWorkspaceWillSleepNotification
+                    object:nil
+                     queue:nil
+                usingBlock:^(__unused NSNotification *notification) {
+                    [weakSelf stopForSleepReason:@"system_sleep"];
+                }];
 }
 
 - (NSURL *)sessionFileURL:(NSString *)filename {
@@ -662,12 +792,18 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
              stopSystem:^(void (^completion)(NSError *error)) {
                  WSSystemAudioRecorder *strongSelf = weakSelf;
                  SCStream *stream = strongSelf.stream;
-                 if (!stopSystem || stream == nil) {
+                 if (!stopSystem || stream == nil || strongSelf.systemCaptureStopped) {
                      completion(nil);
                      return;
                  }
                  [stream stopCaptureWithCompletionHandler:^(NSError *error) {
                      dispatch_async(strongSelf.stateQueue, ^{
+                         if (error == nil ||
+                             WSSystemCaptureStopErrorMeansCaptureEnded(error)) {
+                             strongSelf.systemCaptureStopped = YES;
+                             completion(nil);
+                             return;
+                         }
                          completion(error);
                      });
                  }];
@@ -883,6 +1019,11 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                 firstValidFrames = YES;
             }
         }
+        if (failure == nil && converted.frameLength > 0 && self.microphoneWriter != nil) {
+            if (auto peak = microphoneMeter.consume(converted)) {
+                [self publishPeak:*peak microphoneEngine:engine];
+            }
+        }
     }
 
     if (failure != nil) {
@@ -902,15 +1043,22 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
         });
         return;
     }
-    if (firstValidFrames) {
+    if (failure == nil) {
+        self.microphoneLastFrameNs = hostNs;
+    }
+    if (firstValidFrames || [self.microphoneStatus isEqualToString:@"pending"]) {
         dispatch_async(self.stateQueue, ^{
-            if (!self.finished && !self.stopping &&
+            if (self.microphoneEngine == engine && !self.finished && !self.stopping &&
                 [self.terminalController allowsSuccess]) {
+                self.microphoneStatus = @"active";
                 NSError *manifestError = nil;
                 if (![self writeSessionManifest:&manifestError]) {
                     [self terminateForPersistenceContext:@"麦克风首帧清单"
                                                   error:manifestError];
+                    return;
                 }
+                [self emitEvents:WSSourceStatusEventsAfterPersistence(
+                    YES, @"microphone", @"active", nil)];
             }
         });
     }
@@ -932,6 +1080,8 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     }
 
     self.microphoneEngine = engine;
+    self.microphoneLastFrameNs = monotonic_nanoseconds();
+    self.microphoneStatus = @"pending";
     self.microphoneStopping = NO;
     __weak WSSystemAudioRecorder *weakSelf = self;
     @try {
@@ -977,7 +1127,6 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
         return NO;
     }
 
-    self.microphoneStatus = @"active";
     NSError *manifestError = nil;
     const BOOL persisted = [self writeSessionManifest:&manifestError];
     if (!persisted) {
@@ -987,7 +1136,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     }
     if ([self.terminalController allowsSuccess]) {
         [self emitEvents:WSSourceStatusEventsAfterPersistence(
-                             YES, @"microphone", @"active", nil)];
+                             YES, @"microphone", @"pending", nil)];
     }
     return YES;
 }
@@ -1036,6 +1185,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 }
 
 - (void)finalizeCaptureResources {
+    [self removeSleepObservers];
     SCStream *stream = self.stream;
     __weak WSSystemAudioRecorder *weakSelf = self;
     WSFinalizeSystemAudioOutput(
@@ -1053,6 +1203,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
             [strongSelf closeWriter];
         });
     self.stream = nil;
+    self.systemCaptureStopped = YES;
     [self.activityController end];
 }
 
@@ -1140,10 +1291,18 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
     [self emit:@{@"type" : @"starting"}];
 
     NSError *error = nil;
+    AVAuthorizationStatus micAuthorization =
+        [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    if (micAuthorization == AVAuthorizationStatusDenied ||
+        micAuthorization == AVAuthorizationStatusRestricted) {
+        [self failStartup:recorder_error(20, @"麦克风未授权，无法录到你的发言。请在系统设置中允许 whosaid 使用麦克风后再录音。")];
+        return NO;
+    }
     if (![self prepareSession:&error]) {
         [self failStartup:error];
         return NO;
     }
+    [self installSleepObservers];
     if (!CGPreflightScreenCaptureAccess() &&
         whosaid_recorder_request_system_audio_permission() == 0) {
         error = [NSError errorWithDomain:@"com.yideng.whosaid.recorder"
@@ -1194,6 +1353,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
             self.stream = [[SCStream alloc] initWithFilter:filter
                                              configuration:config
                                                   delegate:self];
+            self.systemCaptureStopped = NO;
             NSError *outputError = nil;
             if (![self.stream addStreamOutput:self
                                          type:SCStreamOutputTypeAudio
@@ -1255,6 +1415,10 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
             return;
         }
         const uint64_t now = monotonic_nanoseconds();
+        if (self.microphoneEngine != nil && !self.microphoneStopping &&
+            now > self.microphoneLastFrameNs + 8 * NSEC_PER_SEC) {
+            [self interruptMicrophoneAndReconnect];
+        }
         const uint64_t elapsed = now > self.sessionStartNs
                                      ? (now - self.sessionStartNs) / NSEC_PER_SEC
                                      : 0;
@@ -1300,9 +1464,16 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
 }
 
 - (void)stop {
+    [self stopForSleepReason:nil];
+}
+
+- (void)stopForSleepReason:(NSString *)reason {
     dispatch_async(self.stateQueue, ^{
         if (self.stopping) {
             return;
+        }
+        if (reason.length > 0) {
+            [self emit:@{@"type" : @"suspending", @"reason" : reason}];
         }
         self.stopping = YES;
         self.starting = NO;
@@ -1315,7 +1486,8 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
         }
         [stream stopCaptureWithCompletionHandler:^(NSError *error) {
             dispatch_async(self.stateQueue, ^{
-                if (error != nil) {
+                if (error != nil &&
+                    !WSSystemCaptureStopErrorMeansCaptureEnded(error)) {
                     NSString *message = [NSString
                         stringWithFormat:@"无法停止系统声音：%@",
                                          error.localizedDescription ?: @"未知错误"];
@@ -1324,6 +1496,7 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
                                                  stopSystem:NO];
                     return;
                 }
+                self.systemCaptureStopped = YES;
                 [self finishStoppedSession];
             });
         }];
@@ -1441,15 +1614,26 @@ void clear_active_recorder(WSSystemAudioRecorder *recorder) {
         dispatch_async(self.stateQueue, ^{
             [self failDuringRecording:writeError];
         });
+    } else if (auto peak = systemMeter.consume(audioBuffer)) {
+        [self publishPeak:*peak microphoneEngine:nil];
     }
 }
 
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
-    (void)stream;
     dispatch_async(self.stateQueue, ^{
+        if (stream != self.stream) {
+            return;
+        }
+        self.systemCaptureStopped = YES;
         if (!self.stopping) {
             if (self.starting) {
                 [self failStartup:error];
+            } else if (WSSystemCaptureStopErrorMeansCaptureEnded(error)) {
+                [self emit:@{@"type" : @"suspending",
+                             @"reason" : @"display_sleep"}];
+                self.stopping = YES;
+                [self cancelElapsedTimer];
+                [self finishStoppedSession];
             } else {
                 [self failDuringRecording:error];
             }
@@ -1534,6 +1718,21 @@ int32_t whosaid_recorder_stop(void) {
         }
         [active_recorder stop];
         return 0;
+    }
+}
+
+int32_t whosaid_recorder_watch_power_events(WhosaidPowerCallback callback,
+                                            void *context) {
+    if (callback == nullptr) {
+        return -1;
+    }
+    @synchronized(active_recorder_lock()) {
+        if (power_event_monitor != nil) {
+            return -1;
+        }
+        power_event_monitor = [[WSPowerEventMonitor alloc] initWithCallback:callback
+                                                                    context:context];
+        return power_event_monitor == nil ? -1 : 0;
     }
 }
 

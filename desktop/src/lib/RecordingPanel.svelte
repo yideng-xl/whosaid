@@ -1,5 +1,7 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
+  import RecordingWaveform from "./RecordingWaveform.svelte";
+  import RecordingOverlayToggle from "./RecordingOverlayToggle.svelte";
   import { recordingAudioSrc, type RecordingSnapshot } from "./recording";
   import type { PendingRecordingSubmission } from "./recordingFlow";
   import {
@@ -16,6 +18,8 @@
     onStartNew = () => {},
     systemPermissionDenied = false,
     onOpenSystemSettings = () => {},
+    microphonePermissionDenied = false,
+    onOpenMicrophoneSettings = () => {},
     pendingRecordings = [],
     onConfirmTranscription = () => {},
     onRenameRecording = () => {},
@@ -27,6 +31,8 @@
     onStartNew?: () => void | Promise<void>;
     systemPermissionDenied?: boolean;
     onOpenSystemSettings?: () => void | Promise<void>;
+    microphonePermissionDenied?: boolean;
+    onOpenMicrophoneSettings?: () => void | Promise<void>;
     pendingRecordings?: PendingRecordingSubmission[];
     onConfirmTranscription?: (
       recording: PendingRecordingSubmission,
@@ -63,6 +69,7 @@
       await onStop();
     } catch {
       // 停止命令失败时允许用户重试；具体错误由持有录音状态的上层展示。
+    } finally {
       stopPending = false;
     }
   }
@@ -174,6 +181,7 @@
         <h1>{labelForPhase(ui.phase)}</h1>
         <div class="elapsed">{formatElapsed(ui.elapsed_seconds)}</div>
       </div>
+      <RecordingOverlayToggle />
     </div>
 
     <div class="sources" aria-label="录音来源">
@@ -184,6 +192,7 @@
           <small>{sourceLabel(ui.system_audio)}</small>
         </span>
         <span class="source-dot {ui.system_audio}" aria-hidden="true"></span>
+        <RecordingWaveform source="system" label="电脑声音" active={ui.phase === "recording" && ui.system_audio === "active"} />
       </div>
 
       <div class="source" class:degraded={ui.microphone !== "active"}>
@@ -193,6 +202,7 @@
           <small>{sourceLabel(ui.microphone)}</small>
         </span>
         <span class="source-dot {ui.microphone}" aria-hidden="true"></span>
+        <RecordingWaveform source="microphone" label="麦克风" active={ui.phase === "recording" && ui.microphone === "active"} />
       </div>
     </div>
 
@@ -203,6 +213,15 @@
       </div>
     {/if}
 
+    {#if microphonePermissionDenied}
+      <div class="permission" role="alert">
+        <div>
+          <strong>麦克风未授权，你的发言不会被录下</strong>
+          <p>请在系统设置的「隐私与安全性 → 麦克风」中开启 whosaid。当前录音请先停止并保存，授权后开始新的一段。</p>
+          <button onclick={() => Promise.resolve(onOpenMicrophoneSettings()).catch(() => {})}>打开麦克风设置</button>
+        </div>
+      </div>
+    {/if}
     {#if systemPermissionDenied}
       <div class="permission" role="status">
         <Icon name="computer-audio" size={18} />
@@ -487,6 +506,7 @@
   }
   .source {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
     padding: var(--space-3);

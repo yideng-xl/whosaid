@@ -12,8 +12,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use mix::{mix_recording, probe_recording, FfmpegTools};
 use native::{platform_recorder, NativeRecorder};
 use state::{
-    NativeEvent, PermissionSnapshot, RecordingError, RecordingPhase, RecordingSnapshot,
-    RecordingState, RecordingStopResult as StoppedTracks, SettingsPane,
+    NativeEvent, PermissionSnapshot, PowerEvent, RecordingError, RecordingPhase, RecordingSnapshot,
+    RecordingState, RecordingStopResult as StoppedTracks, SettingsPane, SleepReason,
 };
 use storage::{PendingRecordingPreview, RecordingStore, RecoverableRecording, RetryRecording};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -40,12 +40,26 @@ pub struct RecordingStopResult {
 
 trait StateEventSink: Send + Sync {
     fn emit(&self, snapshot: RecordingSnapshot) -> Result<(), RecordingError>;
+    fn emit_level(&self, _level: AudioLevel) {}
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioLevel {
+    source: state::AudioSource,
+    peak: f32,
+    sampled_at: f64,
 }
 
 struct AppEventSink(AppHandle);
 
 impl StateEventSink for AppEventSink {
+    fn emit_level(&self, level: AudioLevel) {
+        // 可视化发送失败不能中断录音或保存。
+        let _ = self.0.emit("recording://level", level);
+    }
     fn emit(&self, snapshot: RecordingSnapshot) -> Result<(), RecordingError> {
+        crate::recording_overlay::on_recording_phase(&self.0, &snapshot.phase);
         self.0
             .emit(STATE_EVENT, snapshot)
             .map_err(|error| RecordingError::Event(error.to_string()))
@@ -59,6 +73,88 @@ struct ActiveSession {
     session_dir: PathBuf,
     stop_waiter: Option<mpsc::Sender<StopOutcome>>,
     protocol_error: Option<RecordingError>,
+    automatic_stop: Option<SleepReason>,
+}
+
+#[derive(Clone)]
+struct AutomaticSegment {
+    tracks: StoppedTracks,
+    reason: SleepReason,
+}
+
+#[derive(Default)]
+struct PowerRecoveryState {
+    cycle_active: bool,
+    resume_allowed: bool,
+    display_woke: bool,
+    system_sleeping: bool,
+    segment_saved: bool,
+}
+
+impl PowerRecoveryState {
+    fn note_suspending(&mut self, reason: SleepReason) {
+        self.cycle_active = true;
+        self.segment_saved = false;
+        self.display_woke = false;
+        match reason {
+            SleepReason::DisplaySleep => {
+                self.resume_allowed = !self.system_sleeping;
+            }
+            SleepReason::SystemSleep => {
+                self.system_sleeping = true;
+                self.resume_allowed = false;
+            }
+        }
+    }
+
+    fn note_power_event(&mut self, event: PowerEvent) -> bool {
+        match event {
+            PowerEvent::DisplaySleep => {}
+            PowerEvent::SystemSleep => {
+                self.system_sleeping = true;
+                self.resume_allowed = false;
+            }
+            PowerEvent::DisplayWake => {
+                if self.cycle_active {
+                    self.display_woke = true;
+                }
+            }
+            PowerEvent::SystemWake => {
+                self.system_sleeping = false;
+                if self.cycle_active && !self.resume_allowed && self.segment_saved {
+                    self.reset();
+                }
+            }
+        }
+        self.take_resume_if_ready()
+    }
+
+    fn note_segment_saved(&mut self) -> bool {
+        self.segment_saved = true;
+        let should_resume = self.take_resume_if_ready();
+        if !should_resume && self.cycle_active && !self.resume_allowed && !self.system_sleeping {
+            self.reset();
+        }
+        should_resume
+    }
+
+    fn take_resume_if_ready(&mut self) -> bool {
+        if self.cycle_active
+            && self.resume_allowed
+            && self.display_woke
+            && self.segment_saved
+            && !self.system_sleeping
+        {
+            self.reset();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 struct ManagerInner {
@@ -73,6 +169,8 @@ pub struct RecordingManager {
     tools: FfmpegTools,
     coordination_lock: Mutex<()>,
     next_generation: AtomicU64,
+    automatic_segments: Mutex<Vec<AutomaticSegment>>,
+    power_recovery: Mutex<PowerRecoveryState>,
 }
 
 impl RecordingManager {
@@ -104,6 +202,8 @@ impl RecordingManager {
             tools,
             coordination_lock: Mutex::new(()),
             next_generation: AtomicU64::new(1),
+            automatic_segments: Mutex::new(Vec::new()),
+            power_recovery: Mutex::new(PowerRecoveryState::default()),
         }
     }
 
@@ -135,6 +235,12 @@ impl RecordingManager {
                 let sink = AppEventSink(event_app.clone());
                 if let Err(error) = manager.handle_native_event(generation, &sink, event) {
                     eprintln!("[whosaid] 无法处理原生录音事件：{error}");
+                }
+                while let Some(segment) = manager.take_automatic_segment() {
+                    let automatic_app = event_app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        finalize_automatic_segment(automatic_app, segment).await;
+                    });
                 }
             }
         });
@@ -172,6 +278,7 @@ impl RecordingManager {
                 session_dir: session.session_dir.clone(),
                 stop_waiter: None,
                 protocol_error: None,
+                automatic_stop: None,
             });
             (generation, inner.state.snapshot(), session.session_dir)
         };
@@ -252,15 +359,51 @@ impl RecordingManager {
         sink: &dyn StateEventSink,
         event: NativeEvent,
     ) -> Result<(), RecordingError> {
+        if let NativeEvent::AudioLevel {
+            source,
+            peak,
+            sampled_at,
+        } = event
+        {
+            let inner = self.inner.lock().unwrap();
+            if Self::is_current(&inner, generation)
+                && inner.state.snapshot().phase == RecordingPhase::Recording
+                && peak.is_finite()
+                && (0.0..=1.0).contains(&peak)
+                && sampled_at.is_finite()
+            {
+                sink.emit_level(AudioLevel {
+                    source,
+                    peak,
+                    sampled_at,
+                });
+            }
+            return Ok(());
+        }
         if let NativeEvent::ProtocolError { message } = event {
             return self.handle_protocol_error(generation, sink, message);
+        }
+        if let NativeEvent::Suspending { reason } = event {
+            let snapshot = {
+                let mut inner = self.inner.lock().unwrap();
+                if !Self::is_current(&inner, generation) {
+                    return Ok(());
+                }
+                inner.state.apply(NativeEvent::Suspending { reason })?;
+                if let Some(active) = inner.active.as_mut() {
+                    active.automatic_stop = Some(reason);
+                }
+                self.power_recovery.lock().unwrap().note_suspending(reason);
+                inner.state.snapshot()
+            };
+            return sink.emit(snapshot);
         }
 
         let is_terminal = matches!(
             event,
             NativeEvent::Stopped { .. } | NativeEvent::FatalError { .. }
         );
-        let (snapshot, waiter, outcome) = {
+        let (snapshot, waiter, outcome, automatic_segment) = {
             let mut inner = self.inner.lock().unwrap();
             if !Self::is_current(&inner, generation) {
                 return Ok(());
@@ -272,6 +415,9 @@ impl RecordingManager {
             let terminal_session = is_terminal
                 .then(|| inner.active.as_ref().cloned())
                 .flatten();
+            let automatic_reason = terminal_session
+                .as_ref()
+                .and_then(|active| active.automatic_stop);
             let native_outcome = match &event {
                 NativeEvent::Stopped {
                     session_dir,
@@ -302,10 +448,24 @@ impl RecordingManager {
             } else {
                 None
             };
-            (snapshot, waiter, native_outcome)
+            let automatic_segment = if waiter.is_none() {
+                match (&native_outcome, automatic_reason) {
+                    (Some(Ok(tracks)), Some(reason)) => Some(AutomaticSegment {
+                        tracks: tracks.clone(),
+                        reason,
+                    }),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            (snapshot, waiter, native_outcome, automatic_segment)
         };
 
         let emit_result = sink.emit(snapshot);
+        if let Some(segment) = automatic_segment {
+            self.automatic_segments.lock().unwrap().push(segment);
+        }
         if let (Some(waiter), Some(outcome)) = (waiter, outcome) {
             let outcome = emit_result
                 .as_ref()
@@ -314,6 +474,37 @@ impl RecordingManager {
             let _ = waiter.send(outcome);
         }
         emit_result
+    }
+
+    pub(crate) fn watch_power_events(&self, app: &AppHandle) -> Result<(), RecordingError> {
+        let (sender, receiver) = mpsc::channel();
+        self.native.watch_power_events(sender)?;
+        let power_app = app.clone();
+        std::thread::spawn(move || {
+            while let Ok(event) = receiver.recv() {
+                let manager = power_app.state::<RecordingManager>();
+                if manager
+                    .power_recovery
+                    .lock()
+                    .unwrap()
+                    .note_power_event(event)
+                {
+                    if let Err(error) = manager.start(&power_app) {
+                        eprintln!("[whosaid] 屏幕恢复后无法开始下一段录音：{error}");
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn take_automatic_segment(&self) -> Option<AutomaticSegment> {
+        let mut segments = self.automatic_segments.lock().unwrap();
+        if segments.is_empty() {
+            None
+        } else {
+            Some(segments.remove(0))
+        }
     }
 
     fn handle_protocol_error(
@@ -625,6 +816,47 @@ pub async fn stop_recording(
     }
 }
 
+async fn finalize_automatic_segment(app: AppHandle, segment: AutomaticSegment) {
+    let AutomaticSegment {
+        tracks,
+        reason: _reason,
+    } = segment;
+    let sink = AppEventSink(app.clone());
+    let manager = app.state::<RecordingManager>();
+    if let Err(error) = manager.begin_mixing(&sink) {
+        manager.fail_mixing(&sink, format!("休眠前保存录音失败：{error}"));
+        return;
+    }
+
+    let mix_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        mix_app.state::<RecordingManager>().mix_tracks(tracks)
+    })
+    .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            manager.fail_mixing(&sink, format!("休眠前保存录音失败：{error}"));
+            return;
+        }
+    };
+    match result {
+        Ok(result) => {
+            if let Err(error) = manager.finish_mixing(&sink, result.final_path) {
+                manager.fail_mixing(&sink, format!("休眠前保存录音失败：{error}"));
+                return;
+            }
+            let should_resume = manager.power_recovery.lock().unwrap().note_segment_saved();
+            if should_resume {
+                if let Err(error) = manager.start(&app) {
+                    eprintln!("[whosaid] 屏幕恢复后无法开始下一段录音：{error}");
+                }
+            }
+        }
+        Err(error) => manager.fail_mixing(&sink, error),
+    }
+}
+
 #[tauri::command]
 pub fn get_recording_state(manager: State<'_, RecordingManager>) -> RecordingSnapshot {
     manager.snapshot()
@@ -738,6 +970,27 @@ mod tests {
         assert!(should_block_close(&RecordingPhase::Failed, true));
     }
 
+    #[test]
+    fn display_sleep_resumes_only_after_save_and_wake() {
+        let mut recovery = PowerRecoveryState::default();
+        recovery.note_suspending(SleepReason::DisplaySleep);
+
+        assert!(!recovery.note_segment_saved());
+        assert!(recovery.note_power_event(PowerEvent::DisplayWake));
+        assert!(!recovery.cycle_active);
+    }
+
+    #[test]
+    fn system_sleep_cancels_display_sleep_resume() {
+        let mut recovery = PowerRecoveryState::default();
+        recovery.note_suspending(SleepReason::DisplaySleep);
+
+        assert!(!recovery.note_power_event(PowerEvent::SystemSleep));
+        assert!(!recovery.note_segment_saved());
+        assert!(!recovery.note_power_event(PowerEvent::SystemWake));
+        assert!(!recovery.cycle_active);
+    }
+
     struct MockNative {
         stop_calls: AtomicUsize,
         stop_fails: AtomicBool,
@@ -785,10 +1038,14 @@ mod tests {
     #[derive(Default)]
     struct TestSink {
         snapshots: Mutex<Vec<RecordingSnapshot>>,
+        levels: Mutex<Vec<AudioLevel>>,
         fail: AtomicBool,
     }
 
     impl StateEventSink for TestSink {
+        fn emit_level(&self, level: AudioLevel) {
+            self.levels.lock().unwrap().push(level);
+        }
         fn emit(&self, snapshot: RecordingSnapshot) -> Result<(), RecordingError> {
             if self.fail.load(Ordering::Relaxed) {
                 return Err(RecordingError::Event("测试事件失败".into()));
@@ -819,6 +1076,32 @@ mod tests {
             .handle_native_event(generation, sink, NativeEvent::Recording { started_at: 1.0 })
             .unwrap();
         generation
+    }
+
+    #[test]
+    fn waveform_is_transient_and_ignores_stale_or_stopping_sessions() {
+        let (manager, _, sink) = manager();
+        let generation = activate(&manager, &sink);
+        let before = sink.snapshots.lock().unwrap().len();
+        let event = || NativeEvent::AudioLevel {
+            source: state::AudioSource::Microphone,
+            peak: 0.5,
+            sampled_at: 1000.0,
+        };
+        manager
+            .handle_native_event(generation + 1, &sink, event())
+            .unwrap();
+        assert!(sink.levels.lock().unwrap().is_empty());
+        manager
+            .handle_native_event(generation, &sink, event())
+            .unwrap();
+        assert_eq!(sink.levels.lock().unwrap().len(), 1);
+        assert_eq!(sink.snapshots.lock().unwrap().len(), before);
+        manager.inner.lock().unwrap().state.begin_stop().unwrap();
+        manager
+            .handle_native_event(generation, &sink, event())
+            .unwrap();
+        assert_eq!(sink.levels.lock().unwrap().len(), 1);
     }
 
     fn persist_active_manifest(manager: &RecordingManager) -> (String, PathBuf) {
@@ -987,6 +1270,41 @@ mod tests {
             receiver.recv().unwrap().unwrap_err(),
             RecordingError::Native("系统中断".into())
         );
+    }
+
+    #[test]
+    fn sleep_terminal_is_queued_for_automatic_save() {
+        let (manager, _, sink) = manager();
+        let generation = activate(&manager, &sink);
+        let (_, session_dir) = persist_active_manifest(&manager);
+        let system_track = session_dir.join("system.caf");
+
+        manager
+            .handle_native_event(
+                generation,
+                &sink,
+                NativeEvent::Suspending {
+                    reason: SleepReason::DisplaySleep,
+                },
+            )
+            .unwrap();
+        manager
+            .handle_native_event(
+                generation,
+                &sink,
+                NativeEvent::Stopped {
+                    session_dir: session_dir.to_string_lossy().into_owned(),
+                    system_track: system_track.to_string_lossy().into_owned(),
+                    microphone_track: None,
+                },
+            )
+            .unwrap();
+
+        let queued = manager.take_automatic_segment().unwrap();
+        assert_eq!(queued.reason, SleepReason::DisplaySleep);
+        assert_eq!(queued.tracks.system_track, system_track.to_string_lossy());
+        assert!(manager.inner.lock().unwrap().active.is_none());
+        assert_eq!(manager.snapshot().phase, RecordingPhase::Stopping);
     }
 
     #[test]

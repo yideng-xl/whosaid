@@ -42,7 +42,7 @@ Windows 使用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)，
 
 > Windows 首版支持 Windows 10/11 x64，默认使用 CPU；NVIDIA CUDA 加速放在后续阶段。
 
-下载：[whosaid v0.1.0](https://github.com/yideng-xl/whosaid/releases/tag/v0.1.0)
+下载：[whosaid v0.2.0](https://github.com/yideng-xl/whosaid/releases/tag/v0.2.0) · [更新说明](docs/releases/v0.2.0.md)
 
 ## macOS 直接录音
 
@@ -56,6 +56,10 @@ Windows 使用 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)，
 首次使用需要允许 macOS 的系统录音权限；如需录入自己的发言，还要允许麦克风权限。
 授权后系统可能要求退出并重新打开 whosaid，按页面提示操作即可。whosaid 通过系统录音
 接口采集声音，**不录制或保存屏幕画面**。
+
+录音页分别显示电脑声音和麦克风最近约 6 秒的实时峰值波形及 dBFS 音量。波形来自实际写入音轨的音频，不影响原始录音；可单独暂停波形显示，录音仍会继续。停止、断流或重新开始时清空旧波形。波形仅用于观察收声情况，保存后仍需试听确认。
+
+录音页右上角的「波形悬浮窗」开关每次启动默认关闭。开启后，仅在录音期间显示可拖动的 230 × 60 圆角胶囊悬浮条，只保留时间和上下两路波形（上方电脑声音、下方麦克风），不抢键盘焦点。双击悬浮条可唤起主窗口（已最小化时恢复显示）。停止录音自动隐藏，继续下一段时重新显示；主页面关闭开关只隐藏悬浮条，不停止录音、不触发转写。
 
 点击停止后，应用会先保存并合成 `.m4a`，并展示播放器、可编辑的录音名称和保存路径。
 可以连续录制多段，再逐条试听决定是否转写。双轨合成会用系统声作为参考，降低腾讯会议
