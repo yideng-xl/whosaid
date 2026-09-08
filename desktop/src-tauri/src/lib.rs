@@ -18,8 +18,8 @@ struct AppCapabilities {
     direct_recording: bool,
 }
 
-fn direct_recording_supported(is_macos: bool, is_arm64: bool) -> bool {
-    is_macos && is_arm64
+fn direct_recording_supported(is_macos: bool, is_arm64: bool, is_windows_x64: bool) -> bool {
+    (is_macos && is_arm64) || is_windows_x64
 }
 
 fn app_capabilities() -> AppCapabilities {
@@ -27,6 +27,7 @@ fn app_capabilities() -> AppCapabilities {
         direct_recording: direct_recording_supported(
             cfg!(target_os = "macos"),
             cfg!(target_arch = "aarch64"),
+            cfg!(all(target_os = "windows", target_arch = "x86_64")),
         ),
     }
 }
@@ -522,17 +523,19 @@ mod path_tests {
 
     #[test]
     fn direct_recording_requires_macos_on_arm64() {
-        assert!(direct_recording_supported(true, true));
-        assert!(!direct_recording_supported(true, false));
-        assert!(!direct_recording_supported(false, true));
-        assert!(!direct_recording_supported(false, false));
+        assert!(direct_recording_supported(true, true, false));
+        assert!(!direct_recording_supported(true, false, false));
+        assert!(!direct_recording_supported(false, true, false));
+        assert!(!direct_recording_supported(false, false, false));
+        assert!(direct_recording_supported(false, false, true));
     }
 
     #[test]
     fn compiled_recording_capability_matches_target() {
         assert_eq!(
             app_capabilities().direct_recording,
-            cfg!(target_os = "macos") && cfg!(target_arch = "aarch64")
+            (cfg!(target_os = "macos") && cfg!(target_arch = "aarch64"))
+                || cfg!(all(target_os = "windows", target_arch = "x86_64"))
         );
     }
 

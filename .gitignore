@@ -5,6 +5,11 @@ __pycache__/
 *.transcript.json
 *.diarization.json
 config.json
+vocabulary.json
+vocabulary*.json.bak*
+recordings/
+jobs/
+personal-data/
 .superpowers/
 .worktrees/
 

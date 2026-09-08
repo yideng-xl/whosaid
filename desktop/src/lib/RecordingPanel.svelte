@@ -217,7 +217,7 @@
       <div class="permission" role="alert">
         <div>
           <strong>麦克风未授权，你的发言不会被录下</strong>
-          <p>请在系统设置的「隐私与安全性 → 麦克风」中开启 whosaid。当前录音请先停止并保存，授权后开始新的一段。</p>
+          <p>请在系统的麦克风隐私设置中允许 whosaid 访问。Windows 还需开启「允许桌面应用访问麦克风」。当前录音请先停止并保存，授权后开始新的一段。</p>
           <button onclick={() => Promise.resolve(onOpenMicrophoneSettings()).catch(() => {})}>打开麦克风设置</button>
         </div>
       </div>

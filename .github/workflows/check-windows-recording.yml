@@ -1,0 +1,33 @@
+name: Check Windows Recording
+on:
+  push:
+    branches: [feature/windows-recording]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Compile WASAPI bridge
+        shell: cmd
+        run: cl /nologo /c /std:c++17 /EHsc /utf-8 desktop\src-tauri\native\recorder\RecorderBridgeWindows.cpp /Fo:%TEMP%\recorder.obj
+      - name: Test CAF timeline
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc desktop\src-tauri\native\recorder\tests\WindowsTimelineTests.cpp /Fe:%TEMP%\timeline.exe
+          if errorlevel 1 exit /b 1
+          %TEMP%\timeline.exe %TEMP%\windows-timeline.caf
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: desktop
+      - run: npm run build
+        working-directory: desktop
+      - run: cargo test
+        working-directory: desktop/src-tauri

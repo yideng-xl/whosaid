@@ -77,11 +77,15 @@ jobs:
           desktop/src-tauri/ffmpeg/ffprobe -version | sed -n '1p'
 
       - name: 后端测试
+        # 模型、个人词库及录音不得作为源码或资源发布。
         env:
           PYTHONPATH: ${{ github.workspace }}/core
         run: >-
           desktop/src-tauri/python/bin/python3 -m pytest
           core/tests -q -m "not slow"
+
+      - name: 禁止打包个人词库与录音
+        run: desktop/src-tauri/python/bin/python3 desktop/scripts/check-private-data.py
 
       - name: 前端测试
         working-directory: desktop

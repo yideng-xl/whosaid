@@ -24,5 +24,20 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=Foundation");
     }
 
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        cc::Build::new()
+            .cpp(true)
+            .file("native/recorder/RecorderBridgeWindows.cpp")
+            .flag("/std:c++17")
+            .flag("/EHsc")
+            .flag("/utf-8")
+            .compile("whosaid_recorder");
+        for file in ["RecorderBridgeWindows.cpp", "RecorderBridge.h", "WindowsTimeline.h"] {
+            println!("cargo:rerun-if-changed=native/recorder/{file}");
+        }
+        for library in ["ole32", "uuid", "user32", "shell32"] {
+            println!("cargo:rustc-link-lib={library}");
+        }
+    }
     tauri_build::build()
 }

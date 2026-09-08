@@ -9,7 +9,13 @@
         "transparent": false
       }
     ],
-    "macOSPrivateApi": false
+    "macOSPrivateApi": false,
+    "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/recordings/*.m4a"]
+      }
+    }
   },
   "bundle": {
     "targets": [

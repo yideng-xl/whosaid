@@ -49,6 +49,9 @@ jobs:
           & "desktop/src-tauri/ffmpeg/ffmpeg.exe" -version
           & "desktop/src-tauri/ffmpeg/ffprobe.exe" -version
 
+      - name: 禁止打包个人词库与录音
+        run: desktop/src-tauri/python/python.exe desktop/scripts/check-private-data.py
+
       - name: 后端测试
         shell: pwsh
         env:

@@ -40,7 +40,7 @@ fn parse_permission_snapshot(json: &[u8]) -> Result<PermissionSnapshot, Recordin
         .map_err(|error| RecordingError::InvalidNativeEvent(error.to_string()))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod platform {
     use std::ffi::{c_char, c_void, CStr, CString};
     use std::path::Path;
@@ -339,7 +339,7 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod platform {
     use std::path::Path;
     use std::sync::mpsc::Sender;
