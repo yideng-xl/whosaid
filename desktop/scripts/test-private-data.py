@@ -9,6 +9,11 @@ spec.loader.exec_module(privacy)
 
 
 class PrivacyTests(unittest.TestCase):
+    def test_recognizes_renamed_vocabulary(self):
+        self.assertTrue(privacy.vocabulary_payload({"version": 2, "libraries": []}))
+        self.assertTrue(privacy.vocabulary_payload({"version": 1, "entries": []}))
+        self.assertFalse(privacy.vocabulary_payload({"version": "0.2.0", "name": "desktop"}))
+
     def test_blocks_runtime_files(self):
         for path in ["vocabulary.json", "core/vocabulary.json", "config.json",
                      "recordings/meeting.m4a", "data/.incomplete/id/system.caf",

@@ -1,5 +1,6 @@
 """Fail packaging if local user data is tracked or present in bundled resources."""
 from pathlib import Path
+import json
 import subprocess
 import sys
 
@@ -15,10 +16,27 @@ def private_path(path: str) -> bool:
             path.endswith((".transcript.json", ".diarization.json")))
 
 
+def vocabulary_payload(value: object) -> bool:
+    return (isinstance(value, dict) and
+            ((value.get("version") == 2 and isinstance(value.get("libraries"), list)) or
+             (value.get("version") == 1 and isinstance(value.get("entries"), list))))
+
+
 def check() -> None:
     tracked = subprocess.check_output(
         ["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
     bad = [p for p in tracked if p and private_path(p)]
+    for relative in tracked:
+        if not relative.endswith(".json"):
+            continue
+        path = ROOT / relative
+        if not path.is_file():
+            continue
+        try:
+            if vocabulary_payload(json.loads(path.read_text(encoding="utf-8"))):
+                bad.append(relative)
+        except (UnicodeError, json.JSONDecodeError):
+            pass
     # Only application source is allowed in the core resource tree, never data dirs.
     core = ROOT / "desktop/src-tauri/core"
     if core.exists():
