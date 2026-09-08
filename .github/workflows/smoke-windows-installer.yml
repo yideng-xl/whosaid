@@ -139,3 +139,40 @@ jobs:
               Stop-Process -Id $Service.Id -Force
             }
           }
+
+          # 此处只启动本次 CI 安装的应用，不采集音频、不下载模型。
+          $Desktop = Start-Process -FilePath $AppExe.FullName -PassThru
+          $Healthy = $false
+          try {
+            for ($Attempt = 0; $Attempt -lt 120; $Attempt++) {
+              Start-Sleep -Milliseconds 500
+              $Desktop.Refresh()
+              if ($Desktop.HasExited) { throw "桌面应用启动后退出：$($Desktop.ExitCode)" }
+              $Children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($Desktop.Id)" |
+                Where-Object { $_.Name -eq "python.exe" })
+              foreach ($Child in $Children) {
+                $Listeners = @(Get-NetTCPConnection -State Listen -OwningProcess $Child.ProcessId -ErrorAction SilentlyContinue)
+                foreach ($Listener in $Listeners) {
+                  try {
+                    $Base = "http://127.0.0.1:$($Listener.LocalPort)"
+                    $Jobs = Invoke-WebRequest "$Base/jobs" -TimeoutSec 2
+                    $Vocabulary = Invoke-WebRequest "$Base/vocabulary" -TimeoutSec 2
+                    if ($Jobs.Content.Trim() -ne "[]" -or $Vocabulary.Content.Trim() -ne "[]") {
+                      throw "新安装的任务或词库不为空"
+                    }
+                    if ($Desktop.MainWindowHandle -ne 0) { $Healthy = $true }
+                  }
+                  catch { Write-Host "等待桌面服务就绪" }
+                }
+              }
+              if ($Healthy) { break }
+            }
+            if (-not $Healthy) { throw "桌面窗口、服务或空词库验收失败" }
+            Write-Host "installed desktop + service + empty vocabulary: ok"
+          }
+          finally {
+            if (-not $Desktop.HasExited) {
+              # 只结束 CI 自己启动的进程树；测试没有开始任何录音。
+              taskkill.exe /PID $Desktop.Id /T /F | Out-Null
+            }
+          }
