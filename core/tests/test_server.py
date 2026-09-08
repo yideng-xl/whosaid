@@ -462,18 +462,18 @@ def test_vocabulary_crud_endpoints(tmp_path):
     c = make_client(tmp_path, vocabulary=vocabulary)
 
     created = c.post("/vocabulary", json={
-        "name": "姓名", "scope": "general", "terms": ["许磊", "张三"]
+        "name": "姓名", "scope": "general", "terms": ["赵甲", "张三"]
     })
     assert created.status_code == 200
     entry = created.json()
     assert c.get("/vocabulary").json() == [entry]
 
     updated = c.put(f"/vocabulary/{entry['id']}", json={
-        "name": "常用姓名", "scope": "general", "terms": ["许磊", "李四"],
+        "name": "常用姓名", "scope": "general", "terms": ["赵甲", "李四"],
     })
     assert updated.status_code == 200
     assert updated.json()["name"] == "常用姓名"
-    assert updated.json()["terms"] == ["许磊", "李四"]
+    assert updated.json()["terms"] == ["赵甲", "李四"]
 
     assert c.delete(f"/vocabulary/{entry['id']}").status_code == 200
     assert c.get("/vocabulary").json() == []
@@ -485,15 +485,15 @@ def test_vocabulary_endpoints_validate_and_report_missing_entries(tmp_path):
     assert c.post("/vocabulary", json={
         "name": "x", "scope": "unknown", "terms": []
     }).status_code == 422
-    payload = {"name": "集管", "scope": "specialized", "terms": ["端到端探测"]}
+    payload = {"name": "产品甲", "scope": "specialized", "terms": ["示例探测"]}
     assert c.put("/vocabulary/missing", json=payload).status_code == 404
     assert c.delete("/vocabulary/missing").status_code == 404
 
 
 def test_job_submission_uses_selected_vocabulary_snapshot(tmp_path):
     vocabulary = VocabularyStore(tmp_path / "vocabulary.json")
-    vocabulary.add("姓名", "general", ["许磊"])
-    product = vocabulary.add("集管", "specialized", ["端到端探测"])
+    vocabulary.add("姓名", "general", ["赵甲"])
+    product = vocabulary.add("产品甲", "specialized", ["示例探测"])
     c = make_client(tmp_path, vocabulary=vocabulary)
     response = c.post("/jobs", json={
         "audio_path": "/x/a.m4a",

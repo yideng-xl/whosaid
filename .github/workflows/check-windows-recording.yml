@@ -29,5 +29,13 @@ jobs:
         working-directory: desktop
       - run: npm run build
         working-directory: desktop
+      - name: Prepare test-only resource placeholders (not an installer)
+        shell: pwsh
+        run: |
+          foreach ($Name in @("python", "core", "ffmpeg")) {
+            $Dir = "desktop/src-tauri/$Name"
+            New-Item -ItemType Directory -Force $Dir | Out-Null
+            "Unit-test placeholder only" | Set-Content "$Dir/test-placeholder.txt"
+          }
       - run: cargo test
         working-directory: desktop/src-tauri

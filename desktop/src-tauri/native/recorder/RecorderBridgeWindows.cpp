@@ -46,7 +46,7 @@ std::string quoted(const std::string& s) {
 struct AudioError : std::runtime_error {
     HRESULT code;
     explicit AudioError(HRESULT hr) : std::runtime_error([hr] {
-        std::ostringstream s; s << "WASAPI error 0x" << std::hex << uint32_t(hr); return s.str();
+        std::ostringstream s; s << "声音设备无法采集，请检查默认设备、麦克风隐私权限和其他应用的独占设置（WASAPI 0x" << std::hex << uint32_t(hr) << "）"; return s.str();
     }()), code(hr) {}
 };
 void check(HRESULT hr) {
@@ -163,7 +163,7 @@ void record(std::filesystem::path dir, WhosaidRecorderCallback callback, void* c
             }
             if (!streams[0]) {
                 if (!unavailable_since) unavailable_since = elapsed;
-                if (elapsed - unavailable_since > 100000000) throw std::runtime_error("System audio unavailable for 10 seconds; recording retained for recovery");
+                if (elapsed - unavailable_since > 100000000) throw std::runtime_error("电脑声音连续 10 秒无法恢复，已结束采集并保留音轨，请恢复保存后检查输出设备");
             } else unavailable_since = 0;
             if (elapsed - last_level >= 1000000) {
                 last_level = elapsed;

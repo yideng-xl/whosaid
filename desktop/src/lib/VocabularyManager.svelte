@@ -208,7 +208,7 @@
       </div>
       <label>
         <span class="label-title">词库名称</span>
-        <input bind:value={name} maxlength="80" placeholder="例如：姓名、集管、网管" />
+        <input bind:value={name} maxlength="80" placeholder="例如：姓名、产品甲、产品乙" />
       </label>
       <fieldset>
         <legend>词库类型</legend>
@@ -224,7 +224,7 @@
       <label>
         <span class="label-title">词库内容 <small>{termCount} 个词</small></span>
         <span class="field-help">每个词之间用逗号、顿号或换行隔开。</span>
-        <textarea bind:value={termsText} rows="9" placeholder="例如：端到端探测、终端IP核查、OMS"></textarea>
+        <textarea bind:value={termsText} rows="9" placeholder="例如：示例探测、示例词46、示例词190"></textarea>
       </label>
       <div class="modal-actions">
         <button class="secondary" disabled={saving} onclick={closeEditor}>取消</button>

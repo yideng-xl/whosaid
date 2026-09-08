@@ -40,11 +40,11 @@ def test_idempotency_key_roundtrips_and_old_job_defaults_to_none(tmp_path):
 def test_transcription_prompt_roundtrips_and_old_job_defaults_to_none(tmp_path):
     store = JobStore(str(tmp_path))
     job = _done_job()
-    job.transcription_prompt = "姓名：许磊。"
+    job.transcription_prompt = "姓名：赵甲。"
     job.vocabulary_library_ids = ["names", "jiguan"]
     store.save(job)
     loaded = JobStore(str(tmp_path)).load_all()[0]
-    assert loaded.transcription_prompt == "姓名：许磊。"
+    assert loaded.transcription_prompt == "姓名：赵甲。"
     assert loaded.vocabulary_library_ids == ["names", "jiguan"]
 
     import json

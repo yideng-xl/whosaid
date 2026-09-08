@@ -200,7 +200,7 @@ describe("api", () => {
 
   it("词库 API 支持查询、添加、编辑和删除", async () => {
     const entry = {
-      id: "entry-1", name: "姓名", scope: "general", terms: ["许磊"],
+      id: "entry-1", name: "姓名", scope: "general", terms: ["赵甲"],
       created_at: 1, updated_at: 1,
     };
     const fetchMock = vi.fn()
@@ -210,7 +210,7 @@ describe("api", () => {
       .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true }) });
     vi.stubGlobal("fetch", fetchMock);
     const api = createApi(4444);
-    const input = { name: "姓名", scope: "general" as const, terms: ["许磊"] };
+    const input = { name: "姓名", scope: "general" as const, terms: ["赵甲"] };
 
     expect(await api.listVocabulary()).toEqual([entry]);
     await api.addVocabulary(input);

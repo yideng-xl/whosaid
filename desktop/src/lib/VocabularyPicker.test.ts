@@ -3,9 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 import VocabularyPicker, { defaultVocabularySelection } from "./VocabularyPicker.svelte";
 
 const libraries = [
-  { id: "names", name: "姓名", scope: "general" as const, terms: ["许磊"], created_at: 1, updated_at: 1 },
+  { id: "names", name: "姓名", scope: "general" as const, terms: ["赵甲"], created_at: 1, updated_at: 1 },
   { id: "orgs", name: "组织", scope: "general" as const, terms: ["产品部"], created_at: 1, updated_at: 1 },
-  { id: "jiguan", name: "集管", scope: "specialized" as const, terms: ["OMS"], created_at: 1, updated_at: 1 },
+  { id: "jiguan", name: "产品甲", scope: "specialized" as const, terms: ["示例词190"], created_at: 1, updated_at: 1 },
 ];
 
 describe("VocabularyPicker", () => {
@@ -24,7 +24,7 @@ describe("VocabularyPicker", () => {
       onCancel: vi.fn(),
     });
     const names = screen.getByRole("checkbox", { name: /姓名/ }) as HTMLInputElement;
-    const product = screen.getByRole("checkbox", { name: /集管/ }) as HTMLInputElement;
+    const product = screen.getByRole("checkbox", { name: /产品甲/ }) as HTMLInputElement;
     expect(names.checked).toBe(true);
     expect(product.checked).toBe(false);
     await fireEvent.click(product);

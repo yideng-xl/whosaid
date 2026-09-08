@@ -15,7 +15,7 @@ $PythonUrl = "https://github.com/astral-sh/python-build-standalone/releases/down
 
 # 固定版本，避免浮动下载地址在构建当天悄悄更换二进制。
 $FfmpegAsset = "ffmpeg-8.0.1-essentials_build.zip"
-$FfmpegUrl = "https://www.gyan.dev/ffmpeg/builds/packages/$FfmpegAsset"
+$FfmpegUrl = "https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/$FfmpegAsset"
 
 if (-not (Test-Path $Requirements -PathType Leaf)) {
   throw "缺少 Windows 依赖锁文件：$Requirements"

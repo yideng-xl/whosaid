@@ -74,7 +74,11 @@ export function reduceRecordingState(
     next.system_audio === "active" &&
     microphoneDegraded &&
     ["recording", "stopping"].includes(next.phase);
-  const warning = showMicrophoneWarning
+  const systemDegraded = ["unavailable", "denied", "interrupted"].includes(next.system_audio)
+    && next.phase === "recording";
+  const warning = systemDegraded
+    ? "电脑声音暂时不可用，正在尝试重新连接；这段时间的电脑声音可能缺失，请检查输出设备。"
+    : showMicrophoneWarning
     ? next.microphone === "interrupted"
       ? MICROPHONE_RECONNECTING_WARNING
       : MICROPHONE_WARNING
